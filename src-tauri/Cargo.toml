@@ -1,0 +1,29 @@
+[package]
+name = "northstar-trader"
+version = "0.1.0"
+description = "Private TradeStation futures trading desktop client"
+authors = ["Northstar"]
+edition = "2021"
+
+[lib]
+name = "northstar_trader_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "rt-multi-thread"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+open = "5"
+futures-util = "0.3"
+tracing = "0.1"

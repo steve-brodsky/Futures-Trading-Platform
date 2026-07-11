@@ -1,0 +1,132 @@
+- main [ref=f2e3]:
+  - generic [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - generic [ref=f2e10]: NORTHSTAR
+      - generic [ref=f2e11]: TRADER
+    - generic [ref=f2e12]:
+      - strong [ref=f2e13]: MCLU26
+      - generic [ref=f2e14]: "68.42"
+      - generic [ref=f2e15]: +0.42%
+    - button "SIM" [ref=f2e17] [cursor=pointer]
+    - button "DEMO FEED" [ref=f2e21] [cursor=pointer]
+    - button "Notifications" [ref=f2e27] [cursor=pointer]
+    - button "Settings" [ref=f2e31] [cursor=pointer]
+  - navigation "Chart toolbar" [ref=f2e35]:
+    - button "MCLU26 NYMEX" [ref=f2e36] [cursor=pointer]:
+      - strong [ref=f2e40]: MCLU26
+      - generic [ref=f2e41]: NYMEX
+    - generic [ref=f2e45]:
+      - button "1m" [ref=f2e46] [cursor=pointer]
+      - button "5m" [ref=f2e47] [cursor=pointer]
+      - button "15m" [ref=f2e48] [cursor=pointer]
+      - button "30m" [ref=f2e49] [cursor=pointer]
+      - button "1h" [ref=f2e50] [cursor=pointer]
+      - button "4h" [ref=f2e51] [cursor=pointer]
+      - button "D" [ref=f2e52] [cursor=pointer]
+      - button "W" [ref=f2e53] [cursor=pointer]
+      - button "M" [ref=f2e54] [cursor=pointer]
+    - generic [ref=f2e56]:
+      - button "Candlestick chart" [ref=f2e57] [cursor=pointer]
+      - button "Line chart" [ref=f2e60] [cursor=pointer]
+      - button "Area chart" [ref=f2e64] [cursor=pointer]
+    - button "Indicators" [ref=f2e68] [cursor=pointer]
+    - button "Alert" [ref=f2e70] [cursor=pointer]
+    - button "Undo" [ref=f2e75] [cursor=pointer]
+    - button "Reset chart" [ref=f2e79] [cursor=pointer]
+    - button "Toggle bottom panel" [ref=f2e83] [cursor=pointer]
+    - button "Toggle right panel" [ref=f2e86] [cursor=pointer]
+    - button "Fullscreen" [ref=f2e89] [cursor=pointer]
+  - generic [ref=f2e95]:
+    - complementary "Drawing tools" [ref=f2e96]:
+      - button "Cursor" [ref=f2e97] [cursor=pointer]
+      - button "Crosshair" [ref=f2e100] [cursor=pointer]
+      - button "Trend line" [ref=f2e103] [cursor=pointer]
+      - button "Horizontal line" [ref=f2e107] [cursor=pointer]
+      - button "Ray" [ref=f2e109] [cursor=pointer]
+      - button "Rectangle" [ref=f2e113] [cursor=pointer]
+      - button "Fibonacci retracement" [ref=f2e116] [cursor=pointer]
+      - button "Text" [ref=f2e121] [cursor=pointer]
+      - button "Measure" [ref=f2e127] [cursor=pointer]
+      - button "Show drawings" [ref=f2e131] [cursor=pointer]
+      - button "Delete drawings" [ref=f2e135] [cursor=pointer]
+    - region "MCLU26 chart" [ref=f2e139]:
+      - generic:
+        - generic: NYMEX
+        - strong: Micro WTI Crude Oil Sep 2026
+        - generic: ·
+        - generic: MCLU26
+        - generic:
+          - generic: O 6255.29
+          - generic: H 6255.67
+          - generic: L 6253.58
+          - generic: C 6254.77
+      - generic: MCLU26
+      - generic: ETH
+    - complementary [ref=f2e141]:
+      - generic [ref=f2e142]:
+        - button "Order" [ref=f2e143] [cursor=pointer]
+        - button "Watchlist" [ref=f2e144] [cursor=pointer]
+      - generic [ref=f2e145]:
+        - generic [ref=f2e146]:
+          - generic [ref=f2e147]: Symbol
+          - generic [ref=f2e148]: Last
+          - generic [ref=f2e149]: Chg%
+        - button "MESU26 CME 6,260.00 +0.42%" [ref=f2e150] [cursor=pointer]:
+          - generic [ref=f2e151]:
+            - strong [ref=f2e152]: MESU26
+            - generic [ref=f2e153]: CME
+          - generic [ref=f2e154]: 6,260.00
+          - emphasis [ref=f2e155]: +0.42%
+        - button "MNQU26 CME 23,048.50 -0.18%" [ref=f2e156] [cursor=pointer]:
+          - generic [ref=f2e157]:
+            - strong [ref=f2e158]: MNQU26
+            - generic [ref=f2e159]: CME
+          - generic [ref=f2e160]: 23,048.50
+          - emphasis [ref=f2e161]: "-0.18%"
+        - button "MCLU26 NYMEX 68.42 +0.42%" [ref=f2e162] [cursor=pointer]:
+          - generic [ref=f2e163]:
+            - strong [ref=f2e164]: MCLU26
+            - generic [ref=f2e165]: NYMEX
+          - generic [ref=f2e166]: "68.42"
+          - emphasis [ref=f2e167]: +0.42%
+        - button "MGCQ26 COMEX 3,478.20 +0.42%" [ref=f2e168] [cursor=pointer]:
+          - generic [ref=f2e169]:
+            - strong [ref=f2e170]: MGCQ26
+            - generic [ref=f2e171]: COMEX
+          - generic [ref=f2e172]: 3,478.20
+          - emphasis [ref=f2e173]: +0.42%
+        - button "MYMU26 CBOT 44,982.00 +0.42%" [ref=f2e174] [cursor=pointer]:
+          - generic [ref=f2e175]:
+            - strong [ref=f2e176]: MYMU26
+            - generic [ref=f2e177]: CBOT
+          - generic [ref=f2e178]: 44,982.00
+          - emphasis [ref=f2e179]: +0.42%
+    - generic [ref=f2e180]:
+      - navigation [ref=f2e181]:
+        - button "positions1" [ref=f2e182] [cursor=pointer]
+        - button "orders1" [ref=f2e183] [cursor=pointer]
+        - button "history" [ref=f2e184] [cursor=pointer]
+        - button "fills" [ref=f2e185] [cursor=pointer]
+        - button "balances" [ref=f2e186] [cursor=pointer]
+        - generic [ref=f2e187]: Market data active
+      - table [ref=f2e190]:
+        - rowgroup [ref=f2e191]:
+          - row [ref=f2e192]:
+            - columnheader "Symbol" [ref=f2e193]
+            - columnheader "Side" [ref=f2e194]
+            - columnheader "Qty" [ref=f2e195]
+            - columnheader "Avg price" [ref=f2e196]
+            - columnheader "Last" [ref=f2e197]
+            - columnheader "Unrealized P&L" [ref=f2e198]
+            - columnheader [ref=f2e199]
+        - rowgroup [ref=f2e200]:
+          - row [ref=f2e201]:
+            - cell [ref=f2e202]:
+              - strong [ref=f2e203]: MESU26
+            - cell "Long" [ref=f2e204]
+            - cell "2" [ref=f2e205]
+            - cell "6253.25" [ref=f2e206]
+            - cell "6260.00" [ref=f2e207]
+            - cell "+$67.50" [ref=f2e208]
+            - cell [ref=f2e209]:
+              - button "Close" [ref=f2e210] [cursor=pointer]

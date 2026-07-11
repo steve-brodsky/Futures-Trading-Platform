@@ -1,0 +1,143 @@
+- main [ref=f1e3]:
+  - generic [ref=f1e4]:
+    - generic [ref=f1e5]:
+      - generic [ref=f1e10]: NORTHSTAR
+      - generic [ref=f1e11]: TRADER
+    - generic [ref=f1e12]:
+      - strong [ref=f1e13]: MESU26
+      - generic [ref=f1e14]: 6,260.75
+      - generic [ref=f1e15]: +0.42%
+    - button "SIM" [ref=f1e17] [cursor=pointer]
+    - button "DEMO FEED" [ref=f1e21] [cursor=pointer]
+    - button "Notifications" [ref=f1e27] [cursor=pointer]
+    - button "Settings" [ref=f1e31] [cursor=pointer]
+  - navigation "Chart toolbar" [ref=f1e35]:
+    - button "MESU26 CME" [ref=f1e36] [cursor=pointer]:
+      - strong [ref=f1e40]: MESU26
+      - generic [ref=f1e41]: CME
+    - generic [ref=f1e45]:
+      - button "1m" [ref=f1e46] [cursor=pointer]
+      - button "5m" [ref=f1e47] [cursor=pointer]
+      - button "15m" [ref=f1e48] [cursor=pointer]
+      - button "30m" [ref=f1e49] [cursor=pointer]
+      - button "1h" [ref=f1e50] [cursor=pointer]
+      - button "4h" [ref=f1e51] [cursor=pointer]
+      - button "D" [ref=f1e52] [cursor=pointer]
+      - button "W" [ref=f1e53] [cursor=pointer]
+      - button "M" [ref=f1e54] [cursor=pointer]
+    - generic [ref=f1e56]:
+      - button "Candlestick chart" [ref=f1e57] [cursor=pointer]
+      - button "Line chart" [ref=f1e60] [cursor=pointer]
+      - button "Area chart" [ref=f1e64] [cursor=pointer]
+    - button "Indicators" [ref=f1e68] [cursor=pointer]
+    - button "Alert" [ref=f1e70] [cursor=pointer]
+    - button "Undo" [ref=f1e75] [cursor=pointer]
+    - button "Reset chart" [ref=f1e79] [cursor=pointer]
+    - button "Toggle bottom panel" [ref=f1e83] [cursor=pointer]
+    - button "Toggle right panel" [ref=f1e86] [cursor=pointer]
+    - button "Fullscreen" [ref=f1e89] [cursor=pointer]
+  - generic [ref=f1e95]:
+    - complementary "Drawing tools" [ref=f1e96]:
+      - button "Cursor" [ref=f1e97] [cursor=pointer]
+      - button "Crosshair" [ref=f1e100] [cursor=pointer]
+      - button "Trend line" [ref=f1e103] [cursor=pointer]
+      - button "Horizontal line" [ref=f1e107] [cursor=pointer]
+      - button "Ray" [ref=f1e109] [cursor=pointer]
+      - button "Rectangle" [ref=f1e113] [cursor=pointer]
+      - button "Fibonacci retracement" [ref=f1e116] [cursor=pointer]
+      - button "Text" [ref=f1e121] [cursor=pointer]
+      - button "Measure" [ref=f1e127] [cursor=pointer]
+      - button "Show drawings" [ref=f1e131] [cursor=pointer]
+      - button "Delete drawings" [ref=f1e135] [cursor=pointer]
+    - region "MESU26 chart" [ref=f1e139]:
+      - generic:
+        - generic: CME
+        - strong: Micro E-mini S&P 500 Sep 2026
+        - generic: ·
+        - generic: MESU26
+        - generic:
+          - generic: O 6255.29
+          - generic: H 6255.67
+          - generic: L 6253.58
+          - generic: C 6254.77
+      - table [ref=f1e142]:
+        - row [ref=f1e143]:
+          - cell
+          - cell [ref=f1e144]:
+            - link "Charting by TradingView" [ref=f1e148] [cursor=pointer]:
+              - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+          - cell [ref=f1e153]
+        - row [ref=f1e157]:
+          - cell
+          - cell [ref=f1e158]
+          - cell [ref=f1e162]
+      - generic: MESU26
+      - generic: ETH
+    - complementary [ref=f1e165]:
+      - generic [ref=f1e166]:
+        - button "Order" [ref=f1e167] [cursor=pointer]
+        - button "Watchlist" [active] [ref=f1e168] [cursor=pointer]
+      - generic [ref=f1e250]:
+        - generic [ref=f1e251]:
+          - generic [ref=f1e252]: Symbol
+          - generic [ref=f1e253]: Last
+          - generic [ref=f1e254]: Chg%
+        - button "MESU26 CME 6,260.75 +0.42%" [ref=f1e255] [cursor=pointer]:
+          - generic [ref=f1e256]:
+            - strong [ref=f1e257]: MESU26
+            - generic [ref=f1e258]: CME
+          - generic [ref=f1e259]: 6,260.75
+          - emphasis [ref=f1e260]: +0.42%
+        - button "MNQU26 CME 23,049.25 -0.18%" [ref=f1e261] [cursor=pointer]:
+          - generic [ref=f1e262]:
+            - strong [ref=f1e263]: MNQU26
+            - generic [ref=f1e264]: CME
+          - generic [ref=f1e265]: 23,049.25
+          - emphasis [ref=f1e266]: "-0.18%"
+        - button "MCLU26 NYMEX 68.42 +0.42%" [ref=f1e267] [cursor=pointer]:
+          - generic [ref=f1e268]:
+            - strong [ref=f1e269]: MCLU26
+            - generic [ref=f1e270]: NYMEX
+          - generic [ref=f1e271]: "68.42"
+          - emphasis [ref=f1e272]: +0.42%
+        - button "MGCQ26 COMEX 3,477.70 +0.42%" [ref=f1e273] [cursor=pointer]:
+          - generic [ref=f1e274]:
+            - strong [ref=f1e275]: MGCQ26
+            - generic [ref=f1e276]: COMEX
+          - generic [ref=f1e277]: 3,477.70
+          - emphasis [ref=f1e278]: +0.42%
+        - button "MYMU26 CBOT 44,982.00 +0.42%" [ref=f1e279] [cursor=pointer]:
+          - generic [ref=f1e280]:
+            - strong [ref=f1e281]: MYMU26
+            - generic [ref=f1e282]: CBOT
+          - generic [ref=f1e283]: 44,982.00
+          - emphasis [ref=f1e284]: +0.42%
+    - generic [ref=f1e219]:
+      - navigation [ref=f1e220]:
+        - button "positions1" [ref=f1e221] [cursor=pointer]
+        - button "orders1" [ref=f1e222] [cursor=pointer]
+        - button "history" [ref=f1e223] [cursor=pointer]
+        - button "fills" [ref=f1e224] [cursor=pointer]
+        - button "balances" [ref=f1e225] [cursor=pointer]
+        - generic [ref=f1e226]: Market data active
+      - table [ref=f1e229]:
+        - rowgroup [ref=f1e230]:
+          - row [ref=f1e231]:
+            - columnheader "Symbol" [ref=f1e232]
+            - columnheader "Side" [ref=f1e233]
+            - columnheader "Qty" [ref=f1e234]
+            - columnheader "Avg price" [ref=f1e235]
+            - columnheader "Last" [ref=f1e236]
+            - columnheader "Unrealized P&L" [ref=f1e237]
+            - columnheader [ref=f1e238]
+        - rowgroup [ref=f1e239]:
+          - row [ref=f1e240]:
+            - cell [ref=f1e241]:
+              - strong [ref=f1e242]: MESU26
+            - cell "Long" [ref=f1e243]
+            - cell "2" [ref=f1e244]
+            - cell "6253.25" [ref=f1e245]
+            - cell "6260.00" [ref=f1e246]
+            - cell "+$67.50" [ref=f1e247]
+            - cell [ref=f1e248]:
+              - button "Close" [ref=f1e249] [cursor=pointer]
