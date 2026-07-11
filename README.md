@@ -9,6 +9,7 @@ Prerequisites: Node 20+, Rust 1.77+, Windows WebView2 or the macOS system webvie
 ```bash
 npm install
 npm run tauri dev
+npm run desktop:windows
 ```
 
 On this Windows workstation, Visual Studio Build Tools does not add its installed Windows SDK `um` paths to the developer environment. Use the included auto-detecting launcher instead:
