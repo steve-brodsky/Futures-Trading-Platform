@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IndicatorConfig } from "../types";
-import { normalizeIndicators } from "./workspace";
+import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 
 const savedIndicators: IndicatorConfig[] = [
   { id: "ema20", kind: "EMA", period: 20, color: "#123456", visible: false },
@@ -25,5 +25,15 @@ describe("indicator workspace normalization", () => {
 
   it("preserves unknown saved indicators", () => {
     expect(normalizeIndicators(savedIndicators)).toContainEqual(savedIndicators[1]);
+  });
+});
+
+describe("magnet workspace compatibility", () => {
+  it("defaults an older saved workspace to magnet off", () => {
+    expect(normalizeMagnetEnabled(undefined)).toBe(false);
+  });
+
+  it("preserves an enabled saved value", () => {
+    expect(normalizeMagnetEnabled(true)).toBe(true);
   });
 });

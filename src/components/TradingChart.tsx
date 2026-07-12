@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  AreaSeries, CandlestickSeries, ColorType, createChart, HistogramSeries, LineSeries, LineStyle,
+  AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type ISeriesApi, type LogicalRange, type Time,
 } from "lightweight-charts";
 import type { Bar, ChartKind, ChartTimezone, IndicatorConfig, OrderUpdate, Position, Timeframe } from "../types";
 import { ema, sma, vwap } from "../lib/indicators";
+import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 
 interface Props {
   bars: Bar[];
   kind: ChartKind;
+  magnetEnabled: boolean;
   symbol: string;
   description: string;
   exchange: string;
@@ -26,7 +28,7 @@ interface Props {
 const asTime = (time: number) => time as Time;
 const isIntraday = (timeframe: Timeframe) => !["D", "W", "M"].includes(timeframe);
 
-export function TradingChart({ bars, kind, symbol, description, exchange, timeframe, timezone, indicators, orders, positions, loadingOlder, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, timeframe, timezone, indicators, orders, positions, loadingOlder, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -34,6 +36,7 @@ export function TradingChart({ bars, kind, symbol, description, exchange, timefr
   const indicatorRefs = useRef<Array<{ config: IndicatorConfig; series: ISeriesApi<any> }>>([]);
   const previousBars = useRef<Bar[]>([]);
   const barsRef = useRef(bars);
+  const magnetEnabledRef = useRef(magnetEnabled);
   const loadOlderRef = useRef(onLoadOlder);
   const firstData = useRef(true);
   const [hovered, setHovered] = useState<Bar | null>(null);
@@ -42,6 +45,7 @@ export function TradingChart({ bars, kind, symbol, description, exchange, timefr
   const change = latest ? latest.close - latest.open : 0;
 
   barsRef.current = bars;
+  magnetEnabledRef.current = magnetEnabled;
   loadOlderRef.current = onLoadOlder;
 
   useEffect(() => {
@@ -60,7 +64,7 @@ export function TradingChart({ bars, kind, symbol, description, exchange, timefr
           ? formatChartTime(Number(time), zone)
           : new Intl.DateTimeFormat("en-US", { timeZone: zone, month: "short", day: "2-digit" }).format(new Date(Number(time) * 1000)),
       },
-      crosshair: { vertLine: { color: "#8291a6", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#263242" }, horzLine: { color: "#8291a6", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#263242" } },
+      crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#8291a6", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#263242" }, horzLine: { color: "#8291a6", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#263242" } },
       handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
     });
@@ -84,9 +88,18 @@ export function TradingChart({ bars, kind, symbol, description, exchange, timefr
     positions.filter((position) => position.symbol === symbol).forEach((position) => priceSeries.createPriceLine({ price: position.averagePrice, color: "#37d5e8", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${position.side} ${position.quantity}` }));
     orders.filter((order) => order.symbol === symbol && order.status === "Working" && (order.price || order.stopPrice)).forEach((order) => priceSeries.createPriceLine({ price: order.price ?? order.stopPrice!, color: "#f0b84b", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${order.side} ${order.quantity}` }));
 
+    let settingCrosshair = false;
     chart.subscribeCrosshairMove((param) => {
       if (!param.time) return setHovered(null);
-      setHovered(barsRef.current.find((bar) => bar.time === Number(param.time)) ?? null);
+      const bar = barsRef.current.find((item) => item.time === Number(param.time)) ?? null;
+      setHovered(bar);
+      if (settingCrosshair || !param.sourceEvent || !magnetEnabledRef.current || kind !== "candles" || !bar || !param.point) return;
+      const highY = priceSeries.priceToCoordinate(bar.high);
+      const lowY = priceSeries.priceToCoordinate(bar.low);
+      if (highY == null || lowY == null) return;
+      settingCrosshair = true;
+      chart.setCrosshairPosition(nearestCandleExtreme(param.point.y, highY, lowY, bar.high, bar.low), asTime(bar.time), priceSeries);
+      settingCrosshair = false;
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
       if (!range) return;

@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, Crosshair, Download,
   Eye, Gauge, LineChart, LockKeyhole, Maximize2, Minus, Percent,
-  MousePointer2, PanelBottom, PanelRight, PencilLine, Plus, RectangleHorizontal, RotateCcw,
+  Magnet, MousePointer2, PanelBottom, PanelRight, PencilLine, Plus, RectangleHorizontal, RotateCcw,
   Search, Settings2, SlidersHorizontal, SquareStack, TextCursorInput, Trash2, TrendingUp,
   Undo2, Wifi, X, Zap,
 } from "lucide-react";
@@ -11,7 +11,7 @@ import { TradingChart } from "./components/TradingChart";
 import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { roundToTick, validateTick } from "./lib/indicators";
-import { defaultIndicators, normalizeIndicators } from "./lib/workspace";
+import { defaultIndicators, normalizeIndicators, normalizeMagnetEnabled } from "./lib/workspace";
 import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartKind, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderType, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
@@ -20,6 +20,7 @@ const defaultWorkspace: WorkspaceState = {
   symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators,
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360,
   chartTimezone: "exchange",
+  magnetEnabled: false,
 };
 
 function mergeBars(current: Bar[], incoming: Bar[]): Bar[] {
@@ -29,7 +30,7 @@ function mergeBars(current: Bar[], incoming: Bar[]): Bar[] {
 }
 
 function IconButton({ label, active, children, onClick }: { label: string; active?: boolean; children: React.ReactNode; onClick?: () => void }) {
-  return <button className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={label} onClick={onClick}>{children}</button>;
+  return <button className={`icon-button ${active ? "active" : ""}`} aria-label={label} aria-pressed={active == null ? undefined : active} title={label} onClick={onClick}>{children}</button>;
 }
 
 function Modal({ title, children, onClose, width = 440 }: { title: string; children: React.ReactNode; onClose: () => void; width?: number }) {
@@ -85,7 +86,7 @@ export default function App() {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
       if (saved) {
         const legacyTab = (saved as unknown as { bottomTab: string }).bottomTab;
-        setWorkspace({ ...defaultWorkspace, ...saved, bottomTab: legacyTab === "fills" ? "history" : legacyTab === "balances" ? "summary" : saved.bottomTab, bottomPanelHeight: saved.bottomPanelHeight ?? 360, indicators: normalizeIndicators(saved.indicators), chartTimezone: saved.chartTimezone ?? "exchange" });
+        setWorkspace({ ...defaultWorkspace, ...saved, bottomTab: legacyTab === "fills" ? "history" : legacyTab === "balances" ? "summary" : saved.bottomTab, bottomPanelHeight: saved.bottomPanelHeight ?? 360, indicators: normalizeIndicators(saved.indicators), chartTimezone: saved.chartTimezone ?? "exchange", magnetEnabled: normalizeMagnetEnabled(saved.magnetEnabled) });
       }
       setAuthenticated(auth.authenticated);
       setAccounts(auth.authenticated ? await api.accounts().catch(() => []) : []);
@@ -342,14 +343,18 @@ export default function App() {
     <section className={`workspace ${workspace.rightPanelOpen ? "with-right" : ""} ${workspace.bottomPanelOpen ? "with-bottom" : ""}`} style={{ "--bottom-height": `${workspace.bottomPanelHeight ?? 360}px` } as React.CSSProperties}>
       <aside className="drawing-rail" aria-label="Drawing tools">
         {[
-          ["cursor", MousePointer2, "Cursor"], ["crosshair", Crosshair, "Crosshair"], ["trend", PencilLine, "Trend line"],
+          ["cursor", MousePointer2, "Cursor"], ["crosshair", Crosshair, "Crosshair"],
+        ].map(([id, Icon, label]) => <IconButton key={id as string} label={label as string} active={activeTool === id} onClick={() => setActiveTool(id as string)}><Icon size={18} /></IconButton>)}
+        <IconButton label="Magnet: snap crosshair to candle high or low" active={workspace.magnetEnabled} onClick={() => updateWorkspace({ magnetEnabled: !workspace.magnetEnabled })}><Magnet size={18} /></IconButton>
+        {[
+          ["trend", PencilLine, "Trend line"],
           ["horizontal", Minus, "Horizontal line"], ["ray", TrendingUp, "Ray"], ["rectangle", RectangleHorizontal, "Rectangle"],
           ["fibonacci", Percent, "Fibonacci retracement"], ["text", TextCursorInput, "Text"], ["measure", Gauge, "Measure"],
         ].map(([id, Icon, label]) => <IconButton key={id as string} label={label as string} active={activeTool === id} onClick={() => setActiveTool(id as string)}><Icon size={18} /></IconButton>)}
         <span className="rail-spacer" /><IconButton label="Show drawings"><Eye size={18} /></IconButton><IconButton label="Delete drawings"><Trash2 size={18} /></IconButton>
       </aside>
 
-      <TradingChart bars={bars} kind={workspace.chartKind} symbol={workspace.symbol.symbol} description={workspace.symbol.description} exchange={workspace.symbol.exchange} timeframe={workspace.timeframe} indicators={workspace.indicators} orders={orders} positions={positions} timezone={workspace.chartTimezone} onTimezoneChange={(chartTimezone) => updateWorkspace({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={loadingOlder} />
+      <TradingChart bars={bars} kind={workspace.chartKind} magnetEnabled={workspace.magnetEnabled} symbol={workspace.symbol.symbol} description={workspace.symbol.description} exchange={workspace.symbol.exchange} timeframe={workspace.timeframe} indicators={workspace.indicators} orders={orders} positions={positions} timezone={workspace.chartTimezone} onTimezoneChange={(chartTimezone) => updateWorkspace({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={loadingOlder} />
 
       {workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>

@@ -160,6 +160,7 @@ export interface WorkspaceState {
   bottomPanelHeight?: number;
   selectedAccountId?: string;
   chartTimezone: ChartTimezone;
+  magnetEnabled: boolean;
 }
 
 export interface BarSnapshotEvent {

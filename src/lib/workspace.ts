@@ -9,6 +9,10 @@ export const defaultIndicators: IndicatorConfig[] = [
   { id: "macd", kind: "MACD", period: 12, color: "#47b6ff", visible: false },
 ];
 
+export function normalizeMagnetEnabled(saved: boolean | undefined): boolean {
+  return saved ?? false;
+}
+
 export function normalizeIndicators(saved: IndicatorConfig[] | undefined): IndicatorConfig[] {
   if (!saved) return defaultIndicators.map((indicator) => ({ ...indicator }));
 
