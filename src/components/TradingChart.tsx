@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ChevronsRight } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type Time,
@@ -44,6 +45,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   const visibleRangeChangeRef = useRef(onVisibleRangeChange);
   const firstData = useRef(true);
   const [hovered, setHovered] = useState<Bar | null>(null);
+  const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [chartGeneration, setChartGeneration] = useState(0);
   const latest = hovered ?? bars.at(-1) ?? null;
   const change = latest ? latest.close - latest.open : 0;
@@ -105,6 +107,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
       if (!range) return;
+      setShowScrollToLatest(Number(range.to) < barsRef.current.length - 1);
       visibleRangeChangeRef.current?.({ from: Number(range.from), to: Number(range.to) });
       const info = priceSeries.barsInLogicalRange(range);
       if (info && info.barsBefore < 100) loadOlderRef.current();
@@ -165,6 +168,8 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
         : { from: Math.max(0, bars.length - 180) as any, to: (bars.length + 5) as any });
       firstData.current = false;
     }
+    const visibleRange = chart.timeScale().getVisibleLogicalRange();
+    setShowScrollToLatest(Boolean(visibleRange && Number(visibleRange.to) < bars.length - 1));
     previousBars.current = bars;
   }, [bars, kind, chartGeneration]);
 
@@ -177,6 +182,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />
       <div className="chart-watermark">{symbol}</div>
+      {showScrollToLatest && <button className="scroll-to-latest" type="button" aria-label="Scroll to latest candle" title="Scroll to latest candle" onClick={() => chartRef.current?.timeScale().scrollToRealTime()}><ChevronsRight size={18} /></button>}
       <select className="timezone-select" aria-label="Chart timezone" value={timezone} onChange={(event) => onTimezoneChange(event.target.value as ChartTimezone)} title={`Chart timezone: ${resolveTimezone(timezone, exchange)}`}>
         {timezoneOptions.map((option) => <option key={option.value} value={option.value}>{option.value === timezone ? timezoneLabel(timezone, exchange) : option.label}</option>)}
       </select>
