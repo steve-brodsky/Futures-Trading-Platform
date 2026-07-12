@@ -5,7 +5,7 @@ import {
   type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type Time,
 } from "lightweight-charts";
 import type { Bar, ChartKind, ChartTimezone, IndicatorConfig, OrderUpdate, Position, Timeframe } from "../types";
-import { ema, sma, vwap } from "../lib/indicators";
+import { ema, roundToTick, sma, vwap } from "../lib/indicators";
 import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
@@ -17,6 +17,7 @@ interface Props {
   symbol: string;
   description: string;
   exchange: string;
+  minMove: number;
   timeframe: Timeframe;
   timezone: ChartTimezone;
   indicators: IndicatorConfig[];
@@ -31,8 +32,12 @@ interface Props {
 
 const asTime = (time: number) => time as Time;
 const isIntraday = (timeframe: Timeframe) => !["D", "W", "M"].includes(timeframe);
+const pricePrecision = (minMove: number) => {
+  const text = minMove.toFixed(10).replace(/0+$/, "");
+  return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
+};
 
-export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, timeframe, timezone, indicators, orders, positions, loadingOlder, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, loadingOlder, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -78,11 +83,12 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
     });
     chartRef.current = chart;
+    const priceFormat = { type: "price" as const, precision: pricePrecision(minMove), minMove };
 
     let priceSeries: ISeriesApi<any>;
-    if (kind === "line") priceSeries = chart.addSeries(LineSeries, { color: "#34d6e9", lineWidth: 2, priceLineVisible: true });
-    else if (kind === "area") priceSeries = chart.addSeries(AreaSeries, { lineColor: "#37d5e8", topColor: "rgba(55,213,232,.28)", bottomColor: "rgba(55,213,232,.01)", lineWidth: 2 });
-    else priceSeries = chart.addSeries(CandlestickSeries, { upColor: "#16c79a", downColor: "#ef466f", borderVisible: false, wickUpColor: "#16c79a", wickDownColor: "#ef466f" });
+    if (kind === "line") priceSeries = chart.addSeries(LineSeries, { color: "#34d6e9", lineWidth: 2, priceLineVisible: true, priceFormat });
+    else if (kind === "area") priceSeries = chart.addSeries(AreaSeries, { lineColor: "#37d5e8", topColor: "rgba(55,213,232,.28)", bottomColor: "rgba(55,213,232,.01)", lineWidth: 2, priceFormat });
+    else priceSeries = chart.addSeries(CandlestickSeries, { upColor: "#16c79a", downColor: "#ef466f", borderVisible: false, wickUpColor: "#16c79a", wickDownColor: "#ef466f", priceFormat });
     priceRef.current = priceSeries;
     if (intraday) {
       const sessionShading = new SessionShading();
@@ -96,7 +102,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
 
     indicatorRefs.current = indicators.filter((item) => item.visible && ["SMA", "EMA", "VWAP"].includes(item.kind)).map((config) => ({
       config,
-      series: chart.addSeries(LineSeries, { color: config.color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }),
+      series: chart.addSeries(LineSeries, { color: config.color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat }),
     }));
 
     let settingCrosshair = false;
@@ -104,12 +110,19 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       if (!param.time) return setHovered(null);
       const bar = barsRef.current.find((item) => item.time === Number(param.time)) ?? null;
       setHovered(bar);
-      if (settingCrosshair || !param.sourceEvent || !magnetEnabledRef.current || kind !== "candles" || !bar || !param.point) return;
-      const highY = priceSeries.priceToCoordinate(bar.high);
-      const lowY = priceSeries.priceToCoordinate(bar.low);
-      if (highY == null || lowY == null) return;
+      if (settingCrosshair || !param.sourceEvent || !param.point) return;
+      let snappedPrice: number | null = null;
+      if (magnetEnabledRef.current && kind === "candles" && bar) {
+        const highY = priceSeries.priceToCoordinate(bar.high);
+        const lowY = priceSeries.priceToCoordinate(bar.low);
+        if (highY != null && lowY != null) snappedPrice = nearestCandleExtreme(param.point.y, highY, lowY, bar.high, bar.low);
+      } else {
+        const hoveredPrice = priceSeries.coordinateToPrice(param.point.y);
+        if (hoveredPrice != null) snappedPrice = roundToTick(hoveredPrice, minMove);
+      }
+      if (snappedPrice == null) return;
       settingCrosshair = true;
-      chart.setCrosshairPosition(nearestCandleExtreme(param.point.y, highY, lowY, bar.high, bar.low), asTime(bar.time), priceSeries);
+      chart.setCrosshairPosition(snappedPrice, param.time, priceSeries);
       settingCrosshair = false;
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
@@ -126,7 +139,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     return () => {
       chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = []; sessionShadingRef.current = null;
     };
-  }, [kind, symbol, exchange, timeframe, timezone, indicators]);
+  }, [kind, symbol, exchange, minMove, timeframe, timezone, indicators]);
 
   useEffect(() => {
     const price = priceRef.current;
