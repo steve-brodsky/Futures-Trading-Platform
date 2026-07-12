@@ -11,16 +11,10 @@ import { TradingChart } from "./components/TradingChart";
 import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { roundToTick, validateTick } from "./lib/indicators";
+import { defaultIndicators, normalizeIndicators } from "./lib/workspace";
 import type { Account, Bar, BarSnapshotEvent, BarUpdateEvent, ChartKind, IndicatorConfig, OrderDraft, OrderPreview, OrderType, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
-const defaultIndicators: IndicatorConfig[] = [
-  { id: "ema20", kind: "EMA", period: 20, color: "#f0b84b", visible: true },
-  { id: "vwap", kind: "VWAP", period: 1, color: "#a879ff", visible: true },
-  { id: "sma50", kind: "SMA", period: 50, color: "#37d5e8", visible: false },
-  { id: "rsi14", kind: "RSI", period: 14, color: "#ff7ac6", visible: false },
-  { id: "macd", kind: "MACD", period: 12, color: "#47b6ff", visible: false },
-];
 
 const defaultWorkspace: WorkspaceState = {
   symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators,
@@ -82,7 +76,7 @@ export default function App() {
 
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
-      if (saved) setWorkspace({ ...defaultWorkspace, ...saved, chartTimezone: saved.chartTimezone ?? "exchange" });
+      if (saved) setWorkspace({ ...defaultWorkspace, ...saved, indicators: normalizeIndicators(saved.indicators), chartTimezone: saved.chartTimezone ?? "exchange" });
       setAuthenticated(auth.authenticated);
       setAccounts(auth.authenticated ? await api.accounts().catch(() => []) : []);
       if (api.isNative && !auth.configured) setSetupOpen(true);
@@ -216,6 +210,13 @@ export default function App() {
     setWorkspace((current) => ({ ...current, ...patch }));
   }
 
+  function updateIndicator(id: string, patch: Partial<IndicatorConfig>) {
+    setWorkspace((current) => ({
+      ...current,
+      indicators: current.indicators.map((indicator) => indicator.id === id ? { ...indicator, ...patch } : indicator),
+    }));
+  }
+
   async function confirmEnvironment() {
     if (!envConfirm) return;
     setBusy(true);
@@ -287,7 +288,7 @@ export default function App() {
       </div>
       <div className="toolbar-popover-anchor">
         <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => setIndicatorOpen((value) => !value)}><SlidersHorizontal size={16} />Indicators</button>
-        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{workspace.indicators.filter((i) => i.visible).length} active</span></header>{workspace.indicators.map((indicator) => <button key={indicator.id} className="indicator-row" onClick={() => updateWorkspace({ indicators: workspace.indicators.map((item) => item.id === indicator.id ? { ...item, visible: !item.visible } : item) })}><span className="indicator-swatch" style={{ background: indicator.color }} /><span><strong>{indicator.kind}</strong><small>{indicator.kind === "VWAP" ? "Session" : `Length ${indicator.period}`}</small></span><span className={`toggle ${indicator.visible ? "on" : ""}`} /></button>)}</div>}
+        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{workspace.indicators.filter((i) => i.visible).length} active</span></header>{workspace.indicators.map((indicator) => <div key={indicator.id} className="indicator-row"><label className="indicator-color" title={`Change ${indicator.kind} ${indicator.period} color`}><input type="color" value={indicator.color} aria-label={`Change ${indicator.kind} ${indicator.period} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" aria-pressed={indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind}</strong><small>{indicator.kind === "VWAP" ? "Session" : `Length ${indicator.period}`}</small></span><span className={`toggle ${indicator.visible ? "on" : ""}`} /></button></div>)}</div>}
       </div>
       <button className="text-tool-button"><Bell size={16} />Alert</button>
       <div className="divider" />
