@@ -3,10 +3,10 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Activity, BarChart3, Bell, BookOpen, ChevronDown, Crosshair, Download,
-  Eye, Gauge, LineChart, LockKeyhole, Maximize2, Minus, Percent,
-  Magnet, MousePointer2, PanelBottom, PanelRight, PencilLine, Plus, RectangleHorizontal, RotateCcw,
-  Search, Settings2, SlidersHorizontal, SquareStack, TextCursorInput, Trash2, TrendingUp,
+  Activity, BarChart3, Bell, BookOpen, ChevronDown, Download,
+  LineChart, LockKeyhole, Maximize2, Minus,
+  Magnet, MousePointer2, PanelBottom, PanelRight, Plus, RotateCcw,
+  Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
   Undo2, Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart } from "./components/TradingChart";
@@ -574,11 +574,8 @@ export default function App() {
 
     <section className={`workspace ${hasWindowTabs ? "" : "empty-chart-workspace"} ${!isDetached && workspace.rightPanelOpen ? "with-right" : ""} ${!isDetached && workspace.bottomPanelOpen ? "with-bottom" : ""}`} style={{ "--bottom-height": `${workspace.bottomPanelHeight ?? 360}px` } as React.CSSProperties}>
       <aside className="drawing-rail" aria-label="Drawing tools" onKeyDown={(event) => { if (event.key === "Escape") setHorizontalToolsOpen(false); }}>
-        {[
-          ["cursor", MousePointer2, "Cursor"], ["crosshair", Crosshair, "Crosshair"],
-        ].map(([id, Icon, label]) => <IconButton key={id as string} label={label as string} active={activeTool === id} onClick={() => setActiveTool(id as string)}><Icon size={18} /></IconButton>)}
+        <IconButton label="Cursor" active={activeTool === "cursor"} onClick={() => setActiveTool("cursor")}><MousePointer2 size={18} /></IconButton>
         <IconButton label="Magnet: snap crosshair to candle high or low" active={activeTab.magnetEnabled} onClick={() => updateActiveTab({ magnetEnabled: !activeTab.magnetEnabled })}><Magnet size={18} /></IconButton>
-        <IconButton label="Trend line" active={activeTool === "trend"} onClick={() => setActiveTool("trend")}><PencilLine size={18} /></IconButton>
         <div className="drawing-tool-anchor">
           <IconButton label="Horizontal drawing tools" active={activeTool === "horizontal" || activeTool === "horizontal-ray"} onClick={() => setHorizontalToolsOpen((value) => !value)}><Minus size={18} /></IconButton>
           {horizontalToolsOpen && <><button className="drawing-flyout-backdrop" aria-label="Close horizontal drawing selector" onClick={() => setHorizontalToolsOpen(false)} /><div className="drawing-flyout" role="menu" aria-label="Horizontal drawing selector">
@@ -586,11 +583,6 @@ export default function App() {
             <button role="menuitem" onClick={() => { setActiveTool("horizontal-ray"); setHorizontalToolsOpen(false); }}><Minus size={17} /><span><strong>Horizontal Ray</strong><small>Extends to the right</small></span></button>
           </div></>}
         </div>
-        {[
-          ["ray", TrendingUp, "Ray"], ["rectangle", RectangleHorizontal, "Rectangle"],
-          ["fibonacci", Percent, "Fibonacci retracement"], ["text", TextCursorInput, "Text"], ["measure", Gauge, "Measure"],
-        ].map(([id, Icon, label]) => <IconButton key={id as string} label={label as string} active={activeTool === id} onClick={() => setActiveTool(id as string)}><Icon size={18} /></IconButton>)}
-        <span className="rail-spacer" /><IconButton label="Show drawings"><Eye size={18} /></IconButton><IconButton label="Delete drawings"><Trash2 size={18} /></IconButton>
       </aside>
 
       <TradingChart key={activeTab.id} bars={bars} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={(range) => { viewRangesRef.current.set(activeTab.id, range); emit("chart-viewport", { tabId: activeTab.id, range }); }} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
