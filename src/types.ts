@@ -147,11 +147,31 @@ export interface Drawing {
   color: string;
 }
 
-export interface WorkspaceState {
+export interface ChartTabState {
+  id: string;
   symbol: SymbolMeta;
   timeframe: Timeframe;
   chartKind: ChartKind;
   indicators: IndicatorConfig[];
+  chartTimezone: ChartTimezone;
+  magnetEnabled: boolean;
+}
+
+export interface ChartWindowState {
+  id: string;
+  tabIds: string[];
+  activeTabId: string;
+  detached: boolean;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+}
+
+export interface WorkspaceState {
+  revision: number;
+  tabs: ChartTabState[];
+  windows: ChartWindowState[];
   watchlist: string[];
   rightTab: "order" | "watchlist";
   rightPanelOpen: boolean;
@@ -159,8 +179,6 @@ export interface WorkspaceState {
   bottomPanelOpen: boolean;
   bottomPanelHeight?: number;
   selectedAccountId?: string;
-  chartTimezone: ChartTimezone;
-  magnetEnabled: boolean;
 }
 
 export interface BarSnapshotEvent {

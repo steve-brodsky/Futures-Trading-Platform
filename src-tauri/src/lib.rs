@@ -5,7 +5,7 @@ mod tradestation;
 use futures_util::StreamExt;
 use models::*;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 use tauri::{Emitter, Manager, State};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -45,7 +45,8 @@ impl serde::Serialize for AppError {
 pub struct NativeState {
     api: TradeStation,
     db_path: PathBuf,
-    streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+    bar_streams: tokio::sync::Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    quote_stream: tokio::sync::Mutex<Option<(String, tauri::async_runtime::JoinHandle<()>)>>,
     brokerage_streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
 }
 
@@ -206,31 +207,16 @@ async fn get_older_bars(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn start_market_stream(
+async fn start_bar_stream(
     app: tauri::AppHandle,
     subscription_id: String,
     symbol: String,
     timeframe: String,
-    mut watchlist: Vec<String>,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
     TradeStation::bar_stream_path(&symbol, &timeframe)?;
-    if !watchlist.iter().any(|item| item == &symbol) {
-        watchlist.push(symbol.clone());
-    }
-    watchlist.sort();
-    watchlist.dedup();
-    if watchlist.len() > 100 {
-        return Err(AppError::Validation(
-            "A maximum of 100 streamed quote symbols is supported".into(),
-        ));
-    }
     let environment = state.api.environment().await;
-    let mut tasks = state.streams.lock().await;
-    for task in tasks.drain(..) {
-        task.abort();
-    }
-    let bar_task = tauri::async_runtime::spawn(run_bar_stream(
+    let task = tauri::async_runtime::spawn(run_bar_stream(
         app.clone(),
         state.api.clone(),
         state.db_path.clone(),
@@ -239,21 +225,54 @@ async fn start_market_stream(
         symbol,
         timeframe,
     ));
-    let quote_task = tauri::async_runtime::spawn(run_quote_stream(
-        app,
-        state.api.clone(),
-        subscription_id,
-        environment,
-        watchlist,
-    ));
-    tasks.extend([bar_task, quote_task]);
+    if let Some(previous) = state.bar_streams.lock().await.insert(subscription_id, task) {
+        previous.abort();
+    }
     Ok(())
 }
 
-#[tauri::command]
-async fn stop_market_stream(state: State<'_, NativeState>) -> Result<(), AppError> {
-    for task in state.streams.lock().await.drain(..) {
+#[tauri::command(rename_all = "camelCase")]
+async fn stop_bar_stream(subscription_id: String, state: State<'_, NativeState>) -> Result<(), AppError> {
+    if let Some(task) = state.bar_streams.lock().await.remove(&subscription_id) {
         task.abort();
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn start_quote_stream(
+    app: tauri::AppHandle,
+    subscription_id: String,
+    mut symbols: Vec<String>,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    symbols.sort();
+    symbols.dedup();
+    if symbols.len() > 100 {
+        return Err(AppError::Validation("A maximum of 100 streamed quote symbols is supported".into()));
+    }
+    let environment = state.api.environment().await;
+    let task = tauri::async_runtime::spawn(run_quote_stream(
+        app,
+        state.api.clone(),
+        subscription_id.clone(),
+        environment,
+        symbols,
+    ));
+    let mut current = state.quote_stream.lock().await;
+    if let Some((_, previous)) = current.replace((subscription_id, task)) {
+        previous.abort();
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn stop_quote_stream(subscription_id: String, state: State<'_, NativeState>) -> Result<(), AppError> {
+    let mut current = state.quote_stream.lock().await;
+    if current.as_ref().is_some_and(|(id, _)| id == &subscription_id) {
+        if let Some((_, task)) = current.take() {
+            task.abort();
+        }
     }
     Ok(())
 }
@@ -703,7 +722,8 @@ pub fn run() {
             app.manage(NativeState {
                 api,
                 db_path: app_dir.join("northstar.sqlite3"),
-                streams: tokio::sync::Mutex::new(Vec::new()),
+                bar_streams: tokio::sync::Mutex::new(HashMap::new()),
+                quote_stream: tokio::sync::Mutex::new(None),
                 brokerage_streams: tokio::sync::Mutex::new(Vec::new()),
             });
             Ok(())
@@ -720,8 +740,10 @@ pub fn run() {
             get_quotes,
             load_cached_bars,
             get_older_bars,
-            start_market_stream,
-            stop_market_stream,
+            start_bar_stream,
+            stop_bar_stream,
+            start_quote_stream,
+            stop_quote_stream,
             start_brokerage_stream,
             stop_brokerage_stream,
             get_positions,

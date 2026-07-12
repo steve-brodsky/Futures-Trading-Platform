@@ -1,0 +1,71 @@
+import { describe, expect, it } from "vitest";
+import type { WorkspaceState } from "../types";
+import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, tabInsertionIndex } from "./chartWorkspace";
+
+const fallback: WorkspaceState = {
+  revision: 0,
+  tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], chartTimezone: "exchange", magnetEnabled: false }],
+  windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
+  watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false,
+};
+
+describe("chart workspace", () => {
+  it("migrates a legacy flat chart workspace", () => {
+    const result = normalizeChartWorkspace({ ...fallback, tabs: undefined, windows: undefined, timeframe: "15m", symbol: fallback.tabs[0].symbol }, fallback);
+    expect(result.tabs).toHaveLength(1);
+    expect(result.tabs[0].timeframe).toBe("15m");
+    expect(result.windows[0].tabIds).toEqual([result.tabs[0].id]);
+  });
+
+  it("limits tabs, repairs assignments, and selects a valid active tab", () => {
+    const tabs = Array.from({ length: 8 }, (_, index) => cloneChartTab(fallback.tabs[0], `tab-${index}`));
+    const result = normalizeChartWorkspace({ ...fallback, tabs, windows: [{ id: "main", detached: false, tabIds: tabs.map((tab) => tab.id), activeTabId: "missing" }] }, fallback);
+    expect(result.tabs).toHaveLength(MAX_CHART_TABS);
+    expect(result.windows[0].activeTabId).toBe("tab-0");
+  });
+
+  it("deep clones mutable chart settings", () => {
+    const source = { ...fallback.tabs[0], indicators: [{ id: "ema", kind: "EMA" as const, period: 20, color: "#fff", visible: true }] };
+    const clone = cloneChartTab(source, "copy");
+    clone.indicators[0].color = "#000";
+    expect(source.indicators[0].color).toBe("#fff");
+  });
+
+  it("moves tabs between windows and removes an empty detached window", () => {
+    const workspace = { ...fallback, tabs: [fallback.tabs[0], cloneChartTab(fallback.tabs[0], "copy")], windows: [{ ...fallback.windows[0] }, { id: "detached", detached: true, tabIds: ["copy"], activeTabId: "copy" }] };
+    const result = moveTab(workspace, "copy", "main", 0);
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0].tabIds).toEqual(["copy", "chart-1"]);
+  });
+
+  it("removes a detached tab from the main strip instead of duplicating it", () => {
+    const workspace = { ...fallback, windows: [{ ...fallback.windows[0] }, { id: "detached", detached: true, tabIds: [], activeTabId: "chart-1" }] };
+    const moved = moveTab(workspace, "chart-1", "detached", 0);
+    expect(moved.windows.find((window) => window.id === "main")?.tabIds).toEqual([]);
+    expect(moved.windows.find((window) => window.id === "detached")?.tabIds).toEqual(["chart-1"]);
+    const restored = normalizeChartWorkspace(moved, fallback);
+    expect(restored.windows.find((window) => window.id === "main")?.tabIds).toEqual([]);
+  });
+
+  it("accounts for the removed source slot when reordering in one strip", () => {
+    const tabs = [fallback.tabs[0], cloneChartTab(fallback.tabs[0], "b"), cloneChartTab(fallback.tabs[0], "c")];
+    const workspace = { ...fallback, tabs, windows: [{ id: "main", detached: false, tabIds: ["chart-1", "b", "c"], activeTabId: "b" }] };
+    expect(moveTab(workspace, "b", "main", 2).windows[0].tabIds).toEqual(["chart-1", "b", "c"]);
+    expect(moveTab(workspace, "b", "main", 3).windows[0].tabIds).toEqual(["chart-1", "c", "b"]);
+  });
+
+  it("returns detached tabs to main when its window closes", () => {
+    const workspace = { ...fallback, tabs: [fallback.tabs[0], cloneChartTab(fallback.tabs[0], "copy")], windows: [{ ...fallback.windows[0] }, { id: "detached", detached: true, tabIds: ["copy"], activeTabId: "copy" }] };
+    expect(closeDetachedWindow(workspace, "detached").windows[0].tabIds).toEqual(["chart-1", "copy"]);
+  });
+
+  it("moves an off-screen detached window onto an available monitor", () => {
+    expect(clampWindowGeometry({ x: 3000, y: 200, width: 1000, height: 700 }, [{ x: 0, y: 0, width: 1920, height: 1080 }]))
+      .toEqual({ x: 920, y: 200, width: 1000, height: 700 });
+  });
+
+  it("calculates and clamps cross-window insertion positions", () => {
+    expect(tabInsertionIndex(150, 100, 300, 4)).toBe(1);
+    expect(tabInsertionIndex(500, 100, 300, 4)).toBe(4);
+  });
+});

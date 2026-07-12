@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, Crosshair, Download,
   Eye, Gauge, LineChart, LockKeyhole, Maximize2, Minus, Percent,
@@ -11,17 +13,29 @@ import { TradingChart } from "./components/TradingChart";
 import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { roundToTick, validateTick } from "./lib/indicators";
-import { defaultIndicators, normalizeIndicators, normalizeMagnetEnabled } from "./lib/workspace";
-import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartKind, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderType, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
+import { defaultIndicators } from "./lib/workspace";
+import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
+import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderType, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 
 const defaultWorkspace: WorkspaceState = {
-  symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators,
+  revision: 0,
+  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators, chartTimezone: "exchange", magnetEnabled: false }],
+  windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360,
-  chartTimezone: "exchange",
-  magnetEnabled: false,
 };
+
+const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
+
+interface TabMarketState {
+  bars: Bar[];
+  hasOlder: boolean;
+  loadingOlder: boolean;
+  streamState: StreamConnectionState;
+}
+
+interface StripBounds { windowId: string; left: number; top: number; right: number; bottom: number; }
 
 function mergeBars(current: Bar[], incoming: Bar[]): Bar[] {
   const byTime = new Map(current.map((bar) => [bar.time, bar]));
@@ -39,13 +53,10 @@ function Modal({ title, children, onClose, width = 440 }: { title: string; child
 
 export default function App() {
   const [workspace, setWorkspace] = useState(defaultWorkspace);
+  const workspaceRef = useRef(workspace);
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
   const [environment, setEnvironmentState] = useState<TradingEnvironment>("sim");
-  const [barState, setBarState] = useState<{ symbol: string; timeframe: Timeframe; bars: Bar[] }>({
-    symbol: defaultWorkspace.symbol.symbol,
-    timeframe: defaultWorkspace.timeframe,
-    bars: [],
-  });
+  const [tabMarkets, setTabMarkets] = useState<Record<string, TabMarketState>>({});
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [positions, setPositions] = useState<Position[]>(api.isNative ? [] : demoPositions);
   const [orders, setOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoOrders);
@@ -71,26 +82,31 @@ export default function App() {
   const [authEpoch, setAuthEpoch] = useState(0);
   const [brokerageEpoch, setBrokerageEpoch] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [streamState, setStreamState] = useState<StreamConnectionState>(api.isNative ? "disconnected" : "streaming");
-  const [hasOlder, setHasOlder] = useState(true);
-  const [loadingOlder, setLoadingOlder] = useState(false);
   const [, setFreshnessTick] = useState(0);
-  const activeChartRef = useRef({ subscriptionId: "", symbol: defaultWorkspace.symbol.symbol, timeframe: defaultWorkspace.timeframe });
-  const bars = barState.symbol === workspace.symbol.symbol && barState.timeframe === workspace.timeframe ? barState.bars : [];
+  const subscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; timeframe: Timeframe; epoch: string }>());
+  const stripBoundsRef = useRef(new Map<string, StripBounds>());
+  const viewRangesRef = useRef(new Map<string, { from: number; to: number }>());
+  const windowState = workspace.windows.find((item) => item.id === currentWindowId) ?? workspace.windows[0];
+  const isDetached = currentWindowId !== MAIN_WINDOW_ID;
+  const hasWindowTabs = windowState.tabIds.length > 0;
+  const activeTab = workspace.tabs.find((item) => item.id === windowState?.activeTabId) ?? workspace.tabs[0];
+  const market = tabMarkets[activeTab.id] ?? { bars: [], hasOlder: true, loadingOlder: false, streamState: api.isNative ? "disconnected" : "streaming" };
+  const bars = market.bars;
 
-  const activeQuote = quotes[workspace.symbol.symbol] ?? (api.isNative
-    ? { symbol: workspace.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
-    : quoteFor(workspace.symbol.symbol));
+  workspaceRef.current = workspace;
+
+  const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
+    ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+    : quoteFor(activeTab.symbol.symbol));
+  const tabStreamKey = workspace.tabs.map((tab) => `${tab.id}:${tab.symbol.symbol}:${tab.timeframe}`).join("|");
+  const quoteSymbolsKey = [...new Set([...workspace.watchlist, ...workspace.tabs.map((tab) => tab.symbol.symbol)])].sort().join("|");
 
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
-      if (saved) {
-        const legacyTab = (saved as unknown as { bottomTab: string }).bottomTab;
-        setWorkspace({ ...defaultWorkspace, ...saved, bottomTab: legacyTab === "fills" ? "history" : legacyTab === "balances" ? "summary" : saved.bottomTab, bottomPanelHeight: saved.bottomPanelHeight ?? 360, indicators: normalizeIndicators(saved.indicators), chartTimezone: saved.chartTimezone ?? "exchange", magnetEnabled: normalizeMagnetEnabled(saved.magnetEnabled) });
-      }
+      setWorkspace(normalizeChartWorkspace(saved, defaultWorkspace));
       setAuthenticated(auth.authenticated);
-      setAccounts(auth.authenticated ? await api.accounts().catch(() => []) : []);
-      if (api.isNative && !auth.configured) setSetupOpen(true);
+      setAccounts(currentWindowId === MAIN_WINDOW_ID && auth.authenticated ? await api.accounts().catch(() => []) : []);
+      if (currentWindowId === MAIN_WINDOW_ID && api.isNative && !auth.configured) setSetupOpen(true);
     }).finally(() => setWorkspaceLoaded(true));
     const cleanups: Array<() => void> = [];
     if (api.isNative) {
@@ -98,45 +114,58 @@ export default function App() {
         if (!payload.authenticated) return;
         setAuthenticated(true);
         setSetupOpen(false);
-        setAccounts(await api.accounts().catch(() => []));
+        if (currentWindowId === MAIN_WINDOW_ID) setAccounts(await api.accounts().catch(() => []));
         setAuthEpoch((value) => value + 1);
         showToast("TradeStation connected.");
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
-        const active = activeChartRef.current;
-        if (payload.subscriptionId !== active.subscriptionId || payload.symbol !== active.symbol || payload.timeframe !== active.timeframe) return;
-        setBarState({ symbol: payload.symbol, timeframe: payload.timeframe, bars: payload.bars });
+        if (!workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) return;
+        setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: payload.bars } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
-        const active = activeChartRef.current;
-        if (payload.subscriptionId !== active.subscriptionId || payload.symbol !== active.symbol || payload.timeframe !== active.timeframe) return;
-        setBarState((current) => ({
-          symbol: payload.symbol,
-          timeframe: payload.timeframe,
-          bars: current.symbol === payload.symbol && current.timeframe === payload.timeframe
-            ? mergeBars(current.bars, [payload.bar])
-            : [payload.bar],
-        }));
+        if (!workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) return;
+        setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting", bars: [] }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], [payload.bar]) } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
-        if (payload.subscriptionId !== activeChartRef.current.subscriptionId) return;
         setQuotes((current) => ({ ...current, [payload.quote.symbol]: { ...payload.quote, receivedAt: Date.now() } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<StreamStateEvent>("stream-state", ({ payload }) => {
-        if (payload.subscriptionId !== activeChartRef.current.subscriptionId) return;
-        setStreamState(payload.state);
+        if (!workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId) || payload.channel !== "bars") return;
+        setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: payload.state } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<{ accountId: string }>("brokerage-update", () => setBrokerageEpoch((value) => value + 1)).then((unlisten) => cleanups.push(unlisten));
       listen<string>("brokerage-stream-error", ({ payload }) => setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Brokerage stream reconnecting", text: payload, level: "warning" as const }, ...current].slice(0, 250))).then((unlisten) => cleanups.push(unlisten));
     }
+    listen<WorkspaceState>("workspace-sync", ({ payload }) => {
+      if (payload.revision <= workspaceRef.current.revision) return;
+      const next = normalizeChartWorkspace(payload, defaultWorkspace);
+      workspaceRef.current = next;
+      setWorkspace(next);
+    }).then((unlisten) => cleanups.push(unlisten));
+    listen<WorkspaceState>("workspace-proposal", ({ payload }) => {
+      if (currentWindowId !== MAIN_WINDOW_ID) return;
+      const next = { ...normalizeChartWorkspace(payload, defaultWorkspace), revision: Math.max(workspaceRef.current.revision + 1, Date.now()) };
+      workspaceRef.current = next;
+      setWorkspace(next);
+      emit("workspace-sync", next);
+    }).then((unlisten) => cleanups.push(unlisten));
+    listen<{ windowId: string }>("workspace-window-ready", () => {
+      if (currentWindowId === MAIN_WINDOW_ID) emit("workspace-sync", workspaceRef.current);
+    }).then((unlisten) => cleanups.push(unlisten));
+    listen<StripBounds>("chart-strip-bounds", ({ payload }) => stripBoundsRef.current.set(payload.windowId, payload)).then((unlisten) => cleanups.push(unlisten));
+    listen<{ tabId: string; range: { from: number; to: number } }>("chart-viewport", ({ payload }) => viewRangesRef.current.set(payload.tabId, payload.range)).then((unlisten) => cleanups.push(unlisten));
     return () => cleanups.forEach((unlisten) => unlisten());
   }, []);
+
+  useEffect(() => {
+    if (workspaceLoaded && currentWindowId !== MAIN_WINDOW_ID) emit("workspace-window-ready", { windowId: currentWindowId });
+  }, [workspaceLoaded]);
 
   const selectedAccount = accounts.find((account) => account.id === workspace.selectedAccountId) ?? accounts[0];
 
   useEffect(() => {
-    if (!selectedAccount) return;
+    if (currentWindowId !== MAIN_WINDOW_ID || !selectedAccount) return;
     if (workspace.selectedAccountId !== selectedAccount.id) updateWorkspace({ selectedAccountId: selectedAccount.id });
     let active = true;
     const refresh = async () => {
@@ -157,55 +186,61 @@ export default function App() {
   }, [selectedAccount?.id, authEpoch, environment, brokerageEpoch]);
 
   useEffect(() => {
-    if (!selectedAccount || !api.isNative || !authenticated) return;
+    if (currentWindowId !== MAIN_WINDOW_ID || !selectedAccount || !api.isNative || !authenticated) return;
     api.startBrokerageStream(selectedAccount.id).catch((error) => setBrokerageError(String(error)));
     return () => { api.stopBrokerageStream(); };
   }, [selectedAccount?.id, authenticated, environment]);
 
   useEffect(() => {
-    const symbol = workspace.symbol.symbol;
-    const timeframe = workspace.timeframe;
-    const subscriptionId = crypto.randomUUID();
-    activeChartRef.current = { subscriptionId, symbol, timeframe };
-    setBarState({ symbol, timeframe, bars: [] });
-    setHasOlder(true);
-    setLoadingOlder(false);
-    if (!api.isNative) {
-      api.bars(symbol, timeframe).then((nextBars) => {
-        const active = activeChartRef.current;
-        if (active.subscriptionId === subscriptionId && active.symbol === symbol && active.timeframe === timeframe) {
-          setBarState({ symbol, timeframe, bars: nextBars });
-        }
-      }).catch((error) => showToast(String(error)));
-      return;
-    }
-    if (!authenticated) return;
-    setStreamState("connecting");
-    api.cachedBars(symbol, timeframe).then((cached) => {
-      const active = activeChartRef.current;
-      if (active.subscriptionId !== subscriptionId || active.symbol !== symbol || active.timeframe !== timeframe) return;
-      setBarState((current) => ({
-        symbol,
-        timeframe,
-        bars: current.symbol === symbol && current.timeframe === timeframe
-          ? mergeBars(cached, current.bars)
-          : cached,
-      }));
-    }).catch(() => undefined);
-    api.startMarketStream(subscriptionId, symbol, timeframe, workspace.watchlist).catch((error) => {
-      if (activeChartRef.current.subscriptionId !== subscriptionId) return;
-      setStreamState("disconnected"); showToast(String(error));
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    const epoch = `${authEpoch}:${environment}:${authenticated}`;
+    const activeIds = new Set(workspace.tabs.map((tab) => tab.id));
+    subscriptionsRef.current.forEach((subscription, tabId) => {
+      const tab = workspace.tabs.find((item) => item.id === tabId);
+      if (!activeIds.has(tabId) || !tab || subscription.symbol !== tab.symbol.symbol || subscription.timeframe !== tab.timeframe || subscription.epoch !== epoch) {
+        if (api.isNative) api.stopBarStream(subscription.subscriptionId);
+        subscriptionsRef.current.delete(tabId);
+      }
     });
-    return () => { if (activeChartRef.current.subscriptionId === subscriptionId) api.stopMarketStream(); };
-  }, [workspace.symbol.symbol, workspace.timeframe, workspace.watchlist, authEpoch, authenticated, environment]);
+    workspace.tabs.forEach((tab) => {
+      if (subscriptionsRef.current.has(tab.id)) return;
+      const subscriptionId = tab.id;
+      subscriptionsRef.current.set(tab.id, { subscriptionId, symbol: tab.symbol.symbol, timeframe: tab.timeframe, epoch });
+      setTabMarkets((current) => ({ ...current, [tab.id]: { bars: [], hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming" } }));
+      if (!api.isNative) {
+        api.bars(tab.symbol.symbol, tab.timeframe).then((nextBars) => setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "streaming" }), bars: nextBars } }))).catch((error) => showToast(String(error)));
+      } else if (authenticated) {
+        api.cachedBars(tab.symbol.symbol, tab.timeframe).then((cached) => setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(cached, current[tab.id]?.bars ?? []) } }))).catch(() => undefined);
+        api.startBarStream(subscriptionId, tab.symbol.symbol, tab.timeframe).catch((error) => {
+          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: "disconnected" } }));
+          showToast(String(error));
+        });
+      }
+    });
+  }, [tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || tabMarkets[activeTab.id]?.bars.length) return;
+    const load = api.isNative ? api.cachedBars(activeTab.symbol.symbol, activeTab.timeframe) : api.bars(activeTab.symbol.symbol, activeTab.timeframe);
+    load.then((loadedBars) => setTabMarkets((current) => ({ ...current, [activeTab.id]: { ...(current[activeTab.id] ?? { hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming" }), bars: mergeBars(loadedBars, current[activeTab.id]?.bars ?? []) } }))).catch(() => undefined);
+  }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe]);
+
+  useEffect(() => () => { if (currentWindowId === MAIN_WINDOW_ID) subscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId)); }, []);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative || !authenticated) return;
+    const symbols = quoteSymbolsKey.split("|").filter(Boolean);
+    api.startQuoteStream("shared-quotes", symbols).catch((error) => showToast(String(error)));
+    return () => { api.stopQuoteStream("shared-quotes"); };
+  }, [quoteSymbolsKey, authEpoch, authenticated, environment, workspaceLoaded]);
 
   useEffect(() => {
     if (api.isNative) return;
-    const refresh = () => api.quotes(workspace.watchlist).then((items) => setQuotes(Object.fromEntries(items.map((quote) => [quote.symbol, { ...quote, receivedAt: Date.now() }])))).catch(() => setQuotes({}));
+    const refresh = () => api.quotes(quoteSymbolsKey.split("|").filter(Boolean)).then((items) => setQuotes(Object.fromEntries(items.map((quote) => [quote.symbol, { ...quote, receivedAt: Date.now() }])))).catch(() => setQuotes({}));
     refresh();
     const timer = window.setInterval(refresh, api.isNative ? 3000 : 1800);
     return () => clearInterval(timer);
-  }, [workspace.watchlist, authEpoch]);
+  }, [quoteSymbolsKey, authEpoch]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setFreshnessTick((value) => value + 1), 1000);
@@ -213,24 +248,20 @@ export default function App() {
   }, []);
 
   async function loadOlder() {
-    if (!api.isNative || loadingOlder || !hasOlder || !bars.length) return;
-    const request = activeChartRef.current;
+    if (!api.isNative || market.loadingOlder || !market.hasOlder || !bars.length) return;
+    const tabId = activeTab.id;
     const before = bars[0].time;
-    setLoadingOlder(true);
+    setTabMarkets((current) => ({ ...current, [tabId]: { ...market, loadingOlder: true } }));
     try {
-      const older = await api.olderBars(request.symbol, request.timeframe, before);
-      const active = activeChartRef.current;
-      if (active.subscriptionId !== request.subscriptionId || active.symbol !== request.symbol || active.timeframe !== request.timeframe) return;
-      if (!older.length) setHasOlder(false);
-      else setBarState((current) => current.symbol === request.symbol && current.timeframe === request.timeframe
-        ? { ...current, bars: mergeBars(older, current.bars) }
-        : current);
+      const older = await api.olderBars(activeTab.symbol.symbol, activeTab.timeframe, before);
+      setTabMarkets((current) => ({ ...current, [tabId]: { ...(current[tabId] ?? market), hasOlder: older.length > 0, bars: older.length ? mergeBars(older, current[tabId]?.bars ?? []) : current[tabId]?.bars ?? [] } }));
     } catch (error) { showToast(String(error)); }
-    finally { setLoadingOlder(false); }
+    finally { setTabMarkets((current) => ({ ...current, [tabId]: { ...(current[tabId] ?? market), loadingOlder: false } })); }
   }
 
   useEffect(() => {
     if (!workspaceLoaded) return;
+    if (currentWindowId !== MAIN_WINDOW_ID) return;
     const timer = window.setTimeout(() => api.saveWorkspace(workspace), 250);
     return () => clearTimeout(timer);
   }, [workspace, workspaceLoaded]);
@@ -246,16 +277,188 @@ export default function App() {
     window.setTimeout(() => setToast(null), 3200);
   }
 
+  function commitWorkspace(update: (current: WorkspaceState) => WorkspaceState) {
+    setWorkspace((current) => {
+      const next = currentWindowId === MAIN_WINDOW_ID
+        ? { ...update(current), revision: Math.max(current.revision + 1, Date.now()) }
+        : update(current);
+      workspaceRef.current = next;
+      emit(currentWindowId === MAIN_WINDOW_ID ? "workspace-sync" : "workspace-proposal", next);
+      return next;
+    });
+  }
+
   function updateWorkspace(patch: Partial<WorkspaceState>) {
-    setWorkspace((current) => ({ ...current, ...patch }));
+    commitWorkspace((current) => ({ ...current, ...patch }));
+  }
+
+  function updateActiveTab(patch: Partial<ChartTabState>) {
+    commitWorkspace((current) => ({ ...current, tabs: current.tabs.map((tab) => tab.id === activeTab.id ? { ...tab, ...patch } : tab) }));
   }
 
   function updateIndicator(id: string, patch: Partial<IndicatorConfig>) {
-    setWorkspace((current) => ({
+    updateActiveTab({ indicators: activeTab.indicators.map((indicator) => indicator.id === id ? { ...indicator, ...patch } : indicator) });
+  }
+
+  function selectTab(tabId: string) {
+    commitWorkspace((current) => ({ ...current, windows: current.windows.map((item) => item.id === currentWindowId ? { ...item, activeTabId: tabId } : item) }));
+  }
+
+  function addTab() {
+    if (workspace.tabs.length >= MAX_CHART_TABS) return showToast(`A maximum of ${MAX_CHART_TABS} chart tabs is supported.`);
+    const id = `chart-${crypto.randomUUID()}`;
+    commitWorkspace((current) => ({
       ...current,
-      indicators: current.indicators.map((indicator) => indicator.id === id ? { ...indicator, ...patch } : indicator),
+      tabs: [...current.tabs, cloneChartTab(activeTab, id)],
+      windows: current.windows.map((item) => item.id === currentWindowId ? { ...item, tabIds: [...item.tabIds, id], activeTabId: id } : item),
     }));
   }
+
+  async function closeTab(tabId: string) {
+    if (workspace.tabs.length === 1) return;
+    let removedWindow: string | undefined;
+    commitWorkspace((current) => {
+      const next = structuredClone(current);
+      next.tabs = next.tabs.filter((tab) => tab.id !== tabId);
+      const owner = next.windows.find((item) => item.tabIds.includes(tabId));
+      if (!owner) return current;
+      const index = owner.tabIds.indexOf(tabId);
+      owner.tabIds.splice(index, 1);
+      if (!owner.tabIds.length) {
+        if (owner.id !== MAIN_WINDOW_ID) {
+          removedWindow = owner.id;
+          next.windows = next.windows.filter((item) => item.id !== owner.id);
+        }
+      }
+      if (!owner.tabIds.includes(owner.activeTabId)) owner.activeTabId = owner.tabIds[Math.min(index, owner.tabIds.length - 1)] ?? "";
+      return next;
+    });
+    if (removedWindow && api.isNative) (await WebviewWindow.getByLabel(removedWindow))?.destroy();
+  }
+
+  function reorderTab(tabId: string, targetIndex: number) {
+    commitWorkspace((current) => moveTab(current, tabId, currentWindowId, targetIndex));
+  }
+
+  async function ensureDetachedWindow(state: ChartWindowState) {
+    if (!api.isNative || !state.detached || await WebviewWindow.getByLabel(state.id)) return;
+    const monitors = await availableMonitors();
+    const screens = monitors.map((monitor) => ({ x: monitor.position.x / monitor.scaleFactor, y: monitor.position.y / monitor.scaleFactor, width: monitor.size.width / monitor.scaleFactor, height: monitor.size.height / monitor.scaleFactor }));
+    const geometry = clampWindowGeometry({ x: state.x ?? screens[0]?.x ?? 0, y: state.y ?? screens[0]?.y ?? 0, width: state.width ?? 1100, height: state.height ?? 760 }, screens);
+    const view = new WebviewWindow(state.id, {
+      url: `/?window=${encodeURIComponent(state.id)}`,
+      title: "Northstar Trader — Chart",
+      width: geometry.width,
+      height: geometry.height,
+      x: geometry.x,
+      y: geometry.y,
+      minWidth: 760,
+      minHeight: 520,
+      resizable: true,
+      decorations: true,
+    });
+    view.once("tauri://created", async () => {
+      await emit("workspace-sync", workspaceRef.current);
+      state.tabIds.forEach((tabId) => {
+        const range = viewRangesRef.current.get(tabId);
+        if (range) emit("chart-viewport", { tabId, range });
+      });
+    });
+    view.once("tauri://error", ({ payload }) => showToast(`Could not detach chart: ${String(payload)}`));
+  }
+
+  async function detachTab(tabId: string) {
+    if (!api.isNative) return showToast("Detaching charts is available in the desktop app.");
+    const source = workspaceRef.current.windows.find((item) => item.tabIds.includes(tabId));
+    if (!source) return;
+    const position = await cursorPosition();
+    const scale = await getCurrentWindow().scaleFactor();
+    const windowId = `chart-window-${crypto.randomUUID()}`;
+    let detachedState: ChartWindowState | undefined;
+    commitWorkspace((current) => {
+      let next = structuredClone(current);
+      detachedState = { id: windowId, detached: true, tabIds: [], activeTabId: tabId, x: Math.round(position.x / scale - 180), y: Math.round(position.y / scale - 18), width: 1100, height: 760 };
+      next.windows.push(detachedState);
+      next = moveTab(next, tabId, windowId, 0);
+      return next;
+    });
+    if (detachedState) await ensureDetachedWindow(detachedState);
+    if (source.id !== MAIN_WINDOW_ID && source.tabIds.length === 1) (await WebviewWindow.getByLabel(source.id))?.destroy();
+  }
+
+  async function finishTabDrag(tabId: string) {
+    if (!api.isNative) return;
+    const point = await cursorPosition();
+    const targetBounds = [...stripBoundsRef.current.values()].find((bounds) => point.x >= bounds.left && point.x <= bounds.right && point.y >= bounds.top && point.y <= bounds.bottom);
+    if (!targetBounds) return detachTab(tabId);
+    const targetWindow = workspaceRef.current.windows.find((item) => item.id === targetBounds.windowId);
+    if (!targetWindow) return detachTab(tabId);
+    const index = tabInsertionIndex(point.x, targetBounds.left, targetBounds.right, targetWindow.tabIds.length);
+    const source = workspaceRef.current.windows.find((item) => item.tabIds.includes(tabId));
+    const sourceId = source?.id;
+    commitWorkspace((current) => moveTab(current, tabId, targetBounds.windowId, index));
+    if (sourceId && sourceId !== MAIN_WINDOW_ID && sourceId !== targetBounds.windowId && workspaceRef.current.windows.find((item) => item.id === sourceId)?.tabIds.length === 1) {
+      (await WebviewWindow.getByLabel(sourceId))?.destroy();
+    }
+  }
+
+  useEffect(() => {
+    if (!workspaceLoaded || !api.isNative || currentWindowId !== MAIN_WINDOW_ID) return;
+    workspace.windows.filter((item) => item.detached).forEach((item) => ensureDetachedWindow(item));
+  }, [workspaceLoaded, workspace.windows]);
+
+  useEffect(() => {
+    const liveWindowIds = new Set(workspace.windows.map((item) => item.id));
+    stripBoundsRef.current.forEach((_, id) => { if (!liveWindowIds.has(id)) stripBoundsRef.current.delete(id); });
+  }, [workspace.windows]);
+
+  useEffect(() => {
+    if (!api.isNative) return;
+    const current = getCurrentWindow();
+    let closing = false;
+    let geometryTimer: number | undefined;
+    let dockTimer: number | undefined;
+    const cleanups: Array<() => void> = [];
+    current.onCloseRequested(async (event) => {
+      if (closing) return;
+      event.preventDefault();
+      closing = true;
+      if (currentWindowId === MAIN_WINDOW_ID) {
+        const windows = await getAllWindows();
+        await Promise.all(windows.filter((item) => item.label !== MAIN_WINDOW_ID).map((item) => item.destroy()));
+      } else {
+        const next = closeDetachedWindow(workspaceRef.current, currentWindowId);
+        workspaceRef.current = next;
+        setWorkspace(next);
+        await emit("workspace-proposal", next);
+      }
+      await current.destroy();
+    }).then((unlisten) => cleanups.push(unlisten));
+    const saveGeometry = () => {
+      if (currentWindowId === MAIN_WINDOW_ID) return;
+      window.clearTimeout(geometryTimer);
+      window.clearTimeout(dockTimer);
+      geometryTimer = window.setTimeout(async () => {
+        const [position, size, scale] = await Promise.all([current.outerPosition(), current.outerSize(), current.scaleFactor()]);
+        commitWorkspace((workspace) => ({ ...workspace, windows: workspace.windows.map((item) => item.id === currentWindowId ? { ...item, x: Math.round(position.x / scale), y: Math.round(position.y / scale), width: Math.round(size.width / scale), height: Math.round(size.height / scale) } : item) }));
+      }, 250);
+      dockTimer = window.setTimeout(async () => {
+        const point = await cursorPosition();
+        const bounds = [...stripBoundsRef.current.values()].find((item) => item.windowId !== currentWindowId && point.x >= item.left && point.x <= item.right && point.y >= item.top && point.y <= item.bottom);
+        const source = workspaceRef.current.windows.find((item) => item.id === currentWindowId);
+        const target = bounds && workspaceRef.current.windows.find((item) => item.id === bounds.windowId);
+        if (!bounds || !source || !target) return;
+        const insertion = tabInsertionIndex(point.x, bounds.left, bounds.right, target.tabIds.length);
+        const movingIds = [...source.tabIds];
+        commitWorkspace((workspace) => movingIds.reduce((next, tabId, offset) => moveTab(next, tabId, target.id, insertion + offset), workspace));
+        closing = true;
+        await current.destroy();
+      }, 450);
+    };
+    current.onMoved(saveGeometry).then((unlisten) => cleanups.push(unlisten));
+    current.onResized(saveGeometry).then((unlisten) => cleanups.push(unlisten));
+    return () => { window.clearTimeout(geometryTimer); window.clearTimeout(dockTimer); cleanups.forEach((cleanup) => cleanup()); };
+  }, []);
 
   async function confirmEnvironment() {
     if (!envConfirm) return;
@@ -303,49 +506,49 @@ export default function App() {
     finally { setBusy(false); }
   }
 
-  const connectionLabel = api.isNative ? (authenticated ? streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
+  const connectionLabel = api.isNative ? (authenticated ? market.streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
 
-  return <main className="app-shell">
+  return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
       <div className="brand"><div className="brand-glyph"><TrendingUp size={16} strokeWidth={2.4} /></div><span>NORTHSTAR</span><small>TRADER</small></div>
-      <div className="instrument-summary"><strong>{workspace.symbol.symbol}</strong><span>{activeQuote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span className={activeQuote.change >= 0 ? "positive" : "negative"}>{activeQuote.change >= 0 ? "+" : ""}{activeQuote.changePct.toFixed(2)}%</span></div>
+      {hasWindowTabs && <div className="instrument-summary"><strong>{activeTab.symbol.symbol}</strong><span>{activeQuote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span className={activeQuote.change >= 0 ? "positive" : "negative"}>{activeQuote.change >= 0 ? "+" : ""}{activeQuote.changePct.toFixed(2)}%</span></div>}
       <div className="titlebar-drag" data-tauri-drag-region />
-      <button className={`environment-badge ${environment}`} onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>
+      {!isDetached && <button className={`environment-badge ${environment}`} onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
       <button className="connection-chip" onClick={() => !authenticated && setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
-      <IconButton label="Notifications"><Bell size={17} /></IconButton>
-      <IconButton label="Settings" onClick={() => setSetupOpen(true)}><Settings2 size={17} /></IconButton>
+      {!isDetached && <><IconButton label="Notifications"><Bell size={17} /></IconButton><IconButton label="Settings" onClick={() => setSetupOpen(true)}><Settings2 size={17} /></IconButton></>}
     </header>
 
-    <nav className="toolbar" aria-label="Chart toolbar">
-      <button className="symbol-control" onClick={() => setSearchOpen(true)}><Search size={16} /><strong>{workspace.symbol.symbol}</strong><span>{workspace.symbol.exchange}</span><ChevronDown size={14} /></button>
+    <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} totalTabs={workspace.tabs.length} windowId={currentWindowId} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); emit("chart-strip-bounds", bounds); }} />
+
+    <nav className={`toolbar ${hasWindowTabs ? "" : "empty"}`} aria-label="Chart toolbar">
+      <button className="symbol-control" onClick={() => setSearchOpen(true)}><Search size={16} /><strong>{activeTab.symbol.symbol}</strong><span>{activeTab.symbol.exchange}</span><ChevronDown size={14} /></button>
       <div className="divider" />
-      <div className="timeframe-group">{timeframes.map((tf) => <button key={tf} className={workspace.timeframe === tf ? "active" : ""} onClick={() => updateWorkspace({ timeframe: tf })}>{tf}</button>)}</div>
+      <div className="timeframe-group">{timeframes.map((tf) => <button key={tf} className={activeTab.timeframe === tf ? "active" : ""} onClick={() => updateActiveTab({ timeframe: tf })}>{tf}</button>)}</div>
       <div className="divider" />
       <div className="chart-kinds">
-        <IconButton label="Candlestick chart" active={workspace.chartKind === "candles"} onClick={() => updateWorkspace({ chartKind: "candles" })}><BarChart3 size={17} /></IconButton>
-        <IconButton label="Line chart" active={workspace.chartKind === "line"} onClick={() => updateWorkspace({ chartKind: "line" })}><LineChart size={17} /></IconButton>
-        <IconButton label="Area chart" active={workspace.chartKind === "area"} onClick={() => updateWorkspace({ chartKind: "area" })}><Activity size={17} /></IconButton>
+        <IconButton label="Candlestick chart" active={activeTab.chartKind === "candles"} onClick={() => updateActiveTab({ chartKind: "candles" })}><BarChart3 size={17} /></IconButton>
+        <IconButton label="Line chart" active={activeTab.chartKind === "line"} onClick={() => updateActiveTab({ chartKind: "line" })}><LineChart size={17} /></IconButton>
+        <IconButton label="Area chart" active={activeTab.chartKind === "area"} onClick={() => updateActiveTab({ chartKind: "area" })}><Activity size={17} /></IconButton>
       </div>
       <div className="toolbar-popover-anchor">
         <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => setIndicatorOpen((value) => !value)}><SlidersHorizontal size={16} />Indicators</button>
-        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{workspace.indicators.filter((i) => i.visible).length} active</span></header>{workspace.indicators.map((indicator) => <div key={indicator.id} className="indicator-row"><label className="indicator-color" title={`Change ${indicator.kind} ${indicator.period} color`}><input type="color" value={indicator.color} aria-label={`Change ${indicator.kind} ${indicator.period} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" aria-pressed={indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind}</strong><small>{indicator.kind === "VWAP" ? "Session" : `Length ${indicator.period}`}</small></span><span className={`toggle ${indicator.visible ? "on" : ""}`} /></button></div>)}</div>}
+        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible).length} active</span></header>{activeTab.indicators.map((indicator) => <div key={indicator.id} className="indicator-row"><label className="indicator-color" title={`Change ${indicator.kind} ${indicator.period} color`}><input type="color" value={indicator.color} aria-label={`Change ${indicator.kind} ${indicator.period} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" aria-pressed={indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind}</strong><small>{indicator.kind === "VWAP" ? "Session" : `Length ${indicator.period}`}</small></span><span className={`toggle ${indicator.visible ? "on" : ""}`} /></button></div>)}</div>}
       </div>
       <button className="text-tool-button"><Bell size={16} />Alert</button>
       <div className="divider" />
       <IconButton label="Undo"><Undo2 size={17} /></IconButton>
       <IconButton label="Reset chart"><RotateCcw size={17} /></IconButton>
       <span className="toolbar-spacer" />
-      <IconButton label="Toggle bottom panel" active={workspace.bottomPanelOpen} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}><PanelBottom size={17} /></IconButton>
-      <IconButton label="Toggle right panel" active={workspace.rightPanelOpen} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}><PanelRight size={17} /></IconButton>
+      {!isDetached && <><IconButton label="Toggle bottom panel" active={workspace.bottomPanelOpen} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}><PanelBottom size={17} /></IconButton><IconButton label="Toggle right panel" active={workspace.rightPanelOpen} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}><PanelRight size={17} /></IconButton></>}
       <IconButton label="Fullscreen"><Maximize2 size={17} /></IconButton>
     </nav>
 
-    <section className={`workspace ${workspace.rightPanelOpen ? "with-right" : ""} ${workspace.bottomPanelOpen ? "with-bottom" : ""}`} style={{ "--bottom-height": `${workspace.bottomPanelHeight ?? 360}px` } as React.CSSProperties}>
+    <section className={`workspace ${hasWindowTabs ? "" : "empty-chart-workspace"} ${!isDetached && workspace.rightPanelOpen ? "with-right" : ""} ${!isDetached && workspace.bottomPanelOpen ? "with-bottom" : ""}`} style={{ "--bottom-height": `${workspace.bottomPanelHeight ?? 360}px` } as React.CSSProperties}>
       <aside className="drawing-rail" aria-label="Drawing tools">
         {[
           ["cursor", MousePointer2, "Cursor"], ["crosshair", Crosshair, "Crosshair"],
         ].map(([id, Icon, label]) => <IconButton key={id as string} label={label as string} active={activeTool === id} onClick={() => setActiveTool(id as string)}><Icon size={18} /></IconButton>)}
-        <IconButton label="Magnet: snap crosshair to candle high or low" active={workspace.magnetEnabled} onClick={() => updateWorkspace({ magnetEnabled: !workspace.magnetEnabled })}><Magnet size={18} /></IconButton>
+        <IconButton label="Magnet: snap crosshair to candle high or low" active={activeTab.magnetEnabled} onClick={() => updateActiveTab({ magnetEnabled: !activeTab.magnetEnabled })}><Magnet size={18} /></IconButton>
         {[
           ["trend", PencilLine, "Trend line"],
           ["horizontal", Minus, "Horizontal line"], ["ray", TrendingUp, "Ray"], ["rectangle", RectangleHorizontal, "Rectangle"],
@@ -354,17 +557,17 @@ export default function App() {
         <span className="rail-spacer" /><IconButton label="Show drawings"><Eye size={18} /></IconButton><IconButton label="Delete drawings"><Trash2 size={18} /></IconButton>
       </aside>
 
-      <TradingChart bars={bars} kind={workspace.chartKind} magnetEnabled={workspace.magnetEnabled} symbol={workspace.symbol.symbol} description={workspace.symbol.description} exchange={workspace.symbol.exchange} timeframe={workspace.timeframe} indicators={workspace.indicators} orders={orders} positions={positions} timezone={workspace.chartTimezone} onTimezoneChange={(chartTimezone) => updateWorkspace({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={loadingOlder} />
+      <TradingChart key={activeTab.id} bars={bars} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} timezone={activeTab.chartTimezone} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={(range) => { viewRangesRef.current.set(activeTab.id, range); emit("chart-viewport", { tabId: activeTab.id, range }); }} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
 
-      {workspace.rightPanelOpen && <aside className="right-panel">
+      {!isDetached && workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
-        {workspace.rightTab === "order" ? <OrderTicket symbol={workspace.symbol} quote={activeQuote} account={selectedAccount} environment={environment} busy={busy} onReview={openReview} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={workspace.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateWorkspace({ symbol: meta }); }} />}
+        {workspace.rightTab === "order" ? <OrderTicket symbol={activeTab.symbol} quote={activeQuote} account={selectedAccount} environment={environment} busy={busy} onReview={openReview} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta }); }} />}
       </aside>}
 
-      {workspace.bottomPanelOpen && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={async (id) => { await api.cancelOrder(id); setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled", closedAt: new Date().toISOString() } : order)); setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Order cancellation sent", text: `Cancellation requested for order ${id}`, level: "warning" }, ...current]); }} />}
+      {!isDetached && workspace.bottomPanelOpen && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={async (id) => { await api.cancelOrder(id); setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled", closedAt: new Date().toISOString() } : order)); setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Order cancellation sent", text: `Cancellation requested for order ${id}`, level: "warning" }, ...current]); }} />}
     </section>
 
-    {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateWorkspace({ symbol: result }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
+    {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateActiveTab({ symbol: result }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
 
     {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><div className="setup-intro"><LockKeyhole size={20} /><div><strong>Credentials stay on this device</strong><p>Your secret and refresh token are handled by the native process and stored in the operating system credential vault.</p></div></div>{!api.isNative && <div className="demo-warning">You are viewing the browser-safe demo. Launch with <code>npm run tauri dev</code> to connect.</div>}<label className="field"><span>Auth0 API key / client ID</span><input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Enter client ID" autoComplete="off" /></label><label className="field"><span>Client secret</span><input value={secret} onChange={(e) => setSecret(e.target.value)} type="password" placeholder="Enter client secret" autoComplete="new-password" /></label><div className="callback-note"><span>Callback URL</span><code>http://localhost:8080</code></div><button className="primary-button" disabled={busy || !api.isNative} onClick={connect}>{busy ? "Starting…" : "Continue to TradeStation"}</button></Modal>}
 
@@ -374,6 +577,78 @@ export default function App() {
 
     {toast && <div className="toast" role="status">{toast}</div>}
   </main>;
+}
+
+function ChartTabStrip({ tabs, activeTabId, totalTabs, windowId, onSelect, onAdd, onClose, onReorder, onDragEnd, onBounds }: {
+  tabs: ChartTabState[];
+  activeTabId: string;
+  totalTabs: number;
+  windowId: string;
+  onSelect: (tabId: string) => void;
+  onAdd: () => void;
+  onClose: (tabId: string) => void;
+  onReorder: (tabId: string, index: number) => void;
+  onDragEnd: (tabId: string) => void;
+  onBounds: (bounds: StripBounds) => void;
+}) {
+  const stripRef = useRef<HTMLElement>(null);
+  const draggedRef = useRef<string | undefined>(undefined);
+  const droppedRef = useRef(false);
+  const [dropIndex, setDropIndex] = useState<number>();
+
+  useEffect(() => {
+    let active = true;
+    const publish = async () => {
+      if (!stripRef.current || !active) return;
+      const rect = stripRef.current.getBoundingClientRect();
+      if (!api.isNative) return onBounds({ windowId, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
+      const current = getCurrentWindow();
+      const [position, scale] = await Promise.all([current.innerPosition(), current.scaleFactor()]);
+      onBounds({ windowId, left: position.x + rect.left * scale, top: position.y + rect.top * scale, right: position.x + rect.right * scale, bottom: position.y + rect.bottom * scale });
+    };
+    publish();
+    const observer = new ResizeObserver(publish);
+    if (stripRef.current) observer.observe(stripRef.current);
+    const timer = window.setInterval(publish, 750);
+    return () => { active = false; observer.disconnect(); clearInterval(timer); };
+  }, [windowId, tabs.length]);
+
+  return <nav ref={stripRef} className="chart-tabs" role="tablist" aria-label="Chart tabs" onDragOver={(event) => {
+    if (!draggedRef.current) return;
+    event.preventDefault();
+    const elements = [...event.currentTarget.querySelectorAll<HTMLElement>(".chart-tab")];
+    const index = elements.findIndex((element) => event.clientX < element.getBoundingClientRect().left + element.offsetWidth / 2);
+    setDropIndex(index < 0 ? elements.length : index);
+  }} onDrop={(event) => {
+    event.preventDefault();
+    if (draggedRef.current) onReorder(draggedRef.current, dropIndex ?? tabs.length);
+    droppedRef.current = true;
+    setDropIndex(undefined);
+  }}>
+    <div className="chart-tab-scroll">
+      {tabs.map((tab, index) => <div key={tab.id} className={`chart-tab ${tab.id === activeTabId ? "active" : ""} ${dropIndex === index ? "drop-before" : ""}`} role="tab" aria-selected={tab.id === activeTabId} draggable onDragStart={(event) => {
+        draggedRef.current = tab.id;
+        droppedRef.current = false;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", tab.id);
+      }} onDragEnd={() => {
+        if (!droppedRef.current) onDragEnd(tab.id);
+        draggedRef.current = undefined;
+        droppedRef.current = false;
+        setDropIndex(undefined);
+      }}>
+        <button className="chart-tab-label" tabIndex={tab.id === activeTabId ? 0 : -1} onClick={() => onSelect(tab.id)} onKeyDown={(event) => {
+          const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+          if (!direction) return;
+          event.preventDefault();
+          onSelect(tabs[(index + direction + tabs.length) % tabs.length].id);
+        }}><strong>{tab.symbol.symbol}</strong><span>·</span><span>{tab.timeframe}</span></button>
+        <button className="chart-tab-close" aria-label={`Close ${tab.symbol.symbol} ${tab.timeframe} chart`} disabled={totalTabs === 1} onClick={() => onClose(tab.id)}><X size={12} /></button>
+      </div>)}
+      {dropIndex === tabs.length && <span className="tab-drop-end" />}
+    </div>
+    <button className="chart-tab-add" aria-label="Add chart tab" title={totalTabs >= MAX_CHART_TABS ? `Maximum ${MAX_CHART_TABS} tabs` : "Add chart tab"} disabled={totalTabs >= MAX_CHART_TABS} onClick={onAdd}><Plus size={15} /></button>
+  </nav>;
 }
 
 function Watchlist({ symbols, quotes, active, onSelect }: { symbols: string[]; quotes: Record<string, Quote>; active: string; onSelect: (symbol: string) => void }) {

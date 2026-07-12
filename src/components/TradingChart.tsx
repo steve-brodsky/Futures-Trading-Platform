@@ -21,6 +21,8 @@ interface Props {
   orders: OrderUpdate[];
   positions: Position[];
   loadingOlder: boolean;
+  initialVisibleRange?: { from: number; to: number };
+  onVisibleRangeChange?: (range: { from: number; to: number }) => void;
   onTimezoneChange: (timezone: ChartTimezone) => void;
   onLoadOlder: () => void;
 }
@@ -28,7 +30,7 @@ interface Props {
 const asTime = (time: number) => time as Time;
 const isIntraday = (timeframe: Timeframe) => !["D", "W", "M"].includes(timeframe);
 
-export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, timeframe, timezone, indicators, orders, positions, loadingOlder, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, timeframe, timezone, indicators, orders, positions, loadingOlder, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -39,6 +41,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   const barsRef = useRef(bars);
   const magnetEnabledRef = useRef(magnetEnabled);
   const loadOlderRef = useRef(onLoadOlder);
+  const visibleRangeChangeRef = useRef(onVisibleRangeChange);
   const firstData = useRef(true);
   const [hovered, setHovered] = useState<Bar | null>(null);
   const [chartGeneration, setChartGeneration] = useState(0);
@@ -48,6 +51,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   barsRef.current = bars;
   magnetEnabledRef.current = magnetEnabled;
   loadOlderRef.current = onLoadOlder;
+  visibleRangeChangeRef.current = onVisibleRangeChange;
 
   useEffect(() => {
     if (!host.current) return;
@@ -101,6 +105,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
       if (!range) return;
+      visibleRangeChangeRef.current?.({ from: Number(range.from), to: Number(range.to) });
       const info = priceSeries.barsInLogicalRange(range);
       if (info && info.barsBefore < 100) loadOlderRef.current();
     });
@@ -155,7 +160,9 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(bars[index].time), value }]));
     });
     if (firstData.current) {
-      chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, bars.length - 180) as any, to: (bars.length + 5) as any });
+      chart.timeScale().setVisibleLogicalRange(initialVisibleRange
+        ? { from: initialVisibleRange.from as any, to: initialVisibleRange.to as any }
+        : { from: Math.max(0, bars.length - 180) as any, to: (bars.length + 5) as any });
       firstData.current = false;
     }
     previousBars.current = bars;

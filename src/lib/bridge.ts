@@ -48,11 +48,17 @@ export const api = {
     if (isTauri) return native("get_older_bars", { symbol, timeframe, before });
     return [];
   },
-  async startMarketStream(subscriptionId: string, symbol: string, timeframe: Timeframe, watchlist: string[]): Promise<void> {
-    if (isTauri) await native("start_market_stream", { subscriptionId, symbol, timeframe, watchlist });
+  async startBarStream(subscriptionId: string, symbol: string, timeframe: Timeframe): Promise<void> {
+    if (isTauri) await native("start_bar_stream", { subscriptionId, symbol, timeframe });
   },
-  async stopMarketStream(): Promise<void> {
-    if (isTauri) await native("stop_market_stream");
+  async stopBarStream(subscriptionId: string): Promise<void> {
+    if (isTauri) await native("stop_bar_stream", { subscriptionId });
+  },
+  async startQuoteStream(subscriptionId: string, symbols: string[]): Promise<void> {
+    if (isTauri) await native("start_quote_stream", { subscriptionId, symbols });
+  },
+  async stopQuoteStream(subscriptionId: string): Promise<void> {
+    if (isTauri) await native("stop_quote_stream", { subscriptionId });
   },
   async startBrokerageStream(accountId: string): Promise<void> {
     if (isTauri) await native("start_brokerage_stream", { accountId });
