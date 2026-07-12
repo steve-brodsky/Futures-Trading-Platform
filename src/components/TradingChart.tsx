@@ -197,7 +197,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
         movingDrawingIdRef.current = null; setMovingDrawingId(null); setDrawingMenu(null); return;
       }
       if (tool === "horizontal" || tool === "horizontal-ray") {
-        drawingCallbacksRef.current.onCreateDrawing({ id: crypto.randomUUID(), kind: tool, points: [{ time, price: clickedPrice }], color: "#ffffff", locked: false });
+        drawingCallbacksRef.current.onCreateDrawing({ id: crypto.randomUUID(), kind: tool, points: [{ time, price: clickedPrice }], color: "#ffffff", locked: false, lineWidth: 1 });
         drawingCallbacksRef.current.onToolComplete(); setDrawingMenu(null); return;
       }
 
@@ -238,7 +238,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     const price = priceRef.current;
     if (!price) return;
     drawingLineRefs.current.forEach((line) => price.removePriceLine(line));
-    drawingLineRefs.current = drawings.filter((drawing) => drawing.kind === "horizontal").map((drawing) => price.createPriceLine({ price: drawing.points[0].price, color: drawing.color, lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" }));
+    drawingLineRefs.current = drawings.filter((drawing) => drawing.kind === "horizontal").map((drawing) => price.createPriceLine({ price: drawing.points[0].price, color: drawing.color, lineWidth: drawing.lineWidth ?? 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" }));
     rayPrimitiveRef.current?.setDrawings(drawings.filter((drawing) => drawing.kind === "horizontal-ray"));
     if (drawingMenu && !drawings.some((drawing) => drawing.id === drawingMenu.id)) setDrawingMenu(null);
   }, [drawings, chartGeneration]);
@@ -298,6 +298,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
         <button className="drawing-menu-backdrop" aria-label="Close drawing menu" onClick={() => setDrawingMenu(null)} />
         <div className="drawing-menu" role="menu" aria-label={`${selectedDrawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"} options`} style={{ left: drawingMenu.x, top: drawingMenu.y }}>
           <label className="drawing-menu-color"><input type="color" value={selectedDrawing.color} aria-label="Drawing color" onChange={(event) => onUpdateDrawing(selectedDrawing.id, { color: event.target.value })} /><span style={{ background: selectedDrawing.color }} />Color</label>
+          <label className="drawing-menu-width"><span>Line width</span><select aria-label="Line width" value={selectedDrawing.lineWidth ?? 1} onChange={(event) => onUpdateDrawing(selectedDrawing.id, { lineWidth: Number(event.target.value) as 1 | 2 | 3 | 4 })}>{[1, 2, 3, 4].map((width) => <option key={width} value={width}>{width}px</option>)}</select></label>
           <button role="menuitem" disabled={selectedDrawing.locked} onClick={() => { movingDrawingIdRef.current = selectedDrawing.id; setMovingDrawingId(selectedDrawing.id); setDrawingMenu(null); }}><MoveVertical size={15} />Move</button>
           <button role="menuitem" onClick={() => onUpdateDrawing(selectedDrawing.id, { locked: !selectedDrawing.locked })}>{selectedDrawing.locked ? <LockOpen size={15} /> : <Lock size={15} />}{selectedDrawing.locked ? "Unlock" : "Lock"}</button>
           <button role="menuitem" className="danger" onClick={() => { onDeleteDrawing(selectedDrawing.id); setDrawingMenu(null); }}><Trash2 size={15} />Delete</button>

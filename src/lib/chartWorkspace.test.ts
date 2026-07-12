@@ -75,6 +75,6 @@ describe("chart workspace", () => {
       { id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff" },
       { id: "bad", kind: "horizontal", points: [], color: "#fff" },
     ] } }, fallback);
-    expect(result.drawings.MES).toEqual([{ id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", locked: false }]);
+    expect(result.drawings.MES).toEqual([{ id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", locked: false, lineWidth: 1 }]);
   });
 });

@@ -92,7 +92,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       const drawing = item as Drawing;
       return ["horizontal", "horizontal-ray"].includes(drawing.kind) && typeof drawing.id === "string" && typeof drawing.color === "string"
         && Array.isArray(drawing.points) && drawing.points.length > 0 && drawing.points.every((point) => Number.isFinite(point?.time) && Number.isFinite(point?.price));
-    }).map((item) => ({ ...item, locked: item.locked === true, points: item.points.map((point) => ({ ...point })) }));
+    }).map((item) => ({ ...item, locked: item.locked === true, lineWidth: [1, 2, 3, 4].includes(item.lineWidth ?? 1) ? item.lineWidth ?? 1 : 1, points: item.points.map((point) => ({ ...point })) }));
     return valid.length ? [[symbol, valid]] : [];
   }));
   return {

@@ -21,9 +21,9 @@ export class HorizontalRayPrimitive implements ISeriesPrimitive<Time> {
     const scale = this.chart.timeScale();
     const coordinates = this.drawings.map((drawing) => ({ drawing, x: scale.timeToCoordinate(nearestChartTime(drawing.points[0].time, this.times) as Time), y: this.series!.priceToCoordinate(drawing.points[0].price) }));
     target.useMediaCoordinateSpace(({ context, mediaSize }) => {
-      context.lineWidth = 1;
       coordinates.forEach(({ drawing, x, y }) => {
         if (x == null || y == null || y < 0 || y > mediaSize.height) return;
+        context.lineWidth = drawing.lineWidth ?? 1;
         context.beginPath(); context.strokeStyle = drawing.color; context.moveTo(Math.max(0, x), y + .5); context.lineTo(mediaSize.width, y + .5); context.stroke();
       });
     });

@@ -111,6 +111,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .drawing-menu-backdrop { position: absolute; inset: 0; z-index: 8; padding: 0; border: 0; background: transparent; }
 .drawing-menu { position: absolute; z-index: 9; width: 176px; padding: 4px; border: 1px solid #303b4a; border-radius: 7px; background: #121821; box-shadow: 0 15px 40px rgba(0,0,0,.55); }
 .drawing-menu button, .drawing-menu-color { width: 100%; height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border: 0; border-radius: 4px; color: #b8c2cf; background: transparent; font-size: 9px; cursor: pointer; }
+.drawing-menu-width { width: 100%; height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 9px; color: #b8c2cf; font-size: 9px; }
+.drawing-menu-width select { height: 24px; padding: 0 5px; border: 1px solid #303b4a; border-radius: 4px; color: #dce3eb; background: #1b2430; font-size: 9px; cursor: pointer; }
 .drawing-menu button:hover, .drawing-menu-color:hover { color: #f0f4f8; background: #1b2430; }
 .drawing-menu button:disabled { opacity: .35; cursor: not-allowed; }
 .drawing-menu button.danger { color: #ef7892; }
