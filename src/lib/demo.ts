@@ -1,4 +1,4 @@
-import type { Account, Bar, OrderUpdate, Position, Quote, SymbolMeta } from "../types";
+import type { Account, AccountBalance, Bar, OrderUpdate, Position, Quote, SymbolMeta } from "../types";
 
 export const futures: SymbolMeta[] = [
   { symbol: "MESU26", description: "Micro E-mini S&P 500 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5, expiration: "2026-09-18" },
@@ -27,8 +27,14 @@ export function makeDemoBars(count = 360, start = 6218, scale = 1): Bar[] {
 }
 
 export const demoAccounts: Account[] = [{ id: "SIM-849201", displayId: "•••9201", accountType: "Futures", status: "Active", currency: "USD" }];
-export const demoPositions: Position[] = [{ id: "p1", symbol: "MESU26", side: "Long", quantity: 2, averagePrice: 6253.25, last: 6260, unrealizedPnl: 67.5 }];
-export const demoOrders: OrderUpdate[] = [{ id: "1047921", symbol: "MESU26", side: "Sell", type: "Limit", quantity: 2, price: 6267.5, status: "Working", timestamp: new Date().toISOString() }];
+export const demoPositions: Position[] = [{ id: "p1", symbol: "MESU26", side: "Long", quantity: 2, averagePrice: 6253.25, last: 6260, bid: 6259.75, ask: 6260, unrealizedPnl: 67.5, unrealizedPnlQuantity: 33.75, unrealizedPnlPercent: .54, marketValue: 62600, timestamp: new Date().toISOString() }];
+export const demoOrders: OrderUpdate[] = [
+  { id: "1047921", accountId: "SIM-849201", symbol: "MESU26", side: "Sell", type: "Limit", quantity: 2, filledQuantity: 0, remainingQuantity: 2, price: 6267.5, status: "Working", duration: "GTC", timestamp: new Date().toISOString(), takeProfit: 6267.5 },
+  { id: "1047918", accountId: "SIM-849201", symbol: "MESU26", side: "Buy", type: "Market", quantity: 2, filledQuantity: 2, remainingQuantity: 0, averageFillPrice: 6253.25, status: "Filled", duration: "DAY", timestamp: new Date(Date.now() - 900000).toISOString(), closedAt: new Date(Date.now() - 899000).toISOString(), commission: 2.48 },
+  { id: "1047901", accountId: "SIM-849201", symbol: "MNQU26", side: "Sell", type: "StopMarket", quantity: 1, filledQuantity: 0, remainingQuantity: 1, stopPrice: 22980, status: "Cancelled", duration: "GTC", timestamp: new Date(Date.now() - 3600000).toISOString(), closedAt: new Date(Date.now() - 3500000).toISOString() },
+];
+export const demoBalance: AccountBalance = { accountId: "SIM-849201", accountType: "Futures", currency: "USD", cashBalance: 4996.52, buyingPower: 4996.52, equity: 5064.02, marketValue: 62600, todaysProfitLoss: 67.5, unrealizedProfitLoss: 67.5, unclearedDeposit: 0, commission: 2.48, initialMargin: 2460, maintenanceMargin: 2200, openOrderMargin: 0 };
+export const demoBodBalance: AccountBalance = { accountId: "SIM-849201", accountType: "Futures", currency: "USD", cashBalance: 4996.52, equity: 4996.52, marketValue: 0 };
 
 export function quoteFor(symbol: string, offset = 0): Quote {
   const last = symbol.startsWith("MNQ") ? 23048.5 : symbol.startsWith("MCL") ? 68.42 : symbol.startsWith("MGC") ? 3478.2 : symbol.startsWith("MYM") ? 44982 : 6260 + offset;

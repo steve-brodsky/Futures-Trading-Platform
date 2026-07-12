@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, Bar, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
-import { demoAccounts, demoOrders, demoPositions, futures, makeDemoBars, quoteFor } from "./demo";
+import type { Account, AccountBalance, Bar, HistoricalOrderPage, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, futures, makeDemoBars, quoteFor } from "./demo";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -54,15 +54,30 @@ export const api = {
   async stopMarketStream(): Promise<void> {
     if (isTauri) await native("stop_market_stream");
   },
+  async startBrokerageStream(accountId: string): Promise<void> {
+    if (isTauri) await native("start_brokerage_stream", { accountId });
+  },
+  async stopBrokerageStream(): Promise<void> {
+    if (isTauri) await native("stop_brokerage_stream");
+  },
   async quotes(symbols: string[]): Promise<Quote[]> {
     if (isTauri) return native("get_quotes", { symbols });
     return symbols.map((symbol, index) => quoteFor(symbol, index * 0.25));
   },
-  async positions(): Promise<Position[]> {
-    return isTauri ? native("get_positions") : demoPositions;
+  async positions(accountId: string): Promise<Position[]> {
+    return isTauri ? native("get_positions", { accountId }) : demoPositions;
   },
-  async orders(): Promise<OrderUpdate[]> {
-    return isTauri ? native("get_orders") : demoOrders;
+  async orders(accountId: string): Promise<OrderUpdate[]> {
+    return isTauri ? native("get_orders", { accountId }) : demoOrders;
+  },
+  async balances(accountId: string): Promise<AccountBalance[]> {
+    return isTauri ? native("get_balances", { accountId }) : [demoBalance];
+  },
+  async bodBalances(accountId: string): Promise<AccountBalance[]> {
+    return isTauri ? native("get_bod_balances", { accountId }) : [demoBodBalance];
+  },
+  async historicalOrders(accountId: string, since: string, nextToken?: string): Promise<HistoricalOrderPage> {
+    return isTauri ? native("get_historical_orders", { accountId, since, nextToken }) : { orders: demoOrders.filter((order) => order.status !== "Working") };
   },
   async confirmOrder(order: OrderDraft): Promise<OrderPreview> {
     if (isTauri) return native("confirm_order", { order });

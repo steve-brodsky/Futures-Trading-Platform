@@ -390,6 +390,14 @@ impl TradeStation {
                 average_price: number(item, "AveragePrice"),
                 last: number(item, "Last"),
                 unrealized_pnl: number(item, "UnrealizedProfitLoss"),
+                bid: optional_number(item, "Bid"),
+                ask: optional_number(item, "Ask"),
+                unrealized_pnl_percent: optional_number(item, "UnrealizedProfitLossPercent"),
+                unrealized_pnl_quantity: optional_number(item, "UnrealizedProfitLossQty"),
+                initial_requirement: optional_number(item, "InitialRequirement"),
+                maintenance_margin: optional_number(item, "MaintenanceMargin"),
+                market_value: optional_number(item, "MarketValue"),
+                timestamp: optional_string(item, "Timestamp"),
             })
             .collect())
     }
@@ -409,6 +417,26 @@ impl TradeStation {
             .flatten()
             .map(order_from_value)
             .collect())
+    }
+
+    pub async fn balances(&self, account: &str, bod: bool) -> Result<Vec<AccountBalance>, AppError> {
+        let resource = if bod { "bodbalances" } else { "balances" };
+        let body = self.send(Method::GET, &format!("/brokerage/accounts/{account}/{resource}"), None).await?;
+        let key = if bod { "BODBalances" } else { "Balances" };
+        Ok(body.get(key).or_else(|| body.get("Balances")).and_then(Value::as_array).into_iter().flatten().map(balance_from_value).collect())
+    }
+
+    pub async fn historical_orders(&self, account: &str, since: &str, next_token: Option<&str>) -> Result<HistoricalOrderPage, AppError> {
+        let mut path = format!("/brokerage/accounts/{account}/historicalorders?since={since}&pageSize=100");
+        if let Some(token) = next_token.filter(|value| !value.is_empty()) {
+            let encoded: String = url::form_urlencoded::byte_serialize(token.as_bytes()).collect();
+            path.push_str("&nextToken="); path.push_str(&encoded);
+        }
+        let body = self.send(Method::GET, &path, None).await?;
+        Ok(HistoricalOrderPage {
+            orders: body.get("Orders").and_then(Value::as_array).into_iter().flatten().map(order_from_value).collect(),
+            next_token: optional_string(&body, "NextToken"),
+        })
     }
 
     pub async fn confirm_order(&self, draft: &OrderDraft) -> Result<OrderPreview, AppError> {
@@ -470,6 +498,9 @@ impl TradeStation {
             stop_price: draft.stop_price,
             status: "Pending".into(),
             timestamp: Utc::now().to_rfc3339(),
+            account_id: Some(draft.account_id.clone()), filled_quantity: Some(0.0), remaining_quantity: Some(draft.quantity as f64),
+            average_fill_price: None, duration: Some(draft.duration.clone()), closed_at: None, commission: None,
+            stop_loss: draft.stop_loss, take_profit: draft.take_profit,
         })
     }
 
@@ -577,6 +608,28 @@ fn order_from_value(item: &Value) -> OrderUpdate {
         stop_price: optional_number(item, "StopPrice"),
         status: string(item, "Status"),
         timestamp: string(item, "OpenedDateTime"),
+        account_id: optional_string(item, "AccountID"),
+        filled_quantity: optional_number(leg, "ExecQuantity"),
+        remaining_quantity: optional_number(leg, "QuantityRemaining"),
+        average_fill_price: optional_number(leg, "ExecutionPrice"),
+        duration: optional_string(item, "Duration"),
+        closed_at: optional_string(item, "ClosedDateTime"),
+        commission: optional_number(item, "CommissionFee"),
+        stop_loss: None,
+        take_profit: None,
+    }
+}
+
+fn balance_from_value(item: &Value) -> AccountBalance {
+    let detail = item.get("BalanceDetail").unwrap_or(item);
+    AccountBalance {
+        account_id: string(item, "AccountID"), account_type: string(item, "AccountType"), currency: string(item, "Currency"),
+        cash_balance: optional_number(item, "CashBalance"), buying_power: optional_number(item, "BuyingPower"), equity: optional_number(item, "Equity"),
+        market_value: optional_number(item, "MarketValue"), todays_profit_loss: optional_number(item, "TodaysProfitLoss"),
+        unrealized_profit_loss: optional_number(item, "UnrealizedProfitLoss"), uncleared_deposit: optional_number(item, "UnclearedDeposit"),
+        commission: optional_number(item, "Commission").or_else(|| optional_number(detail, "Commission")),
+        initial_margin: optional_number(detail, "InitialMargin"), maintenance_margin: optional_number(detail, "MaintenanceMargin"),
+        open_order_margin: optional_number(detail, "OpenOrderMargin"), balance_date: optional_string(item, "BalanceDate"),
     }
 }
 
@@ -702,6 +755,9 @@ fn optional_number(value: &Value, key: &str) -> Option<f64> {
     value
         .get(key)
         .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()))
+}
+fn optional_string(value: &Value, key: &str) -> Option<String> {
+    let value = string(value, key); if value.is_empty() { None } else { Some(value) }
 }
 fn number(value: &Value, key: &str) -> f64 {
     optional_number(value, key).unwrap_or(0.0)

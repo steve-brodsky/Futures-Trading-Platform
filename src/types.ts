@@ -55,6 +55,14 @@ export interface Position {
   averagePrice: number;
   last: number;
   unrealizedPnl: number;
+  bid?: number;
+  ask?: number;
+  unrealizedPnlPercent?: number;
+  unrealizedPnlQuantity?: number;
+  initialRequirement?: number;
+  maintenanceMargin?: number;
+  marketValue?: number;
+  timestamp?: string;
 }
 
 export interface OrderUpdate {
@@ -67,7 +75,40 @@ export interface OrderUpdate {
   stopPrice?: number;
   status: "Working" | "Filled" | "Cancelled" | "Rejected" | "Pending" | "Indeterminate";
   timestamp: string;
+  accountId?: string;
+  filledQuantity?: number;
+  remainingQuantity?: number;
+  averageFillPrice?: number;
+  duration?: string;
+  closedAt?: string;
+  commission?: number;
+  stopLoss?: number;
+  takeProfit?: number;
 }
+
+export interface AccountBalance {
+  accountId: string;
+  accountType: string;
+  currency: string;
+  cashBalance?: number;
+  buyingPower?: number;
+  equity?: number;
+  marketValue?: number;
+  todaysProfitLoss?: number;
+  unrealizedProfitLoss?: number;
+  unclearedDeposit?: number;
+  commission?: number;
+  initialMargin?: number;
+  maintenanceMargin?: number;
+  openOrderMargin?: number;
+}
+
+export interface BodBalance extends AccountBalance {
+  balanceDate?: string;
+}
+
+export interface HistoricalOrderPage { orders: OrderUpdate[]; nextToken?: string; }
+export interface ActivityNotification { id: string; symbol?: string; time: string; title: string; text: string; level?: "info" | "success" | "warning" | "error"; }
 
 export interface OrderDraft {
   accountId: string;
@@ -114,8 +155,10 @@ export interface WorkspaceState {
   watchlist: string[];
   rightTab: "order" | "watchlist";
   rightPanelOpen: boolean;
-  bottomTab: "positions" | "orders" | "history" | "fills" | "balances";
+  bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
   bottomPanelOpen: boolean;
+  bottomPanelHeight?: number;
+  selectedAccountId?: string;
   chartTimezone: ChartTimezone;
 }
 

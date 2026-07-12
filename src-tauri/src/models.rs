@@ -82,6 +82,14 @@ pub struct Position {
     pub average_price: f64,
     pub last: f64,
     pub unrealized_pnl: f64,
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
+    pub unrealized_pnl_percent: Option<f64>,
+    pub unrealized_pnl_quantity: Option<f64>,
+    pub initial_requirement: Option<f64>,
+    pub maintenance_margin: Option<f64>,
+    pub market_value: Option<f64>,
+    pub timestamp: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +131,42 @@ pub struct OrderUpdate {
     pub stop_price: Option<f64>,
     pub status: String,
     pub timestamp: String,
+    pub account_id: Option<String>,
+    pub filled_quantity: Option<f64>,
+    pub remaining_quantity: Option<f64>,
+    pub average_fill_price: Option<f64>,
+    pub duration: Option<String>,
+    pub closed_at: Option<String>,
+    pub commission: Option<f64>,
+    pub stop_loss: Option<f64>,
+    pub take_profit: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountBalance {
+    pub account_id: String,
+    pub account_type: String,
+    pub currency: String,
+    pub cash_balance: Option<f64>,
+    pub buying_power: Option<f64>,
+    pub equity: Option<f64>,
+    pub market_value: Option<f64>,
+    pub todays_profit_loss: Option<f64>,
+    pub unrealized_profit_loss: Option<f64>,
+    pub uncleared_deposit: Option<f64>,
+    pub commission: Option<f64>,
+    pub initial_margin: Option<f64>,
+    pub maintenance_margin: Option<f64>,
+    pub open_order_margin: Option<f64>,
+    pub balance_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoricalOrderPage {
+    pub orders: Vec<OrderUpdate>,
+    pub next_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,4 +211,12 @@ pub struct StreamStateEvent {
     pub channel: String,
     pub state: String,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerageUpdateEvent {
+    pub account_id: String,
+    pub channel: String,
+    pub data: serde_json::Value,
 }

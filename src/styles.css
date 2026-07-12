@@ -64,7 +64,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 
 .workspace { position: relative; min-height: 0; display: grid; grid-template-columns: 44px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); background: #0b0f17; }
 .workspace.with-right { grid-template-columns: 44px minmax(0, 1fr) 314px; }
-.workspace.with-bottom { grid-template-rows: minmax(0, 1fr) 180px; }
+.workspace.with-bottom { grid-template-rows: minmax(0, 1fr) var(--bottom-height, 360px); }
 .drawing-rail { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; align-items: center; padding: 6px; gap: 2px; background: #0d1117; border-right: 1px solid var(--line); z-index: 4; }
 .rail-spacer { flex: 1; }
 
@@ -146,7 +146,23 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .watchlist b, .watchlist em { text-align: right; font-style: normal; }
 .watchlist em { font: 500 9px DM Mono, monospace; }
 
-.bottom-panel { grid-column: 1 / 3; grid-row: 2; background: #0d1117; border-top: 1px solid var(--line); min-width: 0; z-index: 4; }
+.bottom-panel { position: relative; grid-column: 1 / 3; grid-row: 2; display: grid; grid-template-rows: 42px 72px 44px minmax(0,1fr); background: #0d0d0e; border-top: 1px solid #2b2b2d; min-width: 0; min-height: 0; z-index: 4; animation: panel-in .18s ease-out; }
+.resize-handle { position: absolute; z-index: 8; top: -4px; left: 0; right: 0; height: 8px; cursor: ns-resize; }
+.bottom-provider { display: flex; align-items: center; gap: 8px; padding: 0 10px 0 14px; background: #202021; border-bottom: 1px solid #29292b; color: #d5d5d7; }
+.bottom-provider strong { font-size: 12px; }
+.bottom-provider button, .bottom-tabs button, .table-filters button, .history-controls button { border: 0; color: #aaa; background: transparent; cursor: pointer; }
+.bottom-provider > button { width: 28px; height: 28px; display: grid; place-items: center; }
+.bottom-provider .bottom-status { margin-left: auto; }
+.account-summary { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; }
+.account-summary select { height: 30px; min-width: 150px; border: 1px solid #39393c; border-radius: 5px; color: #d7d7d9; background: #121213; padding: 0 9px; }
+.account-summary dl { display: flex; gap: 38px; margin: 0; }
+.account-summary dl div { display: flex; flex-direction: column; gap: 3px; min-width: 80px; }
+.account-summary dt { color: #8c8c91; font-size: 9px; }
+.account-summary dd { margin: 0; color: #d4d4d6; font: 500 11px DM Mono, monospace; }
+.bottom-tabs { height: 44px !important; padding: 0 14px !important; gap: 5px; border: 0 !important; }
+.bottom-tabs button { height: 28px !important; padding: 0 12px !important; border: 0 !important; border-radius: 16px; background: #303032; text-transform: none !important; font-size: 10px !important; }
+.bottom-tabs button.active { color: #151516 !important; background: #eeeef0 !important; }
+.bottom-tabs .export-button { margin-left: auto; padding: 0 !important; width: 30px; display: grid; place-items: center; color: #bbb !important; background: transparent !important; }
 .workspace:not(.with-right) .bottom-panel { grid-column: 1 / -1; }
 .bottom-panel nav { height: 34px; padding-left: 48px; display: flex; align-items: center; border-bottom: 1px solid var(--line); }
 .bottom-panel nav button { height: 34px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); text-transform: capitalize; font-size: 9px; cursor: pointer; }
@@ -154,7 +170,27 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .bottom-panel nav button span { margin-left: 5px; color: var(--cyan); }
 .bottom-status { margin-left: auto; margin-right: 12px; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 8px; }
 .status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 7px var(--green); }
-.table-wrap { height: calc(100% - 34px); overflow: auto; }
+.table-wrap { position: relative; min-height: 0; overflow: auto; }
+.table-filters, .history-controls { position: sticky; z-index: 3; top: 0; height: 40px; display: flex; align-items: center; gap: 4px; padding: 0 14px; background: #0d0d0e; }
+.table-filters button, .history-controls button { height: 27px; padding: 0 10px; border-radius: 5px; font-size: 10px; }
+.table-filters button.active, .history-controls button.active { color: #eee; background: #303033; }
+.history-controls { gap: 9px; }
+.history-controls label { display: flex; align-items: center; gap: 5px; color: #888; font-size: 9px; }
+.history-controls input { height: 26px; border: 1px solid #343438; border-radius: 4px; color: #ccc; color-scheme: dark; background: #151516; padding: 0 6px; font-size: 9px; }
+.panel-error { padding: 7px 14px; color: #ef7c88; background: rgba(239,70,111,.08); font-size: 9px; }
+.status-dot.error { background: var(--red); box-shadow: 0 0 7px var(--red); }
+.buy-text { color: #3578ff; }
+.order-status.filled { color: #12b89b; background: rgba(18,184,155,.1); }
+.order-status.rejected { color: var(--red); background: rgba(239,70,111,.1); }
+.balance-sections { min-width: 1100px; padding-bottom: 24px; }
+.balance-sections section { padding: 8px 14px 18px; border-bottom: 1px solid #29292c; }
+.balance-sections h3 { margin: 0 0 16px; font-size: 11px; color: #ddd; }
+.balance-grid { display: grid; grid-template-columns: repeat(11, minmax(115px,1fr)); gap: 18px; }
+.balance-grid div { display: flex; flex-direction: column; gap: 18px; }
+.balance-grid span { color: #77777d; font-size: 9px; }
+.balance-grid strong { color: #c5c5c8; font: 500 10px DM Mono,monospace; }
+.load-more { display: block; margin: 12px auto; padding: 7px 14px; border: 1px solid #38383b; border-radius: 5px; color: #ccc; background: #202022; cursor: pointer; }
+@keyframes panel-in { from { opacity: .5; transform: translateY(12px); } }
 table { width: 100%; border-collapse: collapse; font-size: 9px; }
 th { position: sticky; top: 0; height: 26px; padding: 0 12px; text-align: left; color: var(--muted-2); background: #0d1117; font-weight: 500; border-bottom: 1px solid var(--line-soft); }
 td { height: 32px; padding: 0 12px; color: #a8b1be; font: 400 9px DM Mono, monospace; border-bottom: 1px solid #151b23; }

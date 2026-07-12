@@ -46,6 +46,7 @@ pub struct NativeState {
     api: TradeStation,
     db_path: PathBuf,
     streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+    brokerage_streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 #[tauri::command]
@@ -257,26 +258,78 @@ async fn stop_market_stream(state: State<'_, NativeState>) -> Result<(), AppErro
     Ok(())
 }
 
-async fn first_account(state: &State<'_, NativeState>) -> Result<String, AppError> {
-    state
-        .api
-        .accounts()
-        .await?
-        .first()
-        .map(|account| account.id.clone())
-        .ok_or_else(|| AppError::Validation("No futures account is available".into()))
+#[tauri::command(rename_all = "camelCase")]
+async fn start_brokerage_stream(app: tauri::AppHandle, account_id: String, state: State<'_, NativeState>) -> Result<(), AppError> {
+    let mut tasks = state.brokerage_streams.lock().await;
+    for task in tasks.drain(..) { task.abort(); }
+    for channel in ["positions", "orders"] {
+        tasks.push(tauri::async_runtime::spawn(run_brokerage_stream(app.clone(), state.api.clone(), account_id.clone(), channel.to_string())));
+    }
+    Ok(())
 }
 
 #[tauri::command]
-async fn get_positions(state: State<'_, NativeState>) -> Result<Vec<Position>, AppError> {
-    let account = first_account(&state).await?;
-    state.api.positions(&account).await
+async fn stop_brokerage_stream(state: State<'_, NativeState>) -> Result<(), AppError> {
+    for task in state.brokerage_streams.lock().await.drain(..) { task.abort(); }
+    Ok(())
 }
 
-#[tauri::command]
-async fn get_orders(state: State<'_, NativeState>) -> Result<Vec<OrderUpdate>, AppError> {
-    let account = first_account(&state).await?;
-    state.api.orders(&account).await
+async fn run_brokerage_stream(app: tauri::AppHandle, api: TradeStation, account_id: String, channel: String) {
+    let path = if channel == "positions" {
+        format!("/brokerage/stream/accounts/{account_id}/{channel}?changes=true")
+    } else {
+        format!("/brokerage/stream/accounts/{account_id}/{channel}")
+    };
+    let mut attempt = 0u32;
+    loop {
+        match api.open_stream(&path).await {
+            Ok(response) => {
+                attempt = 0;
+                let mut bytes = response.bytes_stream(); let mut buffer = Vec::new();
+                while let Some(Ok(chunk)) = bytes.next().await {
+                    let values = match decode_stream_values(&mut buffer, &chunk) { Ok(values) => values, Err(_) => break };
+                    for data in values {
+                        if data.get("StreamStatus").is_some() { continue; }
+                        let _ = app.emit("brokerage-update", BrokerageUpdateEvent { account_id: account_id.clone(), channel: channel.clone(), data });
+                    }
+                }
+            }
+            Err(error) => {
+                let message = error.to_string();
+                // Some TradeStation account/environment combinations do not permit
+                // brokerage streams. The UI's snapshot polling remains authoritative.
+                if message.contains("403") || message.to_ascii_lowercase().contains("forbidden") { break; }
+                let _ = app.emit("brokerage-stream-error", message);
+            }
+        }
+        attempt = attempt.saturating_add(1);
+        tokio::time::sleep(std::time::Duration::from_secs((1u64 << attempt.min(5)).min(30))).await;
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_positions(account_id: String, state: State<'_, NativeState>) -> Result<Vec<Position>, AppError> {
+    state.api.positions(&account_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_orders(account_id: String, state: State<'_, NativeState>) -> Result<Vec<OrderUpdate>, AppError> {
+    state.api.orders(&account_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_balances(account_id: String, state: State<'_, NativeState>) -> Result<Vec<AccountBalance>, AppError> {
+    state.api.balances(&account_id, false).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_bod_balances(account_id: String, state: State<'_, NativeState>) -> Result<Vec<AccountBalance>, AppError> {
+    state.api.balances(&account_id, true).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_historical_orders(account_id: String, since: String, next_token: Option<String>, state: State<'_, NativeState>) -> Result<HistoricalOrderPage, AppError> {
+    state.api.historical_orders(&account_id, &since, next_token.as_deref()).await
 }
 
 #[tauri::command]
@@ -651,6 +704,7 @@ pub fn run() {
                 api,
                 db_path: app_dir.join("northstar.sqlite3"),
                 streams: tokio::sync::Mutex::new(Vec::new()),
+                brokerage_streams: tokio::sync::Mutex::new(Vec::new()),
             });
             Ok(())
         })
@@ -668,8 +722,13 @@ pub fn run() {
             get_older_bars,
             start_market_stream,
             stop_market_stream,
+            start_brokerage_stream,
+            stop_brokerage_stream,
             get_positions,
             get_orders,
+            get_balances,
+            get_bod_balances,
+            get_historical_orders,
             confirm_order,
             place_order,
             cancel_order,

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  Activity, BarChart3, Bell, BookOpen, ChevronDown, Crosshair,
+  Activity, BarChart3, Bell, BookOpen, ChevronDown, Crosshair, Download,
   Eye, Gauge, LineChart, LockKeyhole, Maximize2, Minus, Percent,
   MousePointer2, PanelBottom, PanelRight, PencilLine, Plus, RectangleHorizontal, RotateCcw,
   Search, Settings2, SlidersHorizontal, SquareStack, TextCursorInput, Trash2, TrendingUp,
@@ -12,13 +12,13 @@ import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { roundToTick, validateTick } from "./lib/indicators";
 import { defaultIndicators, normalizeIndicators } from "./lib/workspace";
-import type { Account, Bar, BarSnapshotEvent, BarUpdateEvent, ChartKind, IndicatorConfig, OrderDraft, OrderPreview, OrderType, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartKind, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderType, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 
 const defaultWorkspace: WorkspaceState = {
   symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators,
-  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false,
+  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360,
   chartTimezone: "exchange",
 };
 
@@ -48,6 +48,12 @@ export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [positions, setPositions] = useState<Position[]>(api.isNative ? [] : demoPositions);
   const [orders, setOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoOrders);
+  const [balances, setBalances] = useState<AccountBalance[]>([]);
+  const [bodBalances, setBodBalances] = useState<AccountBalance[]>([]);
+  const [history, setHistory] = useState<HistoricalOrderPage>({ orders: [] });
+  const [brokerageLoading, setBrokerageLoading] = useState(false);
+  const [brokerageError, setBrokerageError] = useState<string>();
+  const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -62,6 +68,7 @@ export default function App() {
   const [secret, setSecret] = useState("");
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
+  const [brokerageEpoch, setBrokerageEpoch] = useState(0);
   const [busy, setBusy] = useState(false);
   const [streamState, setStreamState] = useState<StreamConnectionState>(api.isNative ? "disconnected" : "streaming");
   const [hasOlder, setHasOlder] = useState(true);
@@ -76,7 +83,10 @@ export default function App() {
 
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
-      if (saved) setWorkspace({ ...defaultWorkspace, ...saved, indicators: normalizeIndicators(saved.indicators), chartTimezone: saved.chartTimezone ?? "exchange" });
+      if (saved) {
+        const legacyTab = (saved as unknown as { bottomTab: string }).bottomTab;
+        setWorkspace({ ...defaultWorkspace, ...saved, bottomTab: legacyTab === "fills" ? "history" : legacyTab === "balances" ? "summary" : saved.bottomTab, bottomPanelHeight: saved.bottomPanelHeight ?? 360, indicators: normalizeIndicators(saved.indicators), chartTimezone: saved.chartTimezone ?? "exchange" });
+      }
       setAuthenticated(auth.authenticated);
       setAccounts(auth.authenticated ? await api.accounts().catch(() => []) : []);
       if (api.isNative && !auth.configured) setSetupOpen(true);
@@ -88,8 +98,6 @@ export default function App() {
         setAuthenticated(true);
         setSetupOpen(false);
         setAccounts(await api.accounts().catch(() => []));
-        setPositions(await api.positions().catch(() => []));
-        setOrders(await api.orders().catch(() => []));
         setAuthEpoch((value) => value + 1);
         showToast("TradeStation connected.");
       }).then((unlisten) => cleanups.push(unlisten));
@@ -118,9 +126,40 @@ export default function App() {
         if (payload.subscriptionId !== activeChartRef.current.subscriptionId) return;
         setStreamState(payload.state);
       }).then((unlisten) => cleanups.push(unlisten));
+      listen<{ accountId: string }>("brokerage-update", () => setBrokerageEpoch((value) => value + 1)).then((unlisten) => cleanups.push(unlisten));
+      listen<string>("brokerage-stream-error", ({ payload }) => setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Brokerage stream reconnecting", text: payload, level: "warning" as const }, ...current].slice(0, 250))).then((unlisten) => cleanups.push(unlisten));
     }
     return () => cleanups.forEach((unlisten) => unlisten());
   }, []);
+
+  const selectedAccount = accounts.find((account) => account.id === workspace.selectedAccountId) ?? accounts[0];
+
+  useEffect(() => {
+    if (!selectedAccount) return;
+    if (workspace.selectedAccountId !== selectedAccount.id) updateWorkspace({ selectedAccountId: selectedAccount.id });
+    let active = true;
+    const refresh = async () => {
+      setBrokerageLoading(true); setBrokerageError(undefined);
+      try {
+        const [nextPositions, nextOrders, nextBalances, nextBod] = await Promise.all([
+          api.positions(selectedAccount.id), api.orders(selectedAccount.id), api.balances(selectedAccount.id), api.bodBalances(selectedAccount.id),
+        ]);
+        if (!active) return;
+        setPositions(nextPositions); setOrders(nextOrders); setBalances(nextBalances); setBodBalances(nextBod);
+      } catch (error) {
+        if (active) setBrokerageError(String(error));
+      } finally { if (active) setBrokerageLoading(false); }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    return () => { active = false; clearInterval(timer); };
+  }, [selectedAccount?.id, authEpoch, environment, brokerageEpoch]);
+
+  useEffect(() => {
+    if (!selectedAccount || !api.isNative || !authenticated) return;
+    api.startBrokerageStream(selectedAccount.id).catch((error) => setBrokerageError(String(error)));
+    return () => { api.stopBrokerageStream(); };
+  }, [selectedAccount?.id, authenticated, environment]);
 
   useEffect(() => {
     const symbol = workspace.symbol.symbol;
@@ -300,7 +339,7 @@ export default function App() {
       <IconButton label="Fullscreen"><Maximize2 size={17} /></IconButton>
     </nav>
 
-    <section className={`workspace ${workspace.rightPanelOpen ? "with-right" : ""} ${workspace.bottomPanelOpen ? "with-bottom" : ""}`}>
+    <section className={`workspace ${workspace.rightPanelOpen ? "with-right" : ""} ${workspace.bottomPanelOpen ? "with-bottom" : ""}`} style={{ "--bottom-height": `${workspace.bottomPanelHeight ?? 360}px` } as React.CSSProperties}>
       <aside className="drawing-rail" aria-label="Drawing tools">
         {[
           ["cursor", MousePointer2, "Cursor"], ["crosshair", Crosshair, "Crosshair"], ["trend", PencilLine, "Trend line"],
@@ -314,10 +353,10 @@ export default function App() {
 
       {workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
-        {workspace.rightTab === "order" ? <OrderTicket symbol={workspace.symbol} quote={activeQuote} account={accounts[0]} environment={environment} busy={busy} onReview={openReview} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={workspace.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateWorkspace({ symbol: meta }); }} />}
+        {workspace.rightTab === "order" ? <OrderTicket symbol={workspace.symbol} quote={activeQuote} account={selectedAccount} environment={environment} busy={busy} onReview={openReview} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={workspace.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateWorkspace({ symbol: meta }); }} />}
       </aside>}
 
-      {workspace.bottomPanelOpen && <BottomPanel workspace={workspace} onTab={(bottomTab) => updateWorkspace({ bottomTab })} positions={positions} orders={orders} onCancel={async (id) => { await api.cancelOrder(id); setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled" } : order)); }} />}
+      {workspace.bottomPanelOpen && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={async (id) => { await api.cancelOrder(id); setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled", closedAt: new Date().toISOString() } : order)); setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Order cancellation sent", text: `Cancellation requested for order ${id}`, level: "warning" }, ...current]); }} />}
     </section>
 
     {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateWorkspace({ symbol: result }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
@@ -371,7 +410,79 @@ function OrderTicket({ symbol, quote, account, environment, busy, onReview }: { 
   </div>;
 }
 
-function BottomPanel({ workspace, onTab, positions, orders, onCancel }: { workspace: WorkspaceState; onTab: (tab: WorkspaceState["bottomTab"]) => void; positions: Position[]; orders: OrderUpdate[]; onCancel: (id: string) => void }) {
-  const tabs: WorkspaceState["bottomTab"][] = ["positions", "orders", "history", "fills", "balances"];
-  return <section className="bottom-panel"><nav>{tabs.map((tab) => <button key={tab} className={workspace.bottomTab === tab ? "active" : ""} onClick={() => onTab(tab)}>{tab}<span>{tab === "positions" ? positions.length : tab === "orders" ? orders.filter((o) => o.status === "Working").length : ""}</span></button>)}<span className="bottom-status"><span className="status-dot" />Market data active</span></nav><div className="table-wrap">{workspace.bottomTab === "positions" ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Avg price</th><th>Last</th><th>Unrealized P&L</th><th /></tr></thead><tbody>{positions.map((p) => <tr key={p.id}><td><strong>{p.symbol}</strong></td><td className={p.side === "Long" ? "positive" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{p.averagePrice.toFixed(2)}</td><td>{p.last.toFixed(2)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{p.unrealizedPnl >= 0 ? "+" : ""}${p.unrealizedPnl.toFixed(2)}</td><td><button>Close</button></td></tr>)}</tbody></table> : workspace.bottomTab === "orders" ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th><th>Price</th><th>Status</th><th /></tr></thead><tbody>{orders.map((o) => <tr key={o.id}><td><strong>{o.symbol}</strong></td><td className={o.side === "Buy" ? "positive" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.price?.toFixed(2) ?? o.stopPrice?.toFixed(2) ?? "MKT"}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <div className="empty-table"><BookOpen size={20} /><span>No {workspace.bottomTab} to display</span></div>}</div></section>;
+function BottomPanel({ workspace, updateWorkspace, accounts, account, positions, orders, balances, bodBalances, history, setHistory, loading, error, notifications, onNotify, onCancel }: {
+  workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; accounts: Account[]; account?: Account; positions: Position[]; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; notifications: ActivityNotification[]; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
+}) {
+  const tabs: Array<[WorkspaceState["bottomTab"], string]> = [["positions", "Positions"], ["orders", "Orders"], ["history", "Order history"], ["summary", "Account summary"], ["notifications", "Notifications log"]];
+  const [orderFilter, setOrderFilter] = useState("All");
+  const today = new Date().toISOString().slice(0, 10);
+  const [since, setSince] = useState(today);
+  const [until, setUntil] = useState(today);
+  const [historyFilter, setHistoryFilter] = useState("All");
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [maximized, setMaximized] = useState(false);
+  const startResize = (event: React.PointerEvent) => {
+    event.preventDefault(); const startY = event.clientY; const startHeight = workspace.bottomPanelHeight ?? 360;
+    const move = (next: PointerEvent) => updateWorkspace({ bottomPanelHeight: Math.max(220, Math.min(window.innerHeight - 150, startHeight + startY - next.clientY)) });
+    const stop = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop);
+  };
+  const loadHistory = async (append = false) => {
+    if (!account) return; setHistoryLoading(true);
+    try {
+      const localDay = (value: string) => {
+        const date = new Date(value); const offset = date.getTimezoneOffset() * 60_000;
+        return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+      };
+      const currentRows = orders.filter((order) => { const day = localDay(order.timestamp); return day >= since && day <= until; });
+      if (since >= today) {
+        setHistory({ orders: currentRows.sort((a, b) => b.timestamp.localeCompare(a.timestamp)) });
+        return;
+      }
+      const page = await api.historicalOrders(account.id, since, append ? history.nextToken : undefined);
+      const historicalRows = page.orders.filter((order) => { const day = localDay(order.timestamp); return day >= since && day <= until; });
+      const combined = append ? [...history.orders, ...historicalRows] : [...historicalRows, ...currentRows];
+      const unique = [...new Map(combined.map((order) => [order.id, order])).values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+      setHistory({ orders: unique, nextToken: page.nextToken });
+    } catch (cause) { onNotify({ id: crypto.randomUUID(), time: new Date().toISOString(), title: "History refresh failed", text: String(cause), level: "error" }); }
+    finally { setHistoryLoading(false); }
+  };
+  useEffect(() => { if (workspace.bottomTab === "history" && account) loadHistory(); }, [workspace.bottomTab, account?.id, since, until, orders]);
+  const statusMatches = (status: string, filter: string) => filter === "All" || status.toLowerCase() === filter.toLowerCase() || filter === "Inactive" && ["Pending", "Indeterminate"].includes(status);
+  const visibleOrders = orders.filter((order) => statusMatches(order.status, orderFilter));
+  const visibleHistory = history.orders.filter((order) => statusMatches(order.status, historyFilter));
+  const money = (value?: number) => value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const time = (value?: string) => value ? new Date(value).toLocaleString() : "—";
+  const balance = balances[0]; const bod = bodBalances[0];
+  const exportRows = () => {
+    let rows: Array<Record<string, unknown>> = [];
+    if (workspace.bottomTab === "positions") rows = positions as unknown as Array<Record<string, unknown>>;
+    else if (workspace.bottomTab === "orders") rows = visibleOrders as unknown as Array<Record<string, unknown>>;
+    else if (workspace.bottomTab === "history") rows = visibleHistory as unknown as Array<Record<string, unknown>>;
+    else if (workspace.bottomTab === "summary") rows = [...balances, ...bodBalances] as unknown as Array<Record<string, unknown>>;
+    else rows = notifications as unknown as Array<Record<string, unknown>>;
+    if (!rows.length) return;
+    const keys = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+    const quote = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+    const csv = [keys.map(quote).join(","), ...rows.map((row) => keys.map((key) => quote(row[key])).join(","))].join("\n");
+    const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); link.download = `${account?.displayId ?? "account"}-${workspace.bottomTab}.csv`; link.click(); URL.revokeObjectURL(link.href);
+  };
+  const Empty = ({ label }: { label: string }) => <div className="empty-table"><BookOpen size={20} /><span>{label}</span></div>;
+  const OrderTable = ({ rows }: { rows: OrderUpdate[] }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong>{o.symbol}</strong></td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
+  return <section className={`bottom-panel ${maximized ? "maximized" : ""}`}><div className="resize-handle" onPointerDown={startResize} />
+    <header className="bottom-provider"><strong>TradeStation</strong><span className="bottom-status"><span className={`status-dot ${error ? "error" : ""}`} />{error ? "Data unavailable" : loading ? "Refreshing…" : "Brokerage data active"}</span><button title="Collapse panel" onClick={() => updateWorkspace({ bottomPanelOpen: false })}><Minus size={16} /></button><button title={maximized ? "Restore" : "Maximize"} onClick={() => { setMaximized(!maximized); updateWorkspace({ bottomPanelHeight: maximized ? 360 : window.innerHeight - 150 }); }}><Maximize2 size={15} /></button></header>
+    <div className="account-summary"><select value={account?.id ?? ""} onChange={(event) => updateWorkspace({ selectedAccountId: event.target.value })}>{accounts.map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Realized PnL</dt><dd>{money(balance?.todaysProfitLoss)}</dd></div><div><dt>Unrealized PnL</dt><dd>{money(balance?.unrealizedProfitLoss ?? positions.reduce((sum, item) => sum + item.unrealizedPnl, 0))}</dd></div></dl></div>
+    <nav className="bottom-tabs">{tabs.map(([tab, label]) => <button key={tab} className={workspace.bottomTab === tab ? "active" : ""} onClick={() => updateWorkspace({ bottomTab: tab })}>{label}</button>)}<button className="export-button" title="Export active tab to CSV" onClick={exportRows}><Download size={16} /></button></nav>
+    <div className="table-wrap">{error && <div className="panel-error">{error}</div>}
+      {workspace.bottomTab === "positions" && (positions.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Stop loss</th><th>Take profit</th><th>Last price</th><th>Bid price</th><th>Ask price</th><th>Unrealized PnL</th><th>PnL quantity</th><th>PnL percent</th></tr></thead><tbody>{positions.map((p) => <tr key={p.id}><td><strong>{p.symbol}</strong></td><td className={p.side === "Long" ? "buy-text" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{money(p.averagePrice)}</td><td>—</td><td>—</td><td>{money(p.last)}</td><td>{money(p.bid)}</td><td>{money(p.ask)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(p.unrealizedPnl)}</td><td>{money(p.unrealizedPnlQuantity)}</td><td>{p.unrealizedPnlPercent == null ? "—" : `${p.unrealizedPnlPercent.toFixed(2)}%`}</td></tr>)}</tbody></table> : <Empty label="There are no open positions in this account" />)}
+      {workspace.bottomTab === "orders" && <><div className="table-filters">{["All", "Working", "Inactive", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={orderFilter === filter ? "active" : ""} onClick={() => setOrderFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleOrders} /></>}
+      {workspace.bottomTab === "history" && <><div className="history-controls"><label>From <input type="date" value={since} max={until} onChange={(e) => setSince(e.target.value)} /></label><label>To <input type="date" value={until} min={since} onChange={(e) => setUntil(e.target.value)} /></label>{["All", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={historyFilter === filter ? "active" : ""} onClick={() => setHistoryFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleHistory} />{history.nextToken && <button className="load-more" disabled={historyLoading} onClick={() => loadHistory(true)}>{historyLoading ? "Loading…" : "Load more"}</button>}</>}
+      {workspace.bottomTab === "summary" && <div className="balance-sections"><BalanceSection title="Real-time" balance={balance} money={money} /><BalanceSection title="Beginning of day" balance={bod} money={money} /></div>}
+      {workspace.bottomTab === "notifications" && (notifications.length ? <table><thead><tr><th>Symbol</th><th>Time</th><th>Title</th><th>Text</th></tr></thead><tbody>{notifications.map((item) => <tr key={item.id}><td>{item.symbol ?? "—"}</td><td>{time(item.time)}</td><td className={item.level === "error" ? "negative" : ""}>{item.title}</td><td>{item.text}</td></tr>)}</tbody></table> : <Empty label="There is no activity here yet" />)}
+    </div></section>;
+}
+
+function BalanceSection({ title, balance, money }: { title: string; balance?: AccountBalance; money: (value?: number) => string }) {
+  const cells: Array<[string, number | undefined]> = [["Currency", undefined], ["Account balance", balance?.cashBalance], ["Realized PnL", balance?.todaysProfitLoss], ["Unrealized PnL", balance?.unrealizedProfitLoss], ["Net worth", balance?.equity], ["Commission", balance?.commission], ["Uncleared deposits", balance?.unclearedDeposit], ["Real time BP", balance?.buyingPower], ["Initial margin", balance?.initialMargin], ["Maintenance margin", balance?.maintenanceMargin], ["Open order margin", balance?.openOrderMargin]];
+  return <section><h3>{title}</h3><div className="balance-grid">{cells.map(([label, value], index) => <div key={label}><span>{label}</span><strong>{index === 0 ? balance?.currency ?? "—" : money(value)}</strong></div>)}</div></section>;
 }
