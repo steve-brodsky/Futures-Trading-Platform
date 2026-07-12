@@ -24,7 +24,7 @@ const defaultIndicators: IndicatorConfig[] = [
 
 const defaultWorkspace: WorkspaceState = {
   symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators,
-  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", bottomTab: "positions",
+  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false,
   chartTimezone: "exchange",
 };
 
@@ -44,6 +44,7 @@ function Modal({ title, children, onClose, width = 440 }: { title: string; child
 
 export default function App() {
   const [workspace, setWorkspace] = useState(defaultWorkspace);
+  const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
   const [environment, setEnvironmentState] = useState<TradingEnvironment>("sim");
   const [barState, setBarState] = useState<{ symbol: string; timeframe: Timeframe; bars: Bar[] }>({
     symbol: defaultWorkspace.symbol.symbol,
@@ -61,8 +62,6 @@ export default function App() {
   const [setupOpen, setSetupOpen] = useState(false);
   const [review, setReview] = useState<{ draft: OrderDraft; preview: OrderPreview } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [bottomOpen, setBottomOpen] = useState(true);
-  const [rightOpen, setRightOpen] = useState(true);
   const [envConfirm, setEnvConfirm] = useState<TradingEnvironment | null>(null);
   const [activeTool, setActiveTool] = useState("cursor");
   const [clientId, setClientId] = useState("");
@@ -87,7 +86,7 @@ export default function App() {
       setAuthenticated(auth.authenticated);
       setAccounts(accountList);
       if (api.isNative && !auth.configured) setSetupOpen(true);
-    });
+    }).finally(() => setWorkspaceLoaded(true));
     const cleanups: Array<() => void> = [];
     if (api.isNative) {
       listen<{ authenticated: boolean }>("auth-changed", async ({ payload }) => {
@@ -197,9 +196,10 @@ export default function App() {
   }
 
   useEffect(() => {
+    if (!workspaceLoaded) return;
     const timer = window.setTimeout(() => api.saveWorkspace(workspace), 250);
     return () => clearTimeout(timer);
-  }, [workspace]);
+  }, [workspace, workspaceLoaded]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -294,12 +294,12 @@ export default function App() {
       <IconButton label="Undo"><Undo2 size={17} /></IconButton>
       <IconButton label="Reset chart"><RotateCcw size={17} /></IconButton>
       <span className="toolbar-spacer" />
-      <IconButton label="Toggle bottom panel" active={bottomOpen} onClick={() => setBottomOpen((v) => !v)}><PanelBottom size={17} /></IconButton>
-      <IconButton label="Toggle right panel" active={rightOpen} onClick={() => setRightOpen((v) => !v)}><PanelRight size={17} /></IconButton>
+      <IconButton label="Toggle bottom panel" active={workspace.bottomPanelOpen} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}><PanelBottom size={17} /></IconButton>
+      <IconButton label="Toggle right panel" active={workspace.rightPanelOpen} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}><PanelRight size={17} /></IconButton>
       <IconButton label="Fullscreen"><Maximize2 size={17} /></IconButton>
     </nav>
 
-    <section className={`workspace ${rightOpen ? "with-right" : ""} ${bottomOpen ? "with-bottom" : ""}`}>
+    <section className={`workspace ${workspace.rightPanelOpen ? "with-right" : ""} ${workspace.bottomPanelOpen ? "with-bottom" : ""}`}>
       <aside className="drawing-rail" aria-label="Drawing tools">
         {[
           ["cursor", MousePointer2, "Cursor"], ["crosshair", Crosshair, "Crosshair"], ["trend", PencilLine, "Trend line"],
@@ -311,12 +311,12 @@ export default function App() {
 
       <TradingChart bars={bars} kind={workspace.chartKind} symbol={workspace.symbol.symbol} description={workspace.symbol.description} exchange={workspace.symbol.exchange} timeframe={workspace.timeframe} indicators={workspace.indicators} orders={orders} positions={positions} timezone={workspace.chartTimezone} onTimezoneChange={(chartTimezone) => updateWorkspace({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={loadingOlder} />
 
-      {rightOpen && <aside className="right-panel">
+      {workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
         {workspace.rightTab === "order" ? <OrderTicket symbol={workspace.symbol} quote={activeQuote} account={accounts[0]} environment={environment} busy={busy} onReview={openReview} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={workspace.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateWorkspace({ symbol: meta }); }} />}
       </aside>}
 
-      {bottomOpen && <BottomPanel workspace={workspace} onTab={(bottomTab) => updateWorkspace({ bottomTab })} positions={positions} orders={orders} onCancel={async (id) => { await api.cancelOrder(id); setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled" } : order)); }} />}
+      {workspace.bottomPanelOpen && <BottomPanel workspace={workspace} onTab={(bottomTab) => updateWorkspace({ bottomTab })} positions={positions} orders={orders} onCancel={async (id) => { await api.cancelOrder(id); setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled" } : order)); }} />}
     </section>
 
     {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateWorkspace({ symbol: result }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}

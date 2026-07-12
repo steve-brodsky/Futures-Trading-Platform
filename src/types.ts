@@ -113,7 +113,9 @@ export interface WorkspaceState {
   indicators: IndicatorConfig[];
   watchlist: string[];
   rightTab: "order" | "watchlist";
+  rightPanelOpen: boolean;
   bottomTab: "positions" | "orders" | "history" | "fills" | "balances";
+  bottomPanelOpen: boolean;
   chartTimezone: ChartTimezone;
 }
 
