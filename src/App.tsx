@@ -45,7 +45,11 @@ function Modal({ title, children, onClose, width = 440 }: { title: string; child
 export default function App() {
   const [workspace, setWorkspace] = useState(defaultWorkspace);
   const [environment, setEnvironmentState] = useState<TradingEnvironment>("sim");
-  const [bars, setBars] = useState<Bar[]>([]);
+  const [barState, setBarState] = useState<{ symbol: string; timeframe: Timeframe; bars: Bar[] }>({
+    symbol: defaultWorkspace.symbol.symbol,
+    timeframe: defaultWorkspace.timeframe,
+    bars: [],
+  });
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [positions, setPositions] = useState<Position[]>(api.isNative ? [] : demoPositions);
   const [orders, setOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoOrders);
@@ -70,7 +74,8 @@ export default function App() {
   const [hasOlder, setHasOlder] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [, setFreshnessTick] = useState(0);
-  const subscriptionRef = useRef("");
+  const activeChartRef = useRef({ subscriptionId: "", symbol: defaultWorkspace.symbol.symbol, timeframe: defaultWorkspace.timeframe });
+  const bars = barState.symbol === workspace.symbol.symbol && barState.timeframe === workspace.timeframe ? barState.bars : [];
 
   const activeQuote = quotes[workspace.symbol.symbol] ?? (api.isNative
     ? { symbol: workspace.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
@@ -97,19 +102,27 @@ export default function App() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
-        if (payload.subscriptionId !== subscriptionRef.current) return;
-        setBars((current) => mergeBars(current, payload.bars));
+        const active = activeChartRef.current;
+        if (payload.subscriptionId !== active.subscriptionId || payload.symbol !== active.symbol || payload.timeframe !== active.timeframe) return;
+        setBarState({ symbol: payload.symbol, timeframe: payload.timeframe, bars: payload.bars });
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
-        if (payload.subscriptionId !== subscriptionRef.current) return;
-        setBars((current) => mergeBars(current, [payload.bar]));
+        const active = activeChartRef.current;
+        if (payload.subscriptionId !== active.subscriptionId || payload.symbol !== active.symbol || payload.timeframe !== active.timeframe) return;
+        setBarState((current) => ({
+          symbol: payload.symbol,
+          timeframe: payload.timeframe,
+          bars: current.symbol === payload.symbol && current.timeframe === payload.timeframe
+            ? mergeBars(current.bars, [payload.bar])
+            : [payload.bar],
+        }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
-        if (payload.subscriptionId !== subscriptionRef.current) return;
+        if (payload.subscriptionId !== activeChartRef.current.subscriptionId) return;
         setQuotes((current) => ({ ...current, [payload.quote.symbol]: { ...payload.quote, receivedAt: Date.now() } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<StreamStateEvent>("stream-state", ({ payload }) => {
-        if (payload.subscriptionId !== subscriptionRef.current) return;
+        if (payload.subscriptionId !== activeChartRef.current.subscriptionId) return;
         setStreamState(payload.state);
       }).then((unlisten) => cleanups.push(unlisten));
     }
@@ -117,18 +130,40 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const symbol = workspace.symbol.symbol;
+    const timeframe = workspace.timeframe;
+    const subscriptionId = crypto.randomUUID();
+    activeChartRef.current = { subscriptionId, symbol, timeframe };
+    setBarState({ symbol, timeframe, bars: [] });
     setHasOlder(true);
+    setLoadingOlder(false);
     if (!api.isNative) {
-      api.bars(workspace.symbol.symbol, workspace.timeframe).then(setBars).catch((error) => showToast(String(error)));
+      api.bars(symbol, timeframe).then((nextBars) => {
+        const active = activeChartRef.current;
+        if (active.subscriptionId === subscriptionId && active.symbol === symbol && active.timeframe === timeframe) {
+          setBarState({ symbol, timeframe, bars: nextBars });
+        }
+      }).catch((error) => showToast(String(error)));
       return;
     }
     if (!authenticated) return;
-    const subscriptionId = crypto.randomUUID();
-    subscriptionRef.current = subscriptionId;
     setStreamState("connecting");
-    api.cachedBars(workspace.symbol.symbol, workspace.timeframe).then(setBars).catch(() => setBars([]));
-    api.startMarketStream(subscriptionId, workspace.symbol.symbol, workspace.timeframe, workspace.watchlist).catch((error) => { setStreamState("disconnected"); showToast(String(error)); });
-    return () => { if (subscriptionRef.current === subscriptionId) api.stopMarketStream(); };
+    api.cachedBars(symbol, timeframe).then((cached) => {
+      const active = activeChartRef.current;
+      if (active.subscriptionId !== subscriptionId || active.symbol !== symbol || active.timeframe !== timeframe) return;
+      setBarState((current) => ({
+        symbol,
+        timeframe,
+        bars: current.symbol === symbol && current.timeframe === timeframe
+          ? mergeBars(cached, current.bars)
+          : cached,
+      }));
+    }).catch(() => undefined);
+    api.startMarketStream(subscriptionId, symbol, timeframe, workspace.watchlist).catch((error) => {
+      if (activeChartRef.current.subscriptionId !== subscriptionId) return;
+      setStreamState("disconnected"); showToast(String(error));
+    });
+    return () => { if (activeChartRef.current.subscriptionId === subscriptionId) api.stopMarketStream(); };
   }, [workspace.symbol.symbol, workspace.timeframe, workspace.watchlist, authEpoch, authenticated, environment]);
 
   useEffect(() => {
@@ -146,11 +181,17 @@ export default function App() {
 
   async function loadOlder() {
     if (!api.isNative || loadingOlder || !hasOlder || !bars.length) return;
+    const request = activeChartRef.current;
+    const before = bars[0].time;
     setLoadingOlder(true);
     try {
-      const older = await api.olderBars(workspace.symbol.symbol, workspace.timeframe, bars[0].time);
+      const older = await api.olderBars(request.symbol, request.timeframe, before);
+      const active = activeChartRef.current;
+      if (active.subscriptionId !== request.subscriptionId || active.symbol !== request.symbol || active.timeframe !== request.timeframe) return;
       if (!older.length) setHasOlder(false);
-      else setBars((current) => mergeBars(older, current));
+      else setBarState((current) => current.symbol === request.symbol && current.timeframe === request.timeframe
+        ? { ...current, bars: mergeBars(older, current.bars) }
+        : current);
     } catch (error) { showToast(String(error)); }
     finally { setLoadingOlder(false); }
   }
