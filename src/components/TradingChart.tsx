@@ -8,6 +8,7 @@ import type { Bar, ChartKind, ChartTimezone, IndicatorConfig, OrderUpdate, Posit
 import { ema, sma, vwap } from "../lib/indicators";
 import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
+import { SessionShading } from "../lib/sessionShading";
 
 interface Props {
   bars: Bar[];
@@ -38,6 +39,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   const volumeRef = useRef<ISeriesApi<any> | null>(null);
   const indicatorRefs = useRef<Array<{ config: IndicatorConfig; series: ISeriesApi<any> }>>([]);
   const tradeLineRefs = useRef<IPriceLine[]>([]);
+  const sessionShadingRef = useRef<SessionShading | null>(null);
   const previousBars = useRef<Bar[]>([]);
   const barsRef = useRef(bars);
   const magnetEnabledRef = useRef(magnetEnabled);
@@ -82,6 +84,11 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     else if (kind === "area") priceSeries = chart.addSeries(AreaSeries, { lineColor: "#37d5e8", topColor: "rgba(55,213,232,.28)", bottomColor: "rgba(55,213,232,.01)", lineWidth: 2 });
     else priceSeries = chart.addSeries(CandlestickSeries, { upColor: "#16c79a", downColor: "#ef466f", borderVisible: false, wickUpColor: "#16c79a", wickDownColor: "#ef466f" });
     priceRef.current = priceSeries;
+    if (intraday) {
+      const sessionShading = new SessionShading();
+      priceSeries.attachPrimitive(sessionShading);
+      sessionShadingRef.current = sessionShading;
+    }
 
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume", lastValueVisible: false, priceLineVisible: false });
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
@@ -117,7 +124,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     firstData.current = true;
     setChartGeneration((value) => value + 1);
     return () => {
-      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = [];
+      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = []; sessionShadingRef.current = null;
     };
   }, [kind, symbol, exchange, timeframe, timezone, indicators]);
 
@@ -143,6 +150,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     if (!chart || !price || !volume || !bars.length) return;
     const prior = previousBars.current;
     const latestBar = bars[bars.length - 1];
+    sessionShadingRef.current?.setTimes(bars.map((bar) => bar.time));
     const realtimeOnly = prior.length > 0 && bars[0].time === prior[0].time && bars.length >= prior.length && bars.length <= prior.length + 1;
     if (realtimeOnly) {
       if (kind === "candles") price.update({ time: asTime(latestBar.time), open: latestBar.open, high: latestBar.high, low: latestBar.low, close: latestBar.close });
