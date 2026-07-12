@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronsRight } from "lucide-react";
+import { ChevronsRight, Lock, LockOpen, MoveVertical, Trash2 } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type Time,
 } from "lightweight-charts";
-import type { Bar, ChartKind, ChartTimezone, IndicatorConfig, OrderUpdate, Position, Timeframe } from "../types";
+import type { Bar, ChartKind, ChartTimezone, Drawing, IndicatorConfig, OrderUpdate, Position, Timeframe } from "../types";
 import { ema, roundToTick, sma, vwap } from "../lib/indicators";
 import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
+import { HorizontalRayPrimitive, nearestChartTime } from "../lib/horizontalRay";
 
 interface Props {
   bars: Bar[];
@@ -24,6 +25,12 @@ interface Props {
   orders: OrderUpdate[];
   positions: Position[];
   loadingOlder: boolean;
+  activeTool: string;
+  drawings: Drawing[];
+  onToolComplete: () => void;
+  onCreateDrawing: (drawing: Drawing) => void;
+  onUpdateDrawing: (id: string, patch: Partial<Drawing>) => void;
+  onDeleteDrawing: (id: string) => void;
   initialVisibleRange?: { from: number; to: number };
   onVisibleRangeChange?: (range: { from: number; to: number }) => void;
   onTimezoneChange: (timezone: ChartTimezone) => void;
@@ -37,30 +44,55 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, loadingOlder, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
   const volumeRef = useRef<ISeriesApi<any> | null>(null);
   const indicatorRefs = useRef<Array<{ config: IndicatorConfig; series: ISeriesApi<any> }>>([]);
   const tradeLineRefs = useRef<IPriceLine[]>([]);
+  const drawingLineRefs = useRef<IPriceLine[]>([]);
+  const rayPrimitiveRef = useRef<HorizontalRayPrimitive | null>(null);
   const sessionShadingRef = useRef<SessionShading | null>(null);
   const previousBars = useRef<Bar[]>([]);
   const barsRef = useRef(bars);
   const magnetEnabledRef = useRef(magnetEnabled);
+  const activeToolRef = useRef(activeTool);
+  const drawingsRef = useRef(drawings);
+  const drawingCallbacksRef = useRef({ onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing });
   const loadOlderRef = useRef(onLoadOlder);
   const visibleRangeChangeRef = useRef(onVisibleRangeChange);
   const firstData = useRef(true);
   const [hovered, setHovered] = useState<Bar | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [chartGeneration, setChartGeneration] = useState(0);
+  const [drawingMenu, setDrawingMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [movingDrawingId, setMovingDrawingId] = useState<string | null>(null);
+  const movingDrawingIdRef = useRef<string | null>(null);
   const latest = hovered ?? bars.at(-1) ?? null;
   const change = latest ? latest.close - latest.open : 0;
 
   barsRef.current = bars;
   magnetEnabledRef.current = magnetEnabled;
+  activeToolRef.current = activeTool;
+  drawingsRef.current = drawings;
+  drawingCallbacksRef.current = { onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing };
   loadOlderRef.current = onLoadOlder;
   visibleRangeChangeRef.current = onVisibleRangeChange;
+
+  useEffect(() => {
+    setDrawingMenu(null);
+    if (activeTool !== "cursor") { movingDrawingIdRef.current = null; setMovingDrawingId(null); }
+  }, [activeTool, symbol]);
+
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setDrawingMenu(null); movingDrawingIdRef.current = null; setMovingDrawingId(null);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, []);
 
   useEffect(() => {
     if (!host.current) return;
@@ -90,6 +122,9 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     else if (kind === "area") priceSeries = chart.addSeries(AreaSeries, { lineColor: "#37d5e8", topColor: "rgba(55,213,232,.28)", bottomColor: "rgba(55,213,232,.01)", lineWidth: 2, priceFormat });
     else priceSeries = chart.addSeries(CandlestickSeries, { upColor: "#16c79a", downColor: "#ef466f", borderVisible: false, wickUpColor: "#16c79a", wickDownColor: "#ef466f", priceFormat });
     priceRef.current = priceSeries;
+    const rayPrimitive = new HorizontalRayPrimitive();
+    priceSeries.attachPrimitive(rayPrimitive);
+    rayPrimitiveRef.current = rayPrimitive;
     if (intraday) {
       const sessionShading = new SessionShading();
       priceSeries.attachPrimitive(sessionShading);
@@ -125,6 +160,42 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       chart.setCrosshairPosition(snappedPrice, param.time, priceSeries);
       settingCrosshair = false;
     });
+    chart.subscribeClick((param) => {
+      if (!param.point || !param.time) { setDrawingMenu(null); return; }
+      const time = Number(param.time);
+      const bar = barsRef.current.find((item) => item.time === time) ?? null;
+      let clickedPrice: number | null = null;
+      if (magnetEnabledRef.current && kind === "candles" && bar) {
+        const highY = priceSeries.priceToCoordinate(bar.high);
+        const lowY = priceSeries.priceToCoordinate(bar.low);
+        if (highY != null && lowY != null) clickedPrice = nearestCandleExtreme(param.point.y, highY, lowY, bar.high, bar.low);
+      } else {
+        const price = priceSeries.coordinateToPrice(param.point.y);
+        if (price != null) clickedPrice = roundToTick(price, minMove);
+      }
+      if (clickedPrice == null) return;
+
+      if (movingDrawingIdRef.current) {
+        const drawing = drawingsRef.current.find((item) => item.id === movingDrawingIdRef.current);
+        if (drawing && !drawing.locked) drawingCallbacksRef.current.onUpdateDrawing(drawing.id, { points: [{ time, price: clickedPrice }] });
+        movingDrawingIdRef.current = null; setMovingDrawingId(null); setDrawingMenu(null); return;
+      }
+      const tool = activeToolRef.current;
+      if (tool === "horizontal" || tool === "horizontal-ray") {
+        drawingCallbacksRef.current.onCreateDrawing({ id: crypto.randomUUID(), kind: tool, points: [{ time, price: clickedPrice }], color: "#ffffff", locked: false });
+        drawingCallbacksRef.current.onToolComplete(); setDrawingMenu(null); return;
+      }
+
+      const hits = drawingsRef.current.filter((drawing) => {
+        const y = priceSeries.priceToCoordinate(drawing.points[0].price);
+        if (y == null || Math.abs(y - param.point!.y) > 6) return false;
+        if (drawing.kind !== "horizontal-ray") return drawing.kind === "horizontal";
+        const x = chart.timeScale().timeToCoordinate(nearestChartTime(drawing.points[0].time, barsRef.current.map((bar) => bar.time)) as Time);
+        return x != null && param.point!.x >= x - 6;
+      });
+      const selected = hits.at(-1);
+      setDrawingMenu(selected ? { id: selected.id, x: Math.min(param.point.x + 10, Math.max(8, (host.current?.clientWidth ?? 240) - 190)), y: Math.min(param.point.y + 10, Math.max(8, (host.current?.clientHeight ?? 180) - 170)) } : null);
+    });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
       if (!range) return;
       setShowScrollToLatest(Number(range.to) < barsRef.current.length - 1);
@@ -137,7 +208,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     firstData.current = true;
     setChartGeneration((value) => value + 1);
     return () => {
-      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = []; sessionShadingRef.current = null;
+      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = []; drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone, indicators]);
 
@@ -157,6 +228,15 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   }, [orders, positions, symbol, chartGeneration]);
 
   useEffect(() => {
+    const price = priceRef.current;
+    if (!price) return;
+    drawingLineRefs.current.forEach((line) => price.removePriceLine(line));
+    drawingLineRefs.current = drawings.filter((drawing) => drawing.kind === "horizontal").map((drawing) => price.createPriceLine({ price: drawing.points[0].price, color: drawing.color, lineWidth: 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" }));
+    rayPrimitiveRef.current?.setDrawings(drawings.filter((drawing) => drawing.kind === "horizontal-ray"));
+    if (drawingMenu && !drawings.some((drawing) => drawing.id === drawingMenu.id)) setDrawingMenu(null);
+  }, [drawings, chartGeneration]);
+
+  useEffect(() => {
     const chart = chartRef.current;
     const price = priceRef.current;
     const volume = volumeRef.current;
@@ -164,6 +244,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     const prior = previousBars.current;
     const latestBar = bars[bars.length - 1];
     sessionShadingRef.current?.setTimes(bars.map((bar) => bar.time));
+    rayPrimitiveRef.current?.setTimes(bars.map((bar) => bar.time));
     const realtimeOnly = prior.length > 0 && bars[0].time === prior[0].time && bars.length >= prior.length && bars.length <= prior.length + 1;
     if (realtimeOnly) {
       if (kind === "candles") price.update({ time: asTime(latestBar.time), open: latestBar.open, high: latestBar.high, low: latestBar.low, close: latestBar.close });
@@ -194,6 +275,8 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     previousBars.current = bars;
   }, [bars, kind, chartGeneration]);
 
+  const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
+
   return (
     <section className="chart-stage" aria-label={`${symbol} chart`}>
       <div className="chart-heading">
@@ -203,6 +286,16 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />
       <div className="chart-watermark">{symbol}</div>
+      {movingDrawingId && <div className="drawing-move-hint">Click a new chart position to move the drawing · Esc to cancel</div>}
+      {selectedDrawing && drawingMenu && <>
+        <button className="drawing-menu-backdrop" aria-label="Close drawing menu" onClick={() => setDrawingMenu(null)} />
+        <div className="drawing-menu" role="menu" aria-label={`${selectedDrawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"} options`} style={{ left: drawingMenu.x, top: drawingMenu.y }}>
+          <label className="drawing-menu-color"><input type="color" value={selectedDrawing.color} aria-label="Drawing color" onChange={(event) => onUpdateDrawing(selectedDrawing.id, { color: event.target.value })} /><span style={{ background: selectedDrawing.color }} />Color</label>
+          <button role="menuitem" disabled={selectedDrawing.locked} onClick={() => { movingDrawingIdRef.current = selectedDrawing.id; setMovingDrawingId(selectedDrawing.id); setDrawingMenu(null); }}><MoveVertical size={15} />Move</button>
+          <button role="menuitem" onClick={() => onUpdateDrawing(selectedDrawing.id, { locked: !selectedDrawing.locked })}>{selectedDrawing.locked ? <LockOpen size={15} /> : <Lock size={15} />}{selectedDrawing.locked ? "Unlock" : "Lock"}</button>
+          <button role="menuitem" className="danger" onClick={() => { onDeleteDrawing(selectedDrawing.id); setDrawingMenu(null); }}><Trash2 size={15} />Delete</button>
+        </div>
+      </>}
       {showScrollToLatest && <button className="scroll-to-latest" type="button" aria-label="Scroll to latest candle" title="Scroll to latest candle" onClick={() => chartRef.current?.timeScale().scrollToRealTime()}><ChevronsRight size={18} /></button>}
       <select className="timezone-select" aria-label="Chart timezone" value={timezone} onChange={(event) => onTimezoneChange(event.target.value as ChartTimezone)} title={`Chart timezone: ${resolveTimezone(timezone, exchange)}`}>
         {timezoneOptions.map((option) => <option key={option.value} value={option.value}>{option.value === timezone ? timezoneLabel(timezone, exchange) : option.label}</option>)}

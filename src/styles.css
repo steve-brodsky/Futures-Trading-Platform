@@ -89,6 +89,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .workspace.with-right { grid-template-columns: 44px minmax(0, 1fr) 314px; }
 .workspace.with-bottom { grid-template-rows: minmax(0, 1fr) var(--bottom-height, 360px); }
 .drawing-rail { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; align-items: center; padding: 6px; gap: 2px; background: #0d1117; border-right: 1px solid var(--line); z-index: 4; }
+.drawing-tool-anchor { position: relative; }
+.drawing-flyout-backdrop { position: fixed; inset: 0; z-index: 39; border: 0; background: transparent; }
+.drawing-flyout { position: absolute; z-index: 40; top: 0; left: 38px; width: 190px; padding: 4px; border: 1px solid #2a3442; border-radius: 7px; background: #121821; box-shadow: 0 14px 38px rgba(0,0,0,.5); }
+.drawing-flyout button { width: 100%; height: 46px; display: flex; align-items: center; gap: 10px; padding: 0 9px; border: 0; border-radius: 5px; color: #aab5c3; background: transparent; text-align: left; cursor: pointer; }
+.drawing-flyout button:hover { color: #f0f4f8; background: #1b2430; }
+.drawing-flyout button > span { display: flex; flex-direction: column; gap: 3px; }
+.drawing-flyout strong { font-size: 10px; font-weight: 600; }
+.drawing-flyout small { color: var(--muted); font-size: 8px; }
 .rail-spacer { flex: 1; }
 
 .chart-stage { position: relative; min-width: 0; min-height: 0; grid-column: 2; grid-row: 1; overflow: hidden; background: #0b0f17; }
@@ -100,6 +108,16 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .ohlc { display: flex; gap: 7px; margin-left: 4px; font: 500 9px DM Mono, monospace; color: var(--muted); }
 .ohlc b { color: #a6b0bf; font-weight: 500; }
 .chart-watermark { position: absolute; left: 58px; top: 50%; transform: translateY(-50%); font: 700 78px/1 DM Mono, monospace; letter-spacing: -.06em; color: rgba(98,113,134,.055); pointer-events: none; }
+.drawing-menu-backdrop { position: absolute; inset: 0; z-index: 8; padding: 0; border: 0; background: transparent; }
+.drawing-menu { position: absolute; z-index: 9; width: 176px; padding: 4px; border: 1px solid #303b4a; border-radius: 7px; background: #121821; box-shadow: 0 15px 40px rgba(0,0,0,.55); }
+.drawing-menu button, .drawing-menu-color { width: 100%; height: 34px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border: 0; border-radius: 4px; color: #b8c2cf; background: transparent; font-size: 9px; cursor: pointer; }
+.drawing-menu button:hover, .drawing-menu-color:hover { color: #f0f4f8; background: #1b2430; }
+.drawing-menu button:disabled { opacity: .35; cursor: not-allowed; }
+.drawing-menu button.danger { color: #ef7892; }
+.drawing-menu-color { position: relative; }
+.drawing-menu-color input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.drawing-menu-color span { width: 15px; height: 15px; border: 1px solid #647184; border-radius: 3px; }
+.drawing-move-hint { position: absolute; z-index: 7; top: 42px; left: 50%; transform: translateX(-50%); padding: 6px 9px; border: 1px solid #334155; border-radius: 5px; color: #c7d0dc; background: rgba(18,24,33,.94); font-size: 8px; pointer-events: none; }
 .scroll-to-latest { position: absolute; z-index: 7; right: 12px; bottom: 34px; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 1px solid #334155; border-radius: 6px; color: #b9c4d2; background: rgba(20, 27, 37, .94); box-shadow: 0 3px 10px rgba(0, 0, 0, .3); cursor: pointer; }
 .scroll-to-latest:hover { color: #071116; border-color: var(--cyan); background: var(--cyan); }
 .scroll-to-latest:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }

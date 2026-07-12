@@ -1,4 +1,4 @@
-import type { ChartTabState, ChartWindowState, WorkspaceState } from "../types";
+import type { ChartTabState, ChartWindowState, Drawing, WorkspaceState } from "../types";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 
 export const MAX_CHART_TABS = 6;
@@ -85,11 +85,22 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   if (!main.tabIds.includes(main.activeTabId)) main.activeTabId = main.tabIds[0] ?? "";
   const savedBottomTab = value.bottomTab as string | undefined;
   const legacyBottomTab = savedBottomTab === "fills" ? "history" : savedBottomTab === "balances" ? "summary" : savedBottomTab;
+  const drawings = Object.fromEntries(Object.entries(value.drawings ?? {}).flatMap(([symbol, items]) => {
+    if (!Array.isArray(items)) return [];
+    const valid = items.filter((item): item is Drawing => {
+      if (!item || typeof item !== "object") return false;
+      const drawing = item as Drawing;
+      return ["horizontal", "horizontal-ray"].includes(drawing.kind) && typeof drawing.id === "string" && typeof drawing.color === "string"
+        && Array.isArray(drawing.points) && drawing.points.length > 0 && drawing.points.every((point) => Number.isFinite(point?.time) && Number.isFinite(point?.price));
+    }).map((item) => ({ ...item, locked: item.locked === true, points: item.points.map((point) => ({ ...point })) }));
+    return valid.length ? [[symbol, valid]] : [];
+  }));
   return {
     revision: typeof value.revision === "number" ? value.revision : 0,
     tabs,
     windows,
     watchlist: Array.isArray(value.watchlist) ? value.watchlist : fallback.watchlist,
+    drawings,
     rightTab: value.rightTab ?? fallback.rightTab,
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
     bottomTab: (legacyBottomTab ?? fallback.bottomTab) as WorkspaceState["bottomTab"],

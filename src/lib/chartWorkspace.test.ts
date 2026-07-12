@@ -6,6 +6,7 @@ const fallback: WorkspaceState = {
   revision: 0,
   tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
+  drawings: {},
   watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false,
 };
 
@@ -67,5 +68,13 @@ describe("chart workspace", () => {
   it("calculates and clamps cross-window insertion positions", () => {
     expect(tabInsertionIndex(150, 100, 300, 4)).toBe(1);
     expect(tabInsertionIndex(500, 100, 300, 4)).toBe(4);
+  });
+
+  it("normalizes persistent symbol drawings and rejects malformed entries", () => {
+    const result = normalizeChartWorkspace({ ...fallback, drawings: { MES: [
+      { id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff" },
+      { id: "bad", kind: "horizontal", points: [], color: "#fff" },
+    ] } }, fallback);
+    expect(result.drawings.MES).toEqual([{ id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", locked: false }]);
   });
 });

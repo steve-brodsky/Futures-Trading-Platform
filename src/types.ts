@@ -141,10 +141,11 @@ export interface IndicatorConfig {
 
 export interface Drawing {
   id: string;
-  kind: "trend" | "horizontal" | "ray" | "rectangle" | "fibonacci" | "text";
+  kind: "trend" | "horizontal" | "horizontal-ray" | "ray" | "rectangle" | "fibonacci" | "text";
   points: Array<{ time: number; price: number }>;
   text?: string;
   color: string;
+  locked?: boolean;
 }
 
 export interface ChartTabState {
@@ -173,6 +174,7 @@ export interface WorkspaceState {
   tabs: ChartTabState[];
   windows: ChartWindowState[];
   watchlist: string[];
+  drawings: Record<string, Drawing[]>;
   rightTab: "order" | "watchlist";
   rightPanelOpen: boolean;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
