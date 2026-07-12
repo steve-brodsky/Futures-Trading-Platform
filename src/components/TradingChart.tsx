@@ -238,7 +238,18 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     const price = priceRef.current;
     if (!price) return;
     drawingLineRefs.current.forEach((line) => price.removePriceLine(line));
-    drawingLineRefs.current = drawings.filter((drawing) => drawing.kind === "horizontal").map((drawing) => price.createPriceLine({ price: drawing.points[0].price, color: drawing.color, lineWidth: drawing.lineWidth ?? 1, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: "" }));
+    drawingLineRefs.current = drawings
+      .filter((drawing) => drawing.kind === "horizontal" || drawing.kind === "horizontal-ray")
+      .map((drawing) => price.createPriceLine({
+        price: drawing.points[0].price,
+        color: drawing.color,
+        lineWidth: drawing.lineWidth ?? 1,
+        lineStyle: LineStyle.Solid,
+        lineVisible: drawing.kind === "horizontal",
+        axisLabelVisible: true,
+        axisLabelColor: drawing.color,
+        title: "",
+      }));
     rayPrimitiveRef.current?.setDrawings(drawings.filter((drawing) => drawing.kind === "horizontal-ray"));
     if (drawingMenu && !drawings.some((drawing) => drawing.id === drawingMenu.id)) setDrawingMenu(null);
   }, [drawings, chartGeneration]);
