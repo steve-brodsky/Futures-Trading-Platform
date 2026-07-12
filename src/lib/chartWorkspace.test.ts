@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
-import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, tabInsertionIndex } from "./chartWorkspace";
+import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./chartWorkspace";
 
 const fallback: WorkspaceState = {
   revision: 0,
@@ -11,6 +11,37 @@ const fallback: WorkspaceState = {
 };
 
 describe("chart workspace", () => {
+  it("keeps unchanged chart references stable across full workspace broadcasts", () => {
+    const current = normalizeChartWorkspace(fallback, fallback);
+    const broadcast = normalizeChartWorkspace({ ...current, revision: 2, rightPanelOpen: true }, fallback);
+    const result = stabilizeChartWorkspace(current, broadcast);
+
+    expect(result.rightPanelOpen).toBe(true);
+    expect(result.tabs).toBe(current.tabs);
+    expect(result.tabs[0].indicators).toBe(current.tabs[0].indicators);
+    expect(result.windows).toBe(current.windows);
+    expect(result.drawings).toBe(current.drawings);
+  });
+
+  it("only replaces the tab whose chart configuration changed", () => {
+    const second = cloneChartTab(fallback.tabs[0], "chart-2");
+    const current = normalizeChartWorkspace({
+      ...fallback,
+      tabs: [...fallback.tabs, second],
+      windows: [{ ...fallback.windows[0], tabIds: ["chart-1", "chart-2"] }],
+    }, fallback);
+    const broadcast = normalizeChartWorkspace({
+      ...current,
+      revision: 3,
+      tabs: current.tabs.map((tab) => tab.id === "chart-2" ? { ...tab, timeframe: "15m" } : tab),
+    }, fallback);
+    const result = stabilizeChartWorkspace(current, broadcast);
+
+    expect(result.tabs[0]).toBe(current.tabs[0]);
+    expect(result.tabs[1]).not.toBe(current.tabs[1]);
+    expect(result.tabs[1].timeframe).toBe("15m");
+  });
+
   it("migrates a legacy flat chart workspace", () => {
     const result = normalizeChartWorkspace({ ...fallback, tabs: undefined, windows: undefined, timeframe: "15m", symbol: fallback.tabs[0].symbol }, fallback);
     expect(result.tabs).toHaveLength(1);

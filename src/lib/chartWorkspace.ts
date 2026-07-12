@@ -110,6 +110,67 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   };
 }
 
+function sameArray<T>(left: T[], right: T[], equal: (a: T, b: T) => boolean): boolean {
+  return left.length === right.length && left.every((item, index) => equal(item, right[index]));
+}
+
+/** Reuse unchanged nested state after a whole-workspace cross-window broadcast. */
+export function stabilizeChartWorkspace(current: WorkspaceState, incoming: WorkspaceState): WorkspaceState {
+  const currentTabs = new Map(current.tabs.map((tab) => [tab.id, tab]));
+  const tabs = incoming.tabs.map((tab) => {
+    const prior = currentTabs.get(tab.id);
+    if (!prior) return tab;
+    const symbol = prior.symbol.symbol === tab.symbol.symbol
+      && prior.symbol.description === tab.symbol.description
+      && prior.symbol.exchange === tab.symbol.exchange
+      && prior.symbol.assetType === tab.symbol.assetType
+      && prior.symbol.minMove === tab.symbol.minMove
+      && prior.symbol.pointValue === tab.symbol.pointValue
+      && prior.symbol.expiration === tab.symbol.expiration
+      ? prior.symbol
+      : tab.symbol;
+    const indicators = sameArray(prior.indicators, tab.indicators, (a, b) => (
+      a.id === b.id && a.kind === b.kind && a.period === b.period && a.color === b.color && a.visible === b.visible
+    )) ? prior.indicators : tab.indicators;
+    return symbol === prior.symbol && indicators === prior.indicators
+      && prior.timeframe === tab.timeframe && prior.chartKind === tab.chartKind
+      && prior.chartTimezone === tab.chartTimezone && prior.magnetEnabled === tab.magnetEnabled
+      ? prior
+      : { ...tab, symbol, indicators };
+  });
+
+  const currentWindows = new Map(current.windows.map((window) => [window.id, window]));
+  const windows = incoming.windows.map((window) => {
+    const prior = currentWindows.get(window.id);
+    return prior && prior.activeTabId === window.activeTabId && prior.detached === window.detached
+      && prior.x === window.x && prior.y === window.y && prior.width === window.width && prior.height === window.height
+      && sameArray(prior.tabIds, window.tabIds, (a, b) => a === b)
+      ? prior
+      : window;
+  });
+
+  const drawings = Object.fromEntries(Object.entries(incoming.drawings).map(([symbol, items]) => {
+    const prior = current.drawings[symbol];
+    const stable = prior && sameArray(prior, items, (a, b) => (
+      a.id === b.id && a.kind === b.kind && a.text === b.text && a.color === b.color
+      && a.locked === b.locked && a.lineWidth === b.lineWidth
+      && sameArray(a.points, b.points, (left, right) => left.time === right.time && left.price === right.price)
+    ));
+    return [symbol, stable ? prior : items];
+  }));
+
+  return {
+    ...incoming,
+    tabs: sameArray(current.tabs, tabs, (a, b) => a === b) ? current.tabs : tabs,
+    windows: sameArray(current.windows, windows, (a, b) => a === b) ? current.windows : windows,
+    watchlist: sameArray(current.watchlist, incoming.watchlist, (a, b) => a === b) ? current.watchlist : incoming.watchlist,
+    drawings: Object.keys(current.drawings).length === Object.keys(drawings).length
+      && Object.entries(drawings).every(([symbol, items]) => current.drawings[symbol] === items)
+      ? current.drawings
+      : drawings,
+  };
+}
+
 export function moveTab(workspace: WorkspaceState, tabId: string, targetWindowId: string, targetIndex: number): WorkspaceState {
   const next = structuredClone(workspace);
   let source: ChartWindowState | undefined;

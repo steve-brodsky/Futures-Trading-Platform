@@ -14,7 +14,7 @@ import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { estimateOrderRisk, roundToTick, validateTick } from "./lib/indicators";
 import { defaultIndicators } from "./lib/workspace";
-import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
+import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
 import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, Drawing, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
@@ -153,13 +153,14 @@ export default function App() {
     }
     listen<WorkspaceState>("workspace-sync", ({ payload }) => {
       if (payload.revision <= workspaceRef.current.revision) return;
-      const next = normalizeChartWorkspace(payload, defaultWorkspace);
+      const next = stabilizeChartWorkspace(workspaceRef.current, normalizeChartWorkspace(payload, defaultWorkspace));
       workspaceRef.current = next;
       setWorkspace(next);
     }).then((unlisten) => cleanups.push(unlisten));
     listen<WorkspaceState>("workspace-proposal", ({ payload }) => {
       if (currentWindowId !== MAIN_WINDOW_ID) return;
-      const next = { ...normalizeChartWorkspace(payload, defaultWorkspace), revision: Math.max(workspaceRef.current.revision + 1, Date.now()) };
+      const normalized = { ...normalizeChartWorkspace(payload, defaultWorkspace), revision: Math.max(workspaceRef.current.revision + 1, Date.now()) };
+      const next = stabilizeChartWorkspace(workspaceRef.current, normalized);
       workspaceRef.current = next;
       setWorkspace(next);
       emit("workspace-sync", next);
