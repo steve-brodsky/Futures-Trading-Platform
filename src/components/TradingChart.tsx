@@ -161,7 +161,23 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       settingCrosshair = false;
     });
     chart.subscribeClick((param) => {
-      if (!param.point || !param.time) { setDrawingMenu(null); return; }
+      if (!param.point) { setDrawingMenu(null); return; }
+      const tool = activeToolRef.current;
+      if (!movingDrawingIdRef.current && tool !== "horizontal" && tool !== "horizontal-ray") {
+        const hits = drawingsRef.current.filter((drawing) => {
+          const y = priceSeries.priceToCoordinate(drawing.points[0].price);
+          if (y == null || Math.abs(y - param.point!.y) > 6) return false;
+          if (drawing.kind !== "horizontal-ray") return drawing.kind === "horizontal";
+          const x = chart.timeScale().timeToCoordinate(nearestChartTime(drawing.points[0].time, barsRef.current.map((bar) => bar.time)) as Time);
+          return x != null && param.point!.x >= x - 6;
+        });
+        const selected = hits.at(-1);
+        if (selected) {
+          setDrawingMenu({ id: selected.id, x: Math.min(param.point.x + 10, Math.max(8, (host.current?.clientWidth ?? 240) - 190)), y: Math.min(param.point.y + 10, Math.max(8, (host.current?.clientHeight ?? 180) - 170)) });
+          return;
+        }
+      }
+      if (!param.time) { setDrawingMenu(null); return; }
       const time = Number(param.time);
       const bar = barsRef.current.find((item) => item.time === time) ?? null;
       let clickedPrice: number | null = null;
@@ -180,21 +196,12 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
         if (drawing && !drawing.locked) drawingCallbacksRef.current.onUpdateDrawing(drawing.id, { points: [{ time, price: clickedPrice }] });
         movingDrawingIdRef.current = null; setMovingDrawingId(null); setDrawingMenu(null); return;
       }
-      const tool = activeToolRef.current;
       if (tool === "horizontal" || tool === "horizontal-ray") {
         drawingCallbacksRef.current.onCreateDrawing({ id: crypto.randomUUID(), kind: tool, points: [{ time, price: clickedPrice }], color: "#ffffff", locked: false });
         drawingCallbacksRef.current.onToolComplete(); setDrawingMenu(null); return;
       }
 
-      const hits = drawingsRef.current.filter((drawing) => {
-        const y = priceSeries.priceToCoordinate(drawing.points[0].price);
-        if (y == null || Math.abs(y - param.point!.y) > 6) return false;
-        if (drawing.kind !== "horizontal-ray") return drawing.kind === "horizontal";
-        const x = chart.timeScale().timeToCoordinate(nearestChartTime(drawing.points[0].time, barsRef.current.map((bar) => bar.time)) as Time);
-        return x != null && param.point!.x >= x - 6;
-      });
-      const selected = hits.at(-1);
-      setDrawingMenu(selected ? { id: selected.id, x: Math.min(param.point.x + 10, Math.max(8, (host.current?.clientWidth ?? 240) - 190)), y: Math.min(param.point.y + 10, Math.max(8, (host.current?.clientHeight ?? 180) - 170)) } : null);
+      setDrawingMenu(null);
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
       if (!range) return;
