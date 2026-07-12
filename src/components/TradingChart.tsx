@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
-  type IChartApi, type ISeriesApi, type LogicalRange, type Time,
+  type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type Time,
 } from "lightweight-charts";
 import type { Bar, ChartKind, ChartTimezone, IndicatorConfig, OrderUpdate, Position, Timeframe } from "../types";
 import { ema, sma, vwap } from "../lib/indicators";
@@ -34,6 +34,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   const priceRef = useRef<ISeriesApi<any> | null>(null);
   const volumeRef = useRef<ISeriesApi<any> | null>(null);
   const indicatorRefs = useRef<Array<{ config: IndicatorConfig; series: ISeriesApi<any> }>>([]);
+  const tradeLineRefs = useRef<IPriceLine[]>([]);
   const previousBars = useRef<Bar[]>([]);
   const barsRef = useRef(bars);
   const magnetEnabledRef = useRef(magnetEnabled);
@@ -85,9 +86,6 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       series: chart.addSeries(LineSeries, { color: config.color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false }),
     }));
 
-    positions.filter((position) => position.symbol === symbol).forEach((position) => priceSeries.createPriceLine({ price: position.averagePrice, color: "#37d5e8", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${position.side} ${position.quantity}` }));
-    orders.filter((order) => order.symbol === symbol && order.status === "Working" && (order.price || order.stopPrice)).forEach((order) => priceSeries.createPriceLine({ price: order.price ?? order.stopPrice!, color: "#f0b84b", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${order.side} ${order.quantity}` }));
-
     let settingCrosshair = false;
     chart.subscribeCrosshairMove((param) => {
       if (!param.time) return setHovered(null);
@@ -111,9 +109,24 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     firstData.current = true;
     setChartGeneration((value) => value + 1);
     return () => {
-      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = [];
+      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = [];
     };
-  }, [kind, symbol, exchange, timeframe, timezone, indicators, orders, positions]);
+  }, [kind, symbol, exchange, timeframe, timezone, indicators]);
+
+  useEffect(() => {
+    const price = priceRef.current;
+    if (!price) return;
+
+    tradeLineRefs.current.forEach((line) => price.removePriceLine(line));
+    tradeLineRefs.current = [
+      ...positions
+        .filter((position) => position.symbol === symbol)
+        .map((position) => price.createPriceLine({ price: position.averagePrice, color: "#37d5e8", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${position.side} ${position.quantity}` })),
+      ...orders
+        .filter((order) => order.symbol === symbol && order.status === "Working" && (order.price != null || order.stopPrice != null))
+        .map((order) => price.createPriceLine({ price: order.price ?? order.stopPrice!, color: "#f0b84b", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${order.side} ${order.quantity}` })),
+    ];
+  }, [orders, positions, symbol, chartGeneration]);
 
   useEffect(() => {
     const chart = chartRef.current;
