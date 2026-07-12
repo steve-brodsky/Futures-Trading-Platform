@@ -41,6 +41,19 @@ export const api = {
     const base = symbol.startsWith("MNQ") ? 23010 : symbol.startsWith("MCL") ? 67 : symbol.startsWith("MGC") ? 3450 : symbol.startsWith("MYM") ? 44920 : 6218;
     return makeDemoBars(360, base, symbol.startsWith("MCL") ? 0.04 : symbol.startsWith("MGC") ? 0.7 : 1);
   },
+  async cachedBars(symbol: string, timeframe: Timeframe): Promise<Bar[]> {
+    return isTauri ? native("load_cached_bars", { symbol, timeframe }) : this.bars(symbol, timeframe);
+  },
+  async olderBars(symbol: string, timeframe: Timeframe, before: number): Promise<Bar[]> {
+    if (isTauri) return native("get_older_bars", { symbol, timeframe, before });
+    return [];
+  },
+  async startMarketStream(subscriptionId: string, symbol: string, timeframe: Timeframe, watchlist: string[]): Promise<void> {
+    if (isTauri) await native("start_market_stream", { subscriptionId, symbol, timeframe, watchlist });
+  },
+  async stopMarketStream(): Promise<void> {
+    if (isTauri) await native("stop_market_stream");
+  },
   async quotes(symbols: string[]): Promise<Quote[]> {
     if (isTauri) return native("get_quotes", { symbols });
     return symbols.map((symbol, index) => quoteFor(symbol, index * 0.25));

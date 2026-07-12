@@ -3,6 +3,8 @@ export type ConnectionState = "demo" | "connecting" | "live" | "stale" | "discon
 export type Timeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "D" | "W" | "M";
 export type ChartKind = "candles" | "line" | "area";
 export type OrderType = "Market" | "Limit" | "StopMarket" | "StopLimit";
+export type ChartTimezone = "exchange" | "local" | "UTC" | "America/New_York" | "America/Chicago" | "America/Denver" | "America/Los_Angeles" | "Europe/London" | "Asia/Tokyo";
+export type StreamConnectionState = "connecting" | "streaming" | "stale" | "reconnecting" | "disconnected" | "rate-limited";
 
 export interface Bar {
   time: number;
@@ -24,6 +26,7 @@ export interface Quote {
   delayed: boolean;
   halted: boolean;
   timestamp: string;
+  receivedAt?: number;
 }
 
 export interface Account {
@@ -111,4 +114,17 @@ export interface WorkspaceState {
   watchlist: string[];
   rightTab: "order" | "watchlist";
   bottomTab: "positions" | "orders" | "history" | "fills" | "balances";
+  chartTimezone: ChartTimezone;
 }
+
+export interface BarSnapshotEvent {
+  subscriptionId: string;
+  environment: TradingEnvironment;
+  symbol: string;
+  timeframe: Timeframe;
+  bars: Bar[];
+}
+
+export interface BarUpdateEvent extends Omit<BarSnapshotEvent, "bars"> { bar: Bar; }
+export interface QuoteUpdateEvent { subscriptionId: string; environment: TradingEnvironment; quote: Quote; }
+export interface StreamStateEvent { subscriptionId: string; environment: TradingEnvironment; channel: "bars" | "quotes"; state: StreamConnectionState; message?: string; }

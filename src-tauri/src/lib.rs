@@ -2,6 +2,7 @@ mod models;
 mod storage;
 mod tradestation;
 
+use futures_util::StreamExt;
 use models::*;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -44,6 +45,7 @@ impl serde::Serialize for AppError {
 pub struct NativeState {
     api: TradeStation,
     db_path: PathBuf,
+    streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 #[tauri::command]
@@ -167,6 +169,94 @@ async fn get_quotes(
     state.api.quotes(&symbols).await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn load_cached_bars(
+    symbol: String,
+    timeframe: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<Bar>, AppError> {
+    let environment = state.api.environment().await;
+    storage::load_bars(
+        &state.db_path,
+        environment.key(),
+        &symbol,
+        &timeframe,
+        10_000,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_older_bars(
+    symbol: String,
+    timeframe: String,
+    before: i64,
+    state: State<'_, NativeState>,
+) -> Result<Vec<Bar>, AppError> {
+    let environment = state.api.environment().await;
+    let bars = state.api.older_bars(&symbol, &timeframe, before).await?;
+    storage::save_bars(
+        &state.db_path,
+        environment.key(),
+        &symbol,
+        &timeframe,
+        &bars,
+    )?;
+    Ok(bars)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn start_market_stream(
+    app: tauri::AppHandle,
+    subscription_id: String,
+    symbol: String,
+    timeframe: String,
+    mut watchlist: Vec<String>,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    TradeStation::bar_stream_path(&symbol, &timeframe)?;
+    if !watchlist.iter().any(|item| item == &symbol) {
+        watchlist.push(symbol.clone());
+    }
+    watchlist.sort();
+    watchlist.dedup();
+    if watchlist.len() > 100 {
+        return Err(AppError::Validation(
+            "A maximum of 100 streamed quote symbols is supported".into(),
+        ));
+    }
+    let environment = state.api.environment().await;
+    let mut tasks = state.streams.lock().await;
+    for task in tasks.drain(..) {
+        task.abort();
+    }
+    let bar_task = tauri::async_runtime::spawn(run_bar_stream(
+        app.clone(),
+        state.api.clone(),
+        state.db_path.clone(),
+        subscription_id.clone(),
+        environment.clone(),
+        symbol,
+        timeframe,
+    ));
+    let quote_task = tauri::async_runtime::spawn(run_quote_stream(
+        app,
+        state.api.clone(),
+        subscription_id,
+        environment,
+        watchlist,
+    ));
+    tasks.extend([bar_task, quote_task]);
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_market_stream(state: State<'_, NativeState>) -> Result<(), AppError> {
+    for task in state.streams.lock().await.drain(..) {
+        task.abort();
+    }
+    Ok(())
+}
+
 async fn first_account(state: &State<'_, NativeState>) -> Result<String, AppError> {
     state
         .api
@@ -220,6 +310,336 @@ fn save_workspace(workspace: Value, state: State<'_, NativeState>) -> Result<(),
     storage::save_workspace(&state.db_path, &workspace)
 }
 
+fn decode_stream_values(buffer: &mut Vec<u8>, chunk: &[u8]) -> Result<Vec<Value>, AppError> {
+    buffer.extend_from_slice(chunk);
+    let mut values = Vec::new();
+    loop {
+        let whitespace = buffer
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(buffer.len());
+        if whitespace > 0 {
+            buffer.drain(..whitespace);
+        }
+        if buffer.is_empty() {
+            break;
+        }
+        let mut stream = serde_json::Deserializer::from_slice(buffer).into_iter::<Value>();
+        match stream.next() {
+            Some(Ok(value)) => {
+                let used = stream.byte_offset();
+                buffer.drain(..used);
+                values.push(value);
+            }
+            Some(Err(error)) if error.is_eof() => break,
+            Some(Err(error)) => return Err(AppError::Json(error)),
+            None => break,
+        }
+    }
+    Ok(values)
+}
+
+fn emit_stream_state(
+    app: &tauri::AppHandle,
+    subscription_id: &str,
+    environment: &TradingEnvironment,
+    channel: &str,
+    state: &str,
+    message: Option<String>,
+) {
+    let _ = app.emit(
+        "stream-state",
+        StreamStateEvent {
+            subscription_id: subscription_id.into(),
+            environment: environment.clone(),
+            channel: channel.into(),
+            state: state.into(),
+            message,
+        },
+    );
+}
+
+async fn run_bar_stream(
+    app: tauri::AppHandle,
+    api: TradeStation,
+    db_path: PathBuf,
+    subscription_id: String,
+    environment: TradingEnvironment,
+    symbol: String,
+    timeframe: String,
+) {
+    let mut attempt = 0u32;
+    loop {
+        emit_stream_state(
+            &app,
+            &subscription_id,
+            &environment,
+            "bars",
+            if attempt == 0 {
+                "connecting"
+            } else {
+                "reconnecting"
+            },
+            None,
+        );
+        let path = match TradeStation::bar_stream_path(&symbol, &timeframe) {
+            Ok(path) => path,
+            Err(error) => {
+                emit_stream_state(
+                    &app,
+                    &subscription_id,
+                    &environment,
+                    "bars",
+                    "disconnected",
+                    Some(error.to_string()),
+                );
+                return;
+            }
+        };
+        match api.open_stream(&path).await {
+            Ok(response) => {
+                attempt = 0;
+                emit_stream_state(
+                    &app,
+                    &subscription_id,
+                    &environment,
+                    "bars",
+                    "streaming",
+                    None,
+                );
+                let mut bytes = response.bytes_stream();
+                let mut buffer = Vec::new();
+                let mut snapshot = Vec::new();
+                let mut snapshot_complete = false;
+                let mut go_away = false;
+                while let Some(chunk) = bytes.next().await {
+                    let chunk = match chunk {
+                        Ok(chunk) => chunk,
+                        Err(_) => break,
+                    };
+                    let values = match decode_stream_values(&mut buffer, &chunk) {
+                        Ok(values) => values,
+                        Err(_) => break,
+                    };
+                    for value in values {
+                        match value.get("StreamStatus").and_then(Value::as_str) {
+                            Some("EndSnapshot") => {
+                                snapshot.sort_by_key(|bar: &Bar| bar.time);
+                                snapshot.dedup_by_key(|bar| bar.time);
+                                let _ = storage::save_bars(
+                                    &db_path,
+                                    environment.key(),
+                                    &symbol,
+                                    &timeframe,
+                                    &snapshot,
+                                );
+                                let _ = app.emit(
+                                    "bar-snapshot",
+                                    BarSnapshotEvent {
+                                        subscription_id: subscription_id.clone(),
+                                        environment: environment.clone(),
+                                        symbol: symbol.clone(),
+                                        timeframe: timeframe.clone(),
+                                        bars: snapshot.clone(),
+                                    },
+                                );
+                                snapshot_complete = true;
+                            }
+                            Some("GoAway") => {
+                                go_away = true;
+                                break;
+                            }
+                            Some("ERROR") => {
+                                go_away = true;
+                                break;
+                            }
+                            _ => {
+                                if let Some(bar) = tradestation::bar_from_value(&value, &timeframe)
+                                {
+                                    if snapshot_complete {
+                                        let _ = storage::save_bars(
+                                            &db_path,
+                                            environment.key(),
+                                            &symbol,
+                                            &timeframe,
+                                            std::slice::from_ref(&bar),
+                                        );
+                                        let _ = app.emit(
+                                            "bar-update",
+                                            BarUpdateEvent {
+                                                subscription_id: subscription_id.clone(),
+                                                environment: environment.clone(),
+                                                symbol: symbol.clone(),
+                                                timeframe: timeframe.clone(),
+                                                bar,
+                                            },
+                                        );
+                                    } else {
+                                        snapshot.push(bar);
+                                        if value
+                                            .get("IsEndOfHistory")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false)
+                                        {
+                                            snapshot.sort_by_key(|bar| bar.time);
+                                            snapshot.dedup_by_key(|bar| bar.time);
+                                            let _ = storage::save_bars(
+                                                &db_path,
+                                                environment.key(),
+                                                &symbol,
+                                                &timeframe,
+                                                &snapshot,
+                                            );
+                                            let _ = app.emit(
+                                                "bar-snapshot",
+                                                BarSnapshotEvent {
+                                                    subscription_id: subscription_id.clone(),
+                                                    environment: environment.clone(),
+                                                    symbol: symbol.clone(),
+                                                    timeframe: timeframe.clone(),
+                                                    bars: snapshot.clone(),
+                                                },
+                                            );
+                                            snapshot_complete = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if go_away {
+                        break;
+                    }
+                }
+                if !snapshot_complete && !snapshot.is_empty() {
+                    snapshot.sort_by_key(|bar| bar.time);
+                    snapshot.dedup_by_key(|bar| bar.time);
+                    let _ = storage::save_bars(
+                        &db_path,
+                        environment.key(),
+                        &symbol,
+                        &timeframe,
+                        &snapshot,
+                    );
+                    let _ = app.emit(
+                        "bar-snapshot",
+                        BarSnapshotEvent {
+                            subscription_id: subscription_id.clone(),
+                            environment: environment.clone(),
+                            symbol: symbol.clone(),
+                            timeframe: timeframe.clone(),
+                            bars: snapshot,
+                        },
+                    );
+                }
+            }
+            Err(error) => emit_stream_state(
+                &app,
+                &subscription_id,
+                &environment,
+                "bars",
+                if error.to_string().contains("429") {
+                    "rate-limited"
+                } else {
+                    "reconnecting"
+                },
+                Some(error.to_string()),
+            ),
+        }
+        attempt = attempt.saturating_add(1);
+        tokio::time::sleep(std::time::Duration::from_secs(
+            (1u64 << attempt.min(5)).min(30),
+        ))
+        .await;
+    }
+}
+
+async fn run_quote_stream(
+    app: tauri::AppHandle,
+    api: TradeStation,
+    subscription_id: String,
+    environment: TradingEnvironment,
+    symbols: Vec<String>,
+) {
+    let path = format!("/marketdata/stream/quotes/{}", symbols.join(","));
+    let mut attempt = 0u32;
+    loop {
+        emit_stream_state(
+            &app,
+            &subscription_id,
+            &environment,
+            "quotes",
+            if attempt == 0 {
+                "connecting"
+            } else {
+                "reconnecting"
+            },
+            None,
+        );
+        match api.open_stream(&path).await {
+            Ok(response) => {
+                attempt = 0;
+                emit_stream_state(
+                    &app,
+                    &subscription_id,
+                    &environment,
+                    "quotes",
+                    "streaming",
+                    None,
+                );
+                let mut bytes = response.bytes_stream();
+                let mut buffer = Vec::new();
+                let mut go_away = false;
+                while let Some(Ok(chunk)) = bytes.next().await {
+                    let values = match decode_stream_values(&mut buffer, &chunk) {
+                        Ok(values) => values,
+                        Err(_) => break,
+                    };
+                    for value in values {
+                        if matches!(
+                            value.get("StreamStatus").and_then(Value::as_str),
+                            Some("GoAway" | "ERROR")
+                        ) {
+                            go_away = true;
+                            break;
+                        }
+                        if let Some(quote) = tradestation::quote_from_value(&value) {
+                            let _ = app.emit(
+                                "quote-update",
+                                QuoteUpdateEvent {
+                                    subscription_id: subscription_id.clone(),
+                                    environment: environment.clone(),
+                                    quote,
+                                },
+                            );
+                        }
+                    }
+                    if go_away {
+                        break;
+                    }
+                }
+            }
+            Err(error) => emit_stream_state(
+                &app,
+                &subscription_id,
+                &environment,
+                "quotes",
+                if error.to_string().contains("429") {
+                    "rate-limited"
+                } else {
+                    "reconnecting"
+                },
+                Some(error.to_string()),
+            ),
+        }
+        attempt = attempt.saturating_add(1);
+        tokio::time::sleep(std::time::Duration::from_secs(
+            (1u64 << attempt.min(5)).min(30),
+        ))
+        .await;
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -230,6 +650,7 @@ pub fn run() {
             app.manage(NativeState {
                 api,
                 db_path: app_dir.join("northstar.sqlite3"),
+                streams: tokio::sync::Mutex::new(Vec::new()),
             });
             Ok(())
         })
@@ -243,6 +664,10 @@ pub fn run() {
             search_symbols,
             get_bars,
             get_quotes,
+            load_cached_bars,
+            get_older_bars,
+            start_market_stream,
+            stop_market_stream,
             get_positions,
             get_orders,
             confirm_order,
@@ -253,4 +678,33 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Northstar Trader");
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    #[test]
+    fn decoder_preserves_fragmented_objects_and_reads_concatenated_values() {
+        let mut buffer = Vec::new();
+        assert!(decode_stream_values(&mut buffer, br#"{"Symbol":"MES""#)
+            .unwrap()
+            .is_empty());
+        let values =
+            decode_stream_values(&mut buffer, br#"}{"StreamStatus":"EndSnapshot"}"#).unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["Symbol"], "MES");
+        assert_eq!(values[1]["StreamStatus"], "EndSnapshot");
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn history_targets_respect_minute_ceiling() {
+        for timeframe in ["1m", "5m", "15m", "30m", "1h", "4h"] {
+            let (interval, unit, count) = tradestation::history_spec(timeframe).unwrap();
+            assert_eq!(unit, "Minute");
+            assert!(interval * count <= 500_000);
+            assert!(count <= 57_600);
+        }
+    }
 }

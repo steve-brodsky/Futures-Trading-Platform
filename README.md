@@ -20,6 +20,13 @@ npm run desktop:windows
 
 For UI-only development, run `npm run dev`. Browser mode uses clearly labeled demo market data and cannot place real orders.
 
+## Market data
+
+- The native app uses TradeStation HTTP streams for the active chart and a batched watchlist quote stream.
+- Initial history loads up to 10,000 bars for common intraday intervals, with API-safe caps for 1h and 4h charts.
+- Scroll near the left edge to fetch and cache older candles in SQLite.
+- Use the chart-footer timezone menu to display Exchange, Local, UTC, or a supported IANA timezone. Bar timestamps remain stored as UTC epochs and are formatted with daylight-saving rules at display time.
+
 ## TradeStation setup
 
 Configure the Auth0 API key with `http://localhost:8080` as an allowed callback. The app requests `openid profile offline_access MarketData ReadAccount Trade`. API credentials and refresh tokens are stored through the operating system credential service and never persisted in frontend storage.

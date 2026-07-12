@@ -15,6 +15,13 @@ impl TradingEnvironment {
             Self::Live => "https://api.tradestation.com/v3",
         }
     }
+
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Sim => "sim",
+            Self::Live => "live",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,4 +129,42 @@ pub struct OrderUpdate {
 pub struct AuthStatus {
     pub configured: bool,
     pub authenticated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BarSnapshotEvent {
+    pub subscription_id: String,
+    pub environment: TradingEnvironment,
+    pub symbol: String,
+    pub timeframe: String,
+    pub bars: Vec<Bar>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BarUpdateEvent {
+    pub subscription_id: String,
+    pub environment: TradingEnvironment,
+    pub symbol: String,
+    pub timeframe: String,
+    pub bar: Bar,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuoteUpdateEvent {
+    pub subscription_id: String,
+    pub environment: TradingEnvironment,
+    pub quote: Quote,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamStateEvent {
+    pub subscription_id: String,
+    pub environment: TradingEnvironment,
+    pub channel: String,
+    pub state: String,
+    pub message: Option<String>,
 }

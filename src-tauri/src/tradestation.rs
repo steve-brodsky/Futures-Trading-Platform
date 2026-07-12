@@ -106,6 +106,27 @@ impl TradeStation {
         self.session.lock().await.environment.base_url().to_string()
     }
 
+    pub async fn environment(&self) -> TradingEnvironment {
+        self.session.lock().await.environment.clone()
+    }
+
+    pub async fn open_stream(&self, path: &str) -> Result<reqwest::Response, AppError> {
+        let token = self.token().await?;
+        let url = format!("{}{}", self.base().await, path);
+        let response = self.client.get(url).bearer_auth(token).send().await?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            self.clear_token().await;
+            return Err(AppError::AuthenticationRequired);
+        }
+        if !response.status().is_success() {
+            return Err(AppError::Api(format!(
+                "TradeStation stream returned HTTP {}",
+                response.status()
+            )));
+        }
+        Ok(response)
+    }
+
     async fn send(
         &self,
         method: Method,
@@ -267,18 +288,7 @@ impl TradeStation {
     }
 
     pub async fn bars(&self, symbol: &str, timeframe: &str) -> Result<Vec<Bar>, AppError> {
-        let (interval, unit, bars_back) = match timeframe {
-            "1m" => (1, "Minute", 600),
-            "5m" => (5, "Minute", 500),
-            "15m" => (15, "Minute", 450),
-            "30m" => (30, "Minute", 400),
-            "1h" => (60, "Minute", 400),
-            "4h" => (240, "Minute", 350),
-            "D" => (1, "Daily", 500),
-            "W" => (1, "Weekly", 400),
-            "M" => (1, "Monthly", 240),
-            _ => return Err(AppError::Validation("Unsupported timeframe".into())),
-        };
+        let (interval, unit, bars_back) = history_spec(timeframe)?;
         let path = format!(
             "/marketdata/barcharts/{symbol}?interval={interval}&unit={unit}&barsback={bars_back}"
         );
@@ -288,34 +298,55 @@ impl TradeStation {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(|item| {
-                let time = item
-                    .get("Epoch")
-                    .and_then(number_i64)
-                    .map(|v| v / 1000)
-                    .or_else(|| {
-                        item.get("TimeStamp")
-                            .and_then(Value::as_str)
-                            .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
-                            .map(|v| v.timestamp())
-                    })?;
-                Some(Bar {
-                    time,
-                    open: number(item, "Open"),
-                    high: number(item, "High"),
-                    low: number(item, "Low"),
-                    close: number(item, "Close"),
-                    volume: number(item, "TotalVolume"),
-                    realtime: item
-                        .get("IsRealtime")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                })
-            })
+            .filter_map(|item| bar_from_value(item, timeframe))
             .collect();
         result.sort_by_key(|bar| bar.time);
         result.dedup_by_key(|bar| bar.time);
         Ok(result)
+    }
+
+    pub async fn older_bars(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        before: i64,
+    ) -> Result<Vec<Bar>, AppError> {
+        let (interval, unit, target) = history_spec(timeframe)?;
+        let chunk = target.min(if unit == "Minute" {
+            (450_000 / interval).max(1)
+        } else {
+            5_000
+        });
+        // Minute bars arrive timestamped at their closing boundary. `before` is
+        // stored as the candle-open time, so using it as lastdate asks for the
+        // immediately preceding bar without skipping one interval.
+        let api_before = if unit == "Minute" {
+            before
+        } else {
+            before.saturating_sub(1)
+        };
+        let last = DateTime::<Utc>::from_timestamp(api_before, 0)
+            .ok_or_else(|| AppError::Validation("Invalid history timestamp".into()))?
+            .to_rfc3339();
+        let encoded: String = url::form_urlencoded::byte_serialize(last.as_bytes()).collect();
+        let path = format!("/marketdata/barcharts/{symbol}?interval={interval}&unit={unit}&barsback={chunk}&lastdate={encoded}");
+        let body = self.send(Method::GET, &path, None).await?;
+        let mut bars: Vec<_> = body
+            .get("Bars")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| bar_from_value(item, timeframe))
+            .collect();
+        bars.retain(|bar| bar.time < before);
+        bars.sort_by_key(|bar| bar.time);
+        bars.dedup_by_key(|bar| bar.time);
+        Ok(bars)
+    }
+
+    pub fn bar_stream_path(symbol: &str, timeframe: &str) -> Result<String, AppError> {
+        let (interval, unit, bars_back) = history_spec(timeframe)?;
+        Ok(format!("/marketdata/stream/barcharts/{symbol}?interval={interval}&unit={unit}&barsback={bars_back}"))
     }
 
     pub async fn quotes(&self, symbols: &[String]) -> Result<Vec<Quote>, AppError> {
@@ -334,26 +365,7 @@ impl TradeStation {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .map(|item| {
-                let flags = item.get("MarketFlags").unwrap_or(&Value::Null);
-                Quote {
-                    symbol: string(item, "Symbol"),
-                    last: number(item, "Last"),
-                    bid: number(item, "Bid"),
-                    ask: number(item, "Ask"),
-                    change: number(item, "NetChange"),
-                    change_pct: number(item, "NetChangePct"),
-                    delayed: flags
-                        .get("IsDelayed")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true),
-                    halted: flags
-                        .get("IsHalted")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    timestamp: string(item, "TradeTime"),
-                }
-            })
+            .filter_map(quote_from_value)
             .collect())
     }
 
@@ -568,6 +580,80 @@ fn order_from_value(item: &Value) -> OrderUpdate {
     }
 }
 
+pub fn history_spec(timeframe: &str) -> Result<(usize, &'static str, usize), AppError> {
+    match timeframe {
+        "1m" => Ok((1, "Minute", 10_000)),
+        "5m" => Ok((5, "Minute", 10_000)),
+        "15m" => Ok((15, "Minute", 10_000)),
+        "30m" => Ok((30, "Minute", 10_000)),
+        "1h" => Ok((60, "Minute", 8_000)),
+        "4h" => Ok((240, "Minute", 2_000)),
+        "D" => Ok((1, "Daily", 5_000)),
+        "W" => Ok((1, "Weekly", 2_500)),
+        "M" => Ok((1, "Monthly", 1_000)),
+        _ => Err(AppError::Validation("Unsupported timeframe".into())),
+    }
+}
+
+pub fn bar_from_value(item: &Value, timeframe: &str) -> Option<Bar> {
+    let closing_time = item
+        .get("Epoch")
+        .and_then(number_i64)
+        .map(|v| v / 1000)
+        .or_else(|| {
+            item.get("TimeStamp")
+                .and_then(Value::as_str)
+                .and_then(|v| DateTime::parse_from_rfc3339(v).ok())
+                .map(|v| v.timestamp())
+        })?;
+    // TradeStation labels intraday bars with the end of their interval, while
+    // Lightweight Charts labels candles with the beginning. Normalize once at
+    // the API boundary so history, streams, cache keys, and drawings agree.
+    let interval_seconds = history_spec(timeframe)
+        .ok()
+        .filter(|(_, unit, _)| *unit == "Minute")
+        .and_then(|(interval, _, _)| i64::try_from(interval).ok()?.checked_mul(60))
+        .unwrap_or(0);
+    let time = closing_time.checked_sub(interval_seconds)?;
+    Some(Bar {
+        time,
+        open: number(item, "Open"),
+        high: number(item, "High"),
+        low: number(item, "Low"),
+        close: number(item, "Close"),
+        volume: number(item, "TotalVolume"),
+        realtime: item
+            .get("IsRealtime")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+pub fn quote_from_value(item: &Value) -> Option<Quote> {
+    let symbol = string(item, "Symbol");
+    if symbol.is_empty() {
+        return None;
+    }
+    let flags = item.get("MarketFlags").unwrap_or(&Value::Null);
+    Some(Quote {
+        symbol,
+        last: number(item, "Last"),
+        bid: number(item, "Bid"),
+        ask: number(item, "Ask"),
+        change: number(item, "NetChange"),
+        change_pct: number(item, "NetChangePct"),
+        delayed: flags
+            .get("IsDelayed")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        halted: flags
+            .get("IsHalted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        timestamp: string(item, "TradeTime"),
+    })
+}
+
 fn symbol_from_value(item: &Value) -> SymbolMeta {
     SymbolMeta {
         symbol: string(item, "Name").or_else_empty(|| string(item, "Symbol")),
@@ -658,6 +744,34 @@ mod tests {
     fn tick_alignment_is_decimal_safe_enough_for_validation() {
         assert!(aligned(6260.25, 0.25));
         assert!(!aligned(6260.10, 0.25));
+    }
+
+    #[test]
+    fn intraday_bars_use_the_candle_open_time() {
+        let value = json!({
+            "Epoch": 61_200_000,
+            "Open": "1", "High": "2", "Low": "0.5", "Close": "1.5",
+            "TotalVolume": "10"
+        });
+        assert_eq!(
+            bar_from_value(&value, "1m").unwrap().time,
+            (16 * 60 + 59) * 60
+        );
+        assert_eq!(
+            bar_from_value(&value, "5m").unwrap().time,
+            (16 * 60 + 55) * 60
+        );
+        assert_eq!(bar_from_value(&value, "1h").unwrap().time, 16 * 60 * 60);
+    }
+
+    #[test]
+    fn calendar_bars_keep_their_trading_date_timestamp() {
+        let value = json!({
+            "Epoch": 86_400_000,
+            "Open": "1", "High": "2", "Low": "0.5", "Close": "1.5",
+            "TotalVolume": "10"
+        });
+        assert_eq!(bar_from_value(&value, "D").unwrap().time, 86_400);
     }
     #[test]
     fn masks_account_numbers() {

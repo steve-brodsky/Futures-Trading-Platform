@@ -77,7 +77,11 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .ohlc { display: flex; gap: 7px; margin-left: 4px; font: 500 9px DM Mono, monospace; color: var(--muted); }
 .ohlc b { color: #a6b0bf; font-weight: 500; }
 .chart-watermark { position: absolute; left: 58px; top: 50%; transform: translateY(-50%); font: 700 78px/1 DM Mono, monospace; letter-spacing: -.06em; color: rgba(98,113,134,.055); pointer-events: none; }
-.session-label { position: absolute; right: 77px; bottom: 25px; padding: 2px 5px; background: #202833; border-radius: 3px; font: 500 8px DM Mono, monospace; color: #8d98a8; pointer-events: none; }
+.timezone-select { position: absolute; z-index: 7; right: 77px; bottom: 24px; height: 21px; max-width: 112px; padding: 0 20px 0 7px; border: 1px solid #2a3442; border-radius: 4px; appearance: none; color: #9da8b8; background: #18202a; font: 500 8px DM Mono, monospace; cursor: pointer; }
+.timezone-select:hover { color: #e5ebf2; border-color: #3b4b5f; }
+.history-loading { position: absolute; z-index: 8; top: 40px; left: 14px; display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 4px; color: #8995a6; background: rgba(18,24,33,.86); font-size: 8px; pointer-events: none; }
+.history-loading span { width: 8px; height: 8px; border: 1px solid #39485a; border-top-color: var(--cyan); border-radius: 50%; animation: history-spin .75s linear infinite; }
+@keyframes history-spin { to { transform: rotate(360deg); } }
 
 .right-panel { grid-column: 3; grid-row: 1 / -1; background: #0d1117; border-left: 1px solid var(--line); min-height: 0; overflow: auto; z-index: 5; }
 .panel-tabs { position: sticky; top: 0; z-index: 2; height: 42px; padding: 5px; display: grid; grid-template-columns: 1fr 1fr; background: #0d1117; border-bottom: 1px solid var(--line); }

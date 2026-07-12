@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, Crosshair,
@@ -11,7 +11,7 @@ import { TradingChart } from "./components/TradingChart";
 import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { roundToTick, validateTick } from "./lib/indicators";
-import type { Account, Bar, ChartKind, IndicatorConfig, OrderDraft, OrderPreview, OrderType, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, Bar, BarSnapshotEvent, BarUpdateEvent, ChartKind, IndicatorConfig, OrderDraft, OrderPreview, OrderType, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const defaultIndicators: IndicatorConfig[] = [
@@ -25,7 +25,14 @@ const defaultIndicators: IndicatorConfig[] = [
 const defaultWorkspace: WorkspaceState = {
   symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators,
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", bottomTab: "positions",
+  chartTimezone: "exchange",
 };
+
+function mergeBars(current: Bar[], incoming: Bar[]): Bar[] {
+  const byTime = new Map(current.map((bar) => [bar.time, bar]));
+  incoming.forEach((bar) => byTime.set(bar.time, bar));
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
+}
 
 function IconButton({ label, active, children, onClick }: { label: string; active?: boolean; children: React.ReactNode; onClick?: () => void }) {
   return <button className={`icon-button ${active ? "active" : ""}`} aria-label={label} title={label} onClick={onClick}>{children}</button>;
@@ -59,6 +66,11 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [streamState, setStreamState] = useState<StreamConnectionState>(api.isNative ? "disconnected" : "streaming");
+  const [hasOlder, setHasOlder] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [, setFreshnessTick] = useState(0);
+  const subscriptionRef = useRef("");
 
   const activeQuote = quotes[workspace.symbol.symbol] ?? (api.isNative
     ? { symbol: workspace.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
@@ -66,7 +78,7 @@ export default function App() {
 
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus(), api.accounts().catch(() => [])]).then(([saved, auth, accountList]) => {
-      if (saved) setWorkspace(saved);
+      if (saved) setWorkspace({ ...defaultWorkspace, ...saved, chartTimezone: saved.chartTimezone ?? "exchange" });
       setAuthenticated(auth.authenticated);
       setAccounts(accountList);
       if (api.isNative && !auth.configured) setSetupOpen(true);
@@ -84,20 +96,64 @@ export default function App() {
         showToast("TradeStation connected.");
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
+      listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
+        if (payload.subscriptionId !== subscriptionRef.current) return;
+        setBars((current) => mergeBars(current, payload.bars));
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<BarUpdateEvent>("bar-update", ({ payload }) => {
+        if (payload.subscriptionId !== subscriptionRef.current) return;
+        setBars((current) => mergeBars(current, [payload.bar]));
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
+        if (payload.subscriptionId !== subscriptionRef.current) return;
+        setQuotes((current) => ({ ...current, [payload.quote.symbol]: { ...payload.quote, receivedAt: Date.now() } }));
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<StreamStateEvent>("stream-state", ({ payload }) => {
+        if (payload.subscriptionId !== subscriptionRef.current) return;
+        setStreamState(payload.state);
+      }).then((unlisten) => cleanups.push(unlisten));
     }
     return () => cleanups.forEach((unlisten) => unlisten());
   }, []);
 
   useEffect(() => {
-    api.bars(workspace.symbol.symbol, workspace.timeframe).then(setBars).catch((error) => showToast(String(error)));
-  }, [workspace.symbol.symbol, workspace.timeframe, authEpoch]);
+    setHasOlder(true);
+    if (!api.isNative) {
+      api.bars(workspace.symbol.symbol, workspace.timeframe).then(setBars).catch((error) => showToast(String(error)));
+      return;
+    }
+    if (!authenticated) return;
+    const subscriptionId = crypto.randomUUID();
+    subscriptionRef.current = subscriptionId;
+    setStreamState("connecting");
+    api.cachedBars(workspace.symbol.symbol, workspace.timeframe).then(setBars).catch(() => setBars([]));
+    api.startMarketStream(subscriptionId, workspace.symbol.symbol, workspace.timeframe, workspace.watchlist).catch((error) => { setStreamState("disconnected"); showToast(String(error)); });
+    return () => { if (subscriptionRef.current === subscriptionId) api.stopMarketStream(); };
+  }, [workspace.symbol.symbol, workspace.timeframe, workspace.watchlist, authEpoch, authenticated, environment]);
 
   useEffect(() => {
-    const refresh = () => api.quotes(workspace.watchlist).then((items) => setQuotes(Object.fromEntries(items.map((quote) => [quote.symbol, quote])))).catch(() => setQuotes({}));
+    if (api.isNative) return;
+    const refresh = () => api.quotes(workspace.watchlist).then((items) => setQuotes(Object.fromEntries(items.map((quote) => [quote.symbol, { ...quote, receivedAt: Date.now() }])))).catch(() => setQuotes({}));
     refresh();
     const timer = window.setInterval(refresh, api.isNative ? 3000 : 1800);
     return () => clearInterval(timer);
   }, [workspace.watchlist, authEpoch]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setFreshnessTick((value) => value + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  async function loadOlder() {
+    if (!api.isNative || loadingOlder || !hasOlder || !bars.length) return;
+    setLoadingOlder(true);
+    try {
+      const older = await api.olderBars(workspace.symbol.symbol, workspace.timeframe, bars[0].time);
+      if (!older.length) setHasOlder(false);
+      else setBars((current) => mergeBars(older, current));
+    } catch (error) { showToast(String(error)); }
+    finally { setLoadingOlder(false); }
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => api.saveWorkspace(workspace), 250);
@@ -165,7 +221,7 @@ export default function App() {
     finally { setBusy(false); }
   }
 
-  const connectionLabel = api.isNative ? (authenticated ? "STREAMING" : "NOT CONNECTED") : "DEMO FEED";
+  const connectionLabel = api.isNative ? (authenticated ? streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
 
   return <main className="app-shell">
     <header className="titlebar">
@@ -212,7 +268,7 @@ export default function App() {
         <span className="rail-spacer" /><IconButton label="Show drawings"><Eye size={18} /></IconButton><IconButton label="Delete drawings"><Trash2 size={18} /></IconButton>
       </aside>
 
-      <TradingChart bars={bars} kind={workspace.chartKind} symbol={workspace.symbol.symbol} description={workspace.symbol.description} exchange={workspace.symbol.exchange} indicators={workspace.indicators} orders={orders} positions={positions} />
+      <TradingChart bars={bars} kind={workspace.chartKind} symbol={workspace.symbol.symbol} description={workspace.symbol.description} exchange={workspace.symbol.exchange} timeframe={workspace.timeframe} indicators={workspace.indicators} orders={orders} positions={positions} timezone={workspace.chartTimezone} onTimezoneChange={(chartTimezone) => updateWorkspace({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={loadingOlder} />
 
       {rightOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
@@ -255,7 +311,7 @@ function OrderTicket({ symbol, quote, account, environment, busy, onReview }: { 
     return { accountId: account?.id ?? "", symbol: symbol.symbol, side, type, quantity, duration, limitPrice: type === "Limit" || type === "StopLimit" ? limitPrice : undefined, stopPrice: type === "StopMarket" || type === "StopLimit" ? stopPrice : undefined, takeProfit: takeProfitOn ? roundToTick(side === "Buy" ? quote.last + symbol.minMove * 20 : quote.last - symbol.minMove * 20, symbol.minMove) : undefined, stopLoss: stopLossOn ? roundToTick(side === "Buy" ? quote.last - symbol.minMove * 12 : quote.last + symbol.minMove * 12, symbol.minMove) : undefined };
   }
 
-    const marketUnavailable = quote.last <= 0 || quote.halted || quote.delayed;
+    const marketUnavailable = quote.last <= 0 || quote.halted || quote.delayed || !quote.receivedAt || Date.now() - quote.receivedAt > 5_000;
   return <div className="order-ticket">
     <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
     <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => setSide("Sell")}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => setSide("Buy")}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>

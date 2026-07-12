@@ -1,0 +1,165 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e10]: NORTHSTAR
+      - generic [ref=e11]: TRADER
+    - generic [ref=e12]:
+      - strong [ref=e13]: MESU26
+      - generic [ref=e14]: 6,260.00
+      - generic [ref=e15]: +0.42%
+    - button "SIM" [ref=e17] [cursor=pointer]
+    - button "DEMO FEED" [ref=e21] [cursor=pointer]
+    - button "Notifications" [ref=e27] [cursor=pointer]
+    - button "Settings" [ref=e31] [cursor=pointer]
+  - navigation "Chart toolbar" [ref=e35]:
+    - button "MESU26 CME" [ref=e36] [cursor=pointer]:
+      - strong [ref=e40]: MESU26
+      - generic [ref=e41]: CME
+    - generic [ref=e45]:
+      - button "1m" [ref=e46] [cursor=pointer]
+      - button "5m" [ref=e47] [cursor=pointer]
+      - button "15m" [ref=e48] [cursor=pointer]
+      - button "30m" [ref=e49] [cursor=pointer]
+      - button "1h" [ref=e50] [cursor=pointer]
+      - button "4h" [ref=e51] [cursor=pointer]
+      - button "D" [ref=e52] [cursor=pointer]
+      - button "W" [ref=e53] [cursor=pointer]
+      - button "M" [ref=e54] [cursor=pointer]
+    - generic [ref=e56]:
+      - button "Candlestick chart" [ref=e57] [cursor=pointer]
+      - button "Line chart" [ref=e60] [cursor=pointer]
+      - button "Area chart" [ref=e64] [cursor=pointer]
+    - button "Indicators" [ref=e68] [cursor=pointer]
+    - button "Alert" [ref=e70] [cursor=pointer]
+    - button "Undo" [ref=e75] [cursor=pointer]
+    - button "Reset chart" [ref=e79] [cursor=pointer]
+    - button "Toggle bottom panel" [ref=e83] [cursor=pointer]
+    - button "Toggle right panel" [ref=e86] [cursor=pointer]
+    - button "Fullscreen" [ref=e89] [cursor=pointer]
+  - generic [ref=e95]:
+    - complementary "Drawing tools" [ref=e96]:
+      - button "Cursor" [ref=e97] [cursor=pointer]
+      - button "Crosshair" [ref=e100] [cursor=pointer]
+      - button "Trend line" [ref=e103] [cursor=pointer]
+      - button "Horizontal line" [ref=e107] [cursor=pointer]
+      - button "Ray" [ref=e109] [cursor=pointer]
+      - button "Rectangle" [ref=e113] [cursor=pointer]
+      - button "Fibonacci retracement" [ref=e116] [cursor=pointer]
+      - button "Text" [ref=e121] [cursor=pointer]
+      - button "Measure" [ref=e127] [cursor=pointer]
+      - button "Show drawings" [ref=e131] [cursor=pointer]
+      - button "Delete drawings" [ref=e135] [cursor=pointer]
+    - region "MESU26 chart" [ref=e139]:
+      - generic:
+        - generic: CME
+        - strong: Micro E-mini S&P 500 Sep 2026
+        - generic: ·
+        - generic: MESU26
+        - generic:
+          - generic: O 6255.29
+          - generic: H 6255.67
+          - generic: L 6253.58
+          - generic: C 6254.77
+      - table [ref=e252]:
+        - row [ref=e253]:
+          - cell
+          - cell [ref=e254]:
+            - link "Charting by TradingView" [ref=e258] [cursor=pointer]:
+              - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+          - cell [ref=e263]
+        - row [ref=e267]:
+          - cell
+          - cell [ref=e268]
+          - cell [ref=e272]
+      - generic: MESU26
+      - combobox "Chart timezone" [ref=e165] [cursor=pointer]:
+        - option "Exchange time"
+        - option "Computer local"
+        - option "UTC"
+        - option "New York"
+        - option "Chicago"
+        - option "Denver"
+        - option "PDT" [selected]
+        - option "London"
+        - option "Tokyo"
+    - complementary [ref=e166]:
+      - generic [ref=e167]:
+        - button "Order" [ref=e168] [cursor=pointer]
+        - button "Watchlist" [ref=e169] [cursor=pointer]
+      - generic [ref=e170]:
+        - generic [ref=e171]:
+          - generic [ref=e172]: •••9201
+          - generic [ref=e173]: SIM
+        - generic [ref=e174]:
+          - button "SELL 6259.75" [ref=e175] [cursor=pointer]:
+            - generic [ref=e176]: SELL
+            - strong [ref=e177]: "6259.75"
+          - generic [ref=e178]: "0.50"
+          - button "BUY 6260.25" [ref=e180] [cursor=pointer]:
+            - generic [ref=e181]: BUY
+            - strong [ref=e182]: "6260.25"
+        - generic [ref=e183]:
+          - button "Mkt" [ref=e184] [cursor=pointer]
+          - button "Limit" [ref=e185] [cursor=pointer]
+          - button "Stop Mkt" [ref=e186] [cursor=pointer]
+          - button "StopLimit" [ref=e187] [cursor=pointer]
+        - generic [ref=e188]:
+          - generic [ref=e189]: Contracts
+          - generic [ref=e190]:
+            - button "Contracts 1" [ref=e191] [cursor=pointer]
+            - spinbutton [ref=e193]: "1"
+            - button [ref=e194] [cursor=pointer]
+        - generic [ref=e196]:
+          - generic [ref=e197]: Exits
+          - generic [ref=e198]: Server-side bracket
+        - generic [ref=e199] [cursor=pointer]:
+          - generic [ref=e200]:
+            - strong [ref=e201]: Take profit
+            - generic [ref=e202]: 20 ticks · 25.00 USD
+          - checkbox "Take profit 20 ticks · 25.00 USD" [ref=e203]
+        - generic [ref=e204] [cursor=pointer]:
+          - generic [ref=e205]:
+            - strong [ref=e206]: Stop loss
+            - generic [ref=e207]: 12 ticks · 15.00 USD
+          - checkbox "Stop loss 12 ticks · 15.00 USD" [ref=e208]
+        - generic [ref=e209]: Time in force
+        - combobox [ref=e211]:
+          - option "DAY" [selected]
+          - option "GTC"
+        - generic [ref=e212]:
+          - generic [ref=e213]:
+            - term [ref=e214]: Tick value
+            - definition [ref=e215]: 1.25 USD
+          - generic [ref=e216]:
+            - term [ref=e217]: Data
+            - definition [ref=e218]: Real-time
+        - button "Review Buy order" [ref=e219] [cursor=pointer]
+    - generic [ref=e220]:
+      - navigation [ref=e221]:
+        - button "positions1" [ref=e222] [cursor=pointer]
+        - button "orders1" [ref=e223] [cursor=pointer]
+        - button "history" [ref=e224] [cursor=pointer]
+        - button "fills" [ref=e225] [cursor=pointer]
+        - button "balances" [ref=e226] [cursor=pointer]
+        - generic [ref=e227]: Market data active
+      - table [ref=e230]:
+        - rowgroup [ref=e231]:
+          - row [ref=e232]:
+            - columnheader "Symbol" [ref=e233]
+            - columnheader "Side" [ref=e234]
+            - columnheader "Qty" [ref=e235]
+            - columnheader "Avg price" [ref=e236]
+            - columnheader "Last" [ref=e237]
+            - columnheader "Unrealized P&L" [ref=e238]
+            - columnheader [ref=e239]
+        - rowgroup [ref=e240]:
+          - row [ref=e241]:
+            - cell [ref=e242]:
+              - strong [ref=e243]: MESU26
+            - cell "Long" [ref=e244]
+            - cell "2" [ref=e245]
+            - cell "6253.25" [ref=e246]
+            - cell "6260.00" [ref=e247]
+            - cell "+$67.50" [ref=e248]
+            - cell [ref=e249]:
+              - button "Close" [ref=e250] [cursor=pointer]
