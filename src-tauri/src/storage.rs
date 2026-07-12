@@ -1,33 +1,98 @@
 use crate::AppError;
 use keyring::Entry;
 use rusqlite::{params, Connection};
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::{
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
 
 const SERVICE: &str = "com.northstar.trader";
+const CREDENTIALS_ACCOUNT: &str = "credentials";
 const BAR_TIME_FORMAT_VERSION: &str = "2";
 
-fn entry(key: &str) -> Result<Entry, AppError> {
-    Ok(Entry::new(SERVICE, key)?)
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct Credentials {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
 }
 
-pub fn set_secret(key: &str, value: &str) -> Result<(), AppError> {
-    entry(key)?.set_password(value)?;
+static CREDENTIALS: OnceLock<Mutex<Option<Credentials>>> = OnceLock::new();
+
+fn credentials_cache() -> &'static Mutex<Option<Credentials>> {
+    CREDENTIALS.get_or_init(|| Mutex::new(None))
+}
+
+fn credentials_entry() -> Result<Entry, AppError> {
+    Ok(Entry::new(SERVICE, CREDENTIALS_ACCOUNT)?)
+}
+
+fn read_credentials() -> Result<Credentials, AppError> {
+    let mut cached = credentials_cache()
+        .lock()
+        .map_err(|_| AppError::Api("Credential cache is unavailable".into()))?;
+    if let Some(credentials) = cached.as_ref() {
+        return Ok(credentials.clone());
+    }
+    let credentials = match credentials_entry()?.get_password() {
+        Ok(value) => serde_json::from_str(&value)?,
+        Err(keyring::Error::NoEntry) => Credentials::default(),
+        Err(error) => return Err(error.into()),
+    };
+    *cached = Some(credentials.clone());
+    Ok(credentials)
+}
+
+fn write_credentials(credentials: &Credentials) -> Result<(), AppError> {
+    credentials_entry()?.set_password(&serde_json::to_string(credentials)?)?;
+    *credentials_cache()
+        .lock()
+        .map_err(|_| AppError::Api("Credential cache is unavailable".into()))? =
+        Some(credentials.clone());
     Ok(())
 }
 
 pub fn get_secret(key: &str) -> Result<Option<String>, AppError> {
-    match entry(key)?.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(error.into()),
+    let credentials = read_credentials()?;
+    match key {
+        "client_id" => Ok(credentials.client_id),
+        "client_secret" => Ok(credentials.client_secret),
+        "refresh_token" => Ok(credentials.refresh_token),
+        _ => Err(AppError::Validation(format!(
+            "Unknown credential key: {key}"
+        ))),
     }
 }
 
-pub fn delete_secret(key: &str) -> Result<(), AppError> {
-    match entry(key)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(error.into()),
+pub fn set_secret(key: &str, value: &str) -> Result<(), AppError> {
+    let mut credentials = read_credentials()?;
+    match key {
+        "client_id" => credentials.client_id = Some(value.to_owned()),
+        "client_secret" => credentials.client_secret = Some(value.to_owned()),
+        "refresh_token" => credentials.refresh_token = Some(value.to_owned()),
+        _ => {
+            return Err(AppError::Validation(format!(
+                "Unknown credential key: {key}"
+            )))
+        }
     }
+    write_credentials(&credentials)
+}
+
+pub fn delete_secret(key: &str) -> Result<(), AppError> {
+    let mut credentials = read_credentials()?;
+    match key {
+        "client_id" => credentials.client_id = None,
+        "client_secret" => credentials.client_secret = None,
+        "refresh_token" => credentials.refresh_token = None,
+        _ => {
+            return Err(AppError::Validation(format!(
+                "Unknown credential key: {key}"
+            )))
+        }
+    }
+    write_credentials(&credentials)
 }
 
 fn connection(path: &Path) -> Result<Connection, AppError> {

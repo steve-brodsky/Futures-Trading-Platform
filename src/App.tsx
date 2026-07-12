@@ -81,10 +81,10 @@ export default function App() {
     : quoteFor(workspace.symbol.symbol));
 
   useEffect(() => {
-    Promise.all([api.loadWorkspace(), api.authStatus(), api.accounts().catch(() => [])]).then(([saved, auth, accountList]) => {
+    Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
       if (saved) setWorkspace({ ...defaultWorkspace, ...saved, chartTimezone: saved.chartTimezone ?? "exchange" });
       setAuthenticated(auth.authenticated);
-      setAccounts(accountList);
+      setAccounts(auth.authenticated ? await api.accounts().catch(() => []) : []);
       if (api.isNative && !auth.configured) setSetupOpen(true);
     }).finally(() => setWorkspaceLoaded(true));
     const cleanups: Array<() => void> = [];
