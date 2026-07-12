@@ -41,6 +41,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .environment-badge.sim, .sim { color: var(--cyan); }
 .environment-badge.live, .live { color: var(--red); }
 .connection-chip { color: #8e9aab; }
+.market-clock { height: 23px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border: 1px solid var(--line); border-radius: 5px; color: #b8c3d1; background: #141a22; font: 600 9px DM Mono, monospace; letter-spacing: .04em; white-space: nowrap; }
+.market-clock > span { color: var(--cyan); font-size: 8px; letter-spacing: .1em; }
 
 .icon-button { width: 32px; height: 32px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #8d98a7; cursor: pointer; transition: background .15s, color .15s, transform .15s; }
 .icon-button:hover { color: #edf2f7; background: #1a222d; }

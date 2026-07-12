@@ -18,6 +18,14 @@ import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID
 import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, Drawing, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
+const newYorkClock = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+  timeZoneName: "short",
+});
 
 const defaultWorkspace: WorkspaceState = {
   revision: 0,
@@ -88,7 +96,7 @@ export default function App() {
   const [authEpoch, setAuthEpoch] = useState(0);
   const [brokerageEpoch, setBrokerageEpoch] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [, setFreshnessTick] = useState(0);
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
   const subscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; timeframe: Timeframe; epoch: string }>());
   const stripBoundsRef = useRef(new Map<string, StripBounds>());
   const viewRangesRef = useRef(new Map<string, { from: number; to: number }>());
@@ -249,7 +257,7 @@ export default function App() {
   }, [quoteSymbolsKey, authEpoch]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setFreshnessTick((value) => value + 1), 1000);
+    const timer = window.setInterval(() => setCurrentTime(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
 
@@ -526,12 +534,14 @@ export default function App() {
   }
 
   const connectionLabel = api.isNative ? (authenticated ? market.streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
+  const marketTime = newYorkClock.format(new Date(currentTime));
 
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
       <div className="brand"><div className="brand-glyph"><TrendingUp size={16} strokeWidth={2.4} /></div><span>NORTHSTAR</span><small>TRADER</small></div>
       {hasWindowTabs && <div className="instrument-summary"><strong>{activeTab.symbol.symbol}</strong><span>{activeQuote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span className={activeQuote.change >= 0 ? "positive" : "negative"}>{activeQuote.change >= 0 ? "+" : ""}{activeQuote.changePct.toFixed(2)}%</span></div>}
       <div className="titlebar-drag" data-tauri-drag-region />
+      {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
       {!isDetached && <button className={`environment-badge ${environment}`} onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
       <button className="connection-chip" onClick={() => !authenticated && setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
       {!isDetached && <><IconButton label="Notifications"><Bell size={17} /></IconButton><IconButton label="Settings" onClick={() => setSetupOpen(true)}><Settings2 size={17} /></IconButton></>}
