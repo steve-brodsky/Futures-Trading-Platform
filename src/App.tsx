@@ -12,7 +12,7 @@ import {
 import { TradingChart } from "./components/TradingChart";
 import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
-import { roundToTick, validateTick } from "./lib/indicators";
+import { estimateOrderRisk, roundToTick, validateTick } from "./lib/indicators";
 import { defaultIndicators } from "./lib/workspace";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
 import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
@@ -678,18 +678,20 @@ function OrderTicket({ symbol, quote, account, environment, busy, onReview }: { 
 
   useEffect(() => {
     const key = `${symbol.symbol}:${side}`;
-    if (quote.last <= 0 || initializedLevelsRef.current === key) return;
-    setTakeProfit(String(roundToTick(side === "Buy" ? quote.last + symbol.minMove * 20 : quote.last - symbol.minMove * 20, symbol.minMove)));
-    setStopLoss(String(roundToTick(side === "Buy" ? quote.last - symbol.minMove * 12 : quote.last + symbol.minMove * 12, symbol.minMove)));
+    const entryPrice = side === "Buy" ? quote.ask : quote.bid;
+    if (entryPrice <= 0 || initializedLevelsRef.current === key) return;
+    setTakeProfit(String(roundToTick(side === "Buy" ? entryPrice + symbol.minMove * 20 : entryPrice - symbol.minMove * 20, symbol.minMove)));
+    setStopLoss(String(roundToTick(side === "Buy" ? entryPrice - symbol.minMove * 12 : entryPrice + symbol.minMove * 12, symbol.minMove)));
     initializedLevelsRef.current = key;
-  }, [symbol.symbol, symbol.minMove, side, quote.last]);
+  }, [symbol.symbol, symbol.minMove, side, quote.ask, quote.bid]);
 
   const takeProfitPrice = Number(takeProfit);
   const stopLossPrice = Number(stopLoss);
+  const entryPrice = side === "Buy" ? quote.ask : quote.bid;
   const takeProfitValid = takeProfit.trim() !== "" && takeProfitPrice > 0 && validateTick(takeProfitPrice, symbol.minMove)
-    && (side === "Buy" ? takeProfitPrice > quote.last : takeProfitPrice < quote.last);
+    && (side === "Buy" ? takeProfitPrice > entryPrice : takeProfitPrice < entryPrice);
   const stopLossValid = stopLoss.trim() !== "" && stopLossPrice > 0 && validateTick(stopLossPrice, symbol.minMove)
-    && (side === "Buy" ? stopLossPrice < quote.last : stopLossPrice > quote.last);
+    && (side === "Buy" ? stopLossPrice < entryPrice : stopLossPrice > entryPrice);
 
   function draft(): OrderDraft {
     return { accountId: account?.id ?? "", symbol: symbol.symbol, side, type: "Market", quantity, duration, takeProfit: takeProfitPrice, stopLoss: stopLossPrice };
@@ -697,6 +699,7 @@ function OrderTicket({ symbol, quote, account, environment, busy, onReview }: { 
 
   const marketUnavailable = quote.last <= 0 || quote.halted || quote.delayed || !quote.receivedAt || Date.now() - quote.receivedAt > 5_000;
   const tickValue = symbol.minMove * symbol.pointValue;
+  const estimatedRisk = stopLossValid ? estimateOrderRisk(entryPrice, stopLossPrice, side, quantity, symbol.minMove, tickValue) : null;
   return <div className="order-ticket">
     <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
     <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => setSide("Sell")}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => setSide("Buy")}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
@@ -706,8 +709,8 @@ function OrderTicket({ symbol, quote, account, environment, busy, onReview }: { 
     <label className="field compact"><span>Stop loss price</span><input className={stopLossValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={stopLoss} onChange={(event) => setStopLoss(event.target.value)} /></label>
     <div className="section-label"><span>Time in force</span></div>
     <select value={duration} onChange={(e) => setDuration(e.target.value as "DAY" | "GTC")}><option value="DAY">DAY</option><option value="GTC">GTC</option></select>
-    <dl className="ticket-info"><div><dt>Tick value</dt><dd>{tickValue.toFixed(2)} USD</dd></div><div><dt>Data</dt><dd className={quote.delayed ? "negative" : "positive"}>{quote.delayed ? "Delayed" : "Real-time"}</dd></div></dl>
-    <button className={side === "Buy" ? "buy-button" : "sell-button"} disabled={busy || !account || marketUnavailable || !takeProfitValid || !stopLossValid} onClick={() => onReview(draft())}>{marketUnavailable ? "Market data unavailable" : `Review ${side} market order`}</button>
+    <dl className="ticket-info"><div><dt>Tick value</dt><dd>{tickValue.toFixed(2)} USD</dd></div><div><dt>Data</dt><dd className={quote.delayed ? "negative" : "positive"}>{quote.delayed ? "Delayed" : "Real-time"}</dd></div><div><dt>Estimated risk</dt><dd className={estimatedRisk == null ? "" : "negative"}>{estimatedRisk == null ? "—" : `${estimatedRisk.toFixed(2)} USD`}</dd></div></dl>
+    <button className={side === "Buy" ? "buy-button" : "sell-button"} disabled={busy || !account || marketUnavailable || !takeProfitValid || !stopLossValid || estimatedRisk == null} onClick={() => onReview(draft())}>{marketUnavailable ? "Market data unavailable" : `Review ${side} market order`}</button>
   </div>;
 }
 
