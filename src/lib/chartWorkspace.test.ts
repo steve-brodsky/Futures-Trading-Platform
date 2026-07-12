@@ -86,9 +86,12 @@ describe("chart workspace", () => {
     expect(moveTab(workspace, "b", "main", 3).windows[0].tabIds).toEqual(["chart-1", "c", "b"]);
   });
 
-  it("returns detached tabs to main when its window closes", () => {
+  it("deletes detached tabs when their window closes", () => {
     const workspace = { ...fallback, tabs: [fallback.tabs[0], cloneChartTab(fallback.tabs[0], "copy")], windows: [{ ...fallback.windows[0] }, { id: "detached", detached: true, tabIds: ["copy"], activeTabId: "copy" }] };
-    expect(closeDetachedWindow(workspace, "detached").windows[0].tabIds).toEqual(["chart-1", "copy"]);
+    const result = closeDetachedWindow(workspace, "detached");
+    expect(result.windows).toHaveLength(1);
+    expect(result.windows[0].tabIds).toEqual(["chart-1"]);
+    expect(result.tabs.map((tab) => tab.id)).toEqual(["chart-1"]);
   });
 
   it("moves an off-screen detached window onto an available monitor", () => {

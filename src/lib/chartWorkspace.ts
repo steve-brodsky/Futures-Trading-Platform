@@ -195,9 +195,8 @@ export function closeDetachedWindow(workspace: WorkspaceState, windowId: string)
   const detached = workspace.windows.find((window) => window.id === windowId && window.detached);
   if (!detached) return workspace;
   const next = structuredClone(workspace);
-  const main = next.windows.find((window) => window.id === MAIN_WINDOW_ID)!;
-  main.tabIds.push(...detached.tabIds);
-  if (!main.activeTabId) main.activeTabId = detached.activeTabId;
+  const closedTabIds = new Set(detached.tabIds);
+  next.tabs = next.tabs.filter((tab) => !closedTabIds.has(tab.id));
   next.windows = next.windows.filter((window) => window.id !== windowId);
   return next;
 }

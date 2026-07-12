@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { emit, listen } from "@tauri-apps/api/event";
+import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
@@ -54,6 +54,10 @@ function mergeBars(current: Bar[], incoming: Bar[]): Bar[] {
 
 function formatPrice(value?: number): string {
   return value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+}
+
+async function syncWorkspaceToOpenWindows(workspace: WorkspaceState): Promise<void> {
+  await Promise.all(workspace.windows.map((window) => emitTo(window.id, "workspace-sync", workspace).catch(() => undefined)));
 }
 
 function IconButton({ label, active, children, onClick }: { label: string; active?: boolean; children: React.ReactNode; onClick?: () => void }) {
@@ -163,10 +167,10 @@ export default function App() {
       const next = stabilizeChartWorkspace(workspaceRef.current, normalized);
       workspaceRef.current = next;
       setWorkspace(next);
-      emit("workspace-sync", next);
+      syncWorkspaceToOpenWindows(next);
     }).then((unlisten) => cleanups.push(unlisten));
-    listen<{ windowId: string }>("workspace-window-ready", () => {
-      if (currentWindowId === MAIN_WINDOW_ID) emit("workspace-sync", workspaceRef.current);
+    listen<{ windowId: string }>("workspace-window-ready", ({ payload }) => {
+      if (currentWindowId === MAIN_WINDOW_ID) emitTo(payload.windowId, "workspace-sync", workspaceRef.current).catch(() => undefined);
     }).then((unlisten) => cleanups.push(unlisten));
     listen<StripBounds>("chart-strip-bounds", ({ payload }) => stripBoundsRef.current.set(payload.windowId, payload)).then((unlisten) => cleanups.push(unlisten));
     listen<{ tabId: string; range: { from: number; to: number } }>("chart-viewport", ({ payload }) => viewRangesRef.current.set(payload.tabId, payload.range)).then((unlisten) => cleanups.push(unlisten));
@@ -174,7 +178,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (workspaceLoaded && currentWindowId !== MAIN_WINDOW_ID) emit("workspace-window-ready", { windowId: currentWindowId });
+    if (workspaceLoaded && currentWindowId !== MAIN_WINDOW_ID) emitTo(MAIN_WINDOW_ID, "workspace-window-ready", { windowId: currentWindowId }).catch(() => undefined);
   }, [workspaceLoaded]);
 
   const selectedAccount = accounts.find((account) => account.id === workspace.selectedAccountId) ?? accounts[0];
@@ -307,7 +311,8 @@ export default function App() {
         ? { ...update(current), revision: Math.max(current.revision + 1, Date.now()) }
         : update(current);
       workspaceRef.current = next;
-      emit(currentWindowId === MAIN_WINDOW_ID ? "workspace-sync" : "workspace-proposal", next);
+      if (currentWindowId === MAIN_WINDOW_ID) syncWorkspaceToOpenWindows(next);
+      else emitTo(MAIN_WINDOW_ID, "workspace-proposal", next).catch(() => undefined);
       return next;
     });
   }
@@ -386,7 +391,7 @@ export default function App() {
       decorations: true,
     });
     view.once("tauri://created", async () => {
-      await emit("workspace-sync", workspaceRef.current);
+      await emitTo(state.id, "workspace-sync", workspaceRef.current);
       state.tabIds.forEach((tabId) => {
         const range = viewRangesRef.current.get(tabId);
         if (range) emit("chart-viewport", { tabId, range });
@@ -457,8 +462,7 @@ export default function App() {
       } else {
         const next = closeDetachedWindow(workspaceRef.current, currentWindowId);
         workspaceRef.current = next;
-        setWorkspace(next);
-        await emit("workspace-proposal", next);
+        await emitTo(MAIN_WINDOW_ID, "workspace-proposal", next).catch(() => undefined);
       }
       await current.destroy();
     }).then((unlisten) => cleanups.push(unlisten));
