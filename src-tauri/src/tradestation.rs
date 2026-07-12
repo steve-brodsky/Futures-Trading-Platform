@@ -284,7 +284,13 @@ impl TradeStation {
             .and_then(Value::as_array)
             .and_then(|v| v.first())
             .ok_or_else(|| AppError::Api("Symbol details unavailable".into()))?;
-        Ok(symbol_from_value(item))
+        let details = symbol_from_value(item);
+        if details.point_value <= 0.0 {
+            return Err(AppError::Api(format!(
+                "TradeStation omitted point value for {symbol}"
+            )));
+        }
+        Ok(details)
     }
 
     pub async fn bars(&self, symbol: &str, timeframe: &str) -> Result<Vec<Bar>, AppError> {
@@ -708,13 +714,22 @@ pub fn quote_from_value(item: &Value) -> Option<Quote> {
 }
 
 fn symbol_from_value(item: &Value) -> SymbolMeta {
+    let price_format = item.get("PriceFormat").unwrap_or(&Value::Null);
     SymbolMeta {
         symbol: string(item, "Name").or_else_empty(|| string(item, "Symbol")),
         description: string(item, "Description"),
         exchange: string(item, "Exchange"),
         asset_type: string(item, "Category").or_else_empty(|| string(item, "AssetType")),
-        min_move: number(item, "MinMove").max(0.00000001),
-        point_value: number(item, "PointValue"),
+        // v3 symbol details carries the compatible price increment and point
+        // value together under PriceFormat. v2 suggestions use a different
+        // scale, so never combine one endpoint's MinMove with the other's value.
+        min_move: optional_number(price_format, "Increment")
+            .or_else(|| optional_number(item, "MinMove"))
+            .unwrap_or(0.0)
+            .max(0.00000001),
+        point_value: optional_number(price_format, "PointValue")
+            .or_else(|| optional_number(item, "PointValue"))
+            .unwrap_or(0.0),
         expiration: item
             .get("ExpirationDate")
             .and_then(Value::as_str)
@@ -800,6 +815,24 @@ mod tests {
     fn tick_alignment_is_decimal_safe_enough_for_validation() {
         assert!(aligned(6260.25, 0.25));
         assert!(!aligned(6260.10, 0.25));
+    }
+
+    #[test]
+    fn mes_uses_v3_price_format_for_tick_value() {
+        let value = json!({
+            "AssetType": "FUTURE",
+            "Symbol": "MESU26",
+            "PriceFormat": {
+                "Increment": "0.25",
+                "PointValue": "5"
+            },
+            "MinMove": 25,
+            "PointValue": 500
+        });
+        let symbol = symbol_from_value(&value);
+        assert_eq!(symbol.min_move, 0.25);
+        assert_eq!(symbol.point_value, 5.0);
+        assert_eq!(symbol.min_move * symbol.point_value, 1.25);
     }
 
     #[test]

@@ -154,6 +154,14 @@ async fn search_symbols(
     state.api.search_symbols(query.trim()).await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn get_symbol_details(
+    symbol: String,
+    state: State<'_, NativeState>,
+) -> Result<SymbolMeta, AppError> {
+    state.api.symbol_details(symbol.trim()).await
+}
+
 #[tauri::command]
 async fn get_bars(
     symbol: String,
@@ -736,6 +744,7 @@ pub fn run() {
             set_environment,
             get_accounts,
             search_symbols,
+            get_symbol_details,
             get_bars,
             get_quotes,
             load_cached_bars,
