@@ -160,11 +160,6 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     volumeRef.current = volumeSeries;
 
-    indicatorRefs.current = indicators.filter((item) => item.visible && ["SMA", "EMA", "VWAP"].includes(item.kind)).map((config) => ({
-      config,
-      series: chart.addSeries(LineSeries, { color: config.color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat }),
-    }));
-
     let settingCrosshair = false;
     chart.subscribeCrosshairMove((param) => {
       syncTradeLabelsRef.current();
@@ -252,7 +247,38 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       host.current?.removeEventListener("pointermove", syncLabels);
       chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null;
     };
-  }, [kind, symbol, exchange, minMove, timeframe, timezone, indicators]);
+  }, [kind, symbol, exchange, minMove, timeframe, timezone]);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    const priceFormat = { type: "price" as const, precision: pricePrecision(minMove), minMove };
+    const visible = indicators.filter((item) => item.visible && ["SMA", "EMA", "VWAP"].includes(item.kind));
+    const visibleIds = new Set(visible.map((config) => config.id));
+    const existing = new Map(indicatorRefs.current.map((item) => [item.config.id, item]));
+
+    indicatorRefs.current.forEach((item) => {
+      if (!visibleIds.has(item.config.id)) chart.removeSeries(item.series);
+    });
+
+    const closes = barsRef.current.map((bar) => bar.close);
+    indicatorRefs.current = visible.map((config) => {
+      const current = existing.get(config.id);
+      const series = current?.series ?? chart.addSeries(LineSeries, {
+        color: config.color,
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+        priceFormat,
+      });
+      series.applyOptions({ color: config.color });
+      const values = config.kind === "SMA" ? sma(closes, config.period) : config.kind === "EMA" ? ema(closes, config.period) : vwap(barsRef.current);
+      series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(barsRef.current[index].time), value }]));
+      return { config, series };
+    });
+  }, [indicators, chartGeneration, minMove]);
 
   useEffect(() => {
     const price = priceRef.current;

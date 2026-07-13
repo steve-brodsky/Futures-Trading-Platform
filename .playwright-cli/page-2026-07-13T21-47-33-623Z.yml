@@ -1,0 +1,83 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e10]: NORTHSTAR
+      - generic [ref=e11]: TRADER
+    - generic [ref=e12]:
+      - strong [ref=e13]: MESU26
+      - generic [ref=e14]: 6,260.25
+      - generic [ref=e15]: +0.42%
+    - generic "New York market time 17:47:33 EDT" [ref=e17]:
+      - generic [ref=e18]: NY
+      - time [ref=e19]: 17:47:33 EDT
+    - button "SIM" [ref=e20] [cursor=pointer]
+    - button "DEMO FEED" [ref=e24] [cursor=pointer]
+    - button "Notifications" [ref=e30] [cursor=pointer]
+    - button "Settings" [ref=e34] [cursor=pointer]
+  - tablist "Chart tabs" [ref=e38]:
+    - tab [selected] [ref=e40]:
+      - button "MESU26 · 1m" [ref=e41] [cursor=pointer]:
+        - strong [ref=e42]: MESU26
+        - generic [ref=e43]: ·
+        - generic [ref=e44]: 1m
+      - button "Close MESU26 1m chart" [disabled] [ref=e45]
+    - button "Add chart tab" [ref=e49] [cursor=pointer]
+  - navigation "Chart toolbar" [ref=e51]:
+    - button "MESU26 CME" [ref=e52] [cursor=pointer]:
+      - strong [ref=e56]: MESU26
+      - generic [ref=e57]: CME
+    - generic [ref=e61]:
+      - button "1m" [ref=e62] [cursor=pointer]
+      - button "5m" [ref=e63] [cursor=pointer]
+      - button "15m" [ref=e64] [cursor=pointer]
+      - button "30m" [ref=e65] [cursor=pointer]
+      - button "1h" [ref=e66] [cursor=pointer]
+      - button "4h" [ref=e67] [cursor=pointer]
+      - button "D" [ref=e68] [cursor=pointer]
+      - button "W" [ref=e69] [cursor=pointer]
+      - button "M" [ref=e70] [cursor=pointer]
+    - generic [ref=e72]:
+      - button "Candlestick chart" [pressed] [ref=e73] [cursor=pointer]
+      - button "Line chart" [ref=e76] [cursor=pointer]
+      - button "Area chart" [ref=e80] [cursor=pointer]
+    - button "Indicators" [ref=e84] [cursor=pointer]
+    - button "Alert" [ref=e86] [cursor=pointer]
+    - button "Undo" [ref=e91] [cursor=pointer]
+    - button "Reset chart" [ref=e95] [cursor=pointer]
+    - button "Toggle bottom panel" [ref=e99] [cursor=pointer]
+    - button "Toggle right panel" [ref=e102] [cursor=pointer]
+    - button "Entry rules" [ref=e105] [cursor=pointer]
+    - button "Fullscreen" [ref=e109] [cursor=pointer]
+  - generic [ref=e115]:
+    - complementary "Drawing tools" [ref=e116]:
+      - button "Cursor" [pressed] [ref=e117] [cursor=pointer]
+      - 'button "Magnet: snap crosshair to candle high or low" [ref=e120] [cursor=pointer]'
+      - button "Horizontal drawing tools" [ref=e126] [cursor=pointer]
+    - region "MESU26 chart" [ref=e128]:
+      - generic:
+        - generic: CME
+        - strong: Micro E-mini S&P 500 Sep 2026
+        - generic: ·
+        - generic: MESU26
+      - table [ref=e131]:
+        - row [ref=e132]:
+          - cell
+          - cell [ref=e133]:
+            - link "Charting by TradingView" [ref=e137] [cursor=pointer]:
+              - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+          - cell [ref=e142]
+        - row [ref=e146]:
+          - cell
+          - cell [ref=e147]
+          - cell [ref=e151]
+      - generic: MESU26
+      - combobox "Chart timezone" [ref=e154] [cursor=pointer]:
+        - option "EXCH · CDT" [selected]
+        - option "Computer local"
+        - option "UTC"
+        - option "New York"
+        - option "Chicago"
+        - option "Denver"
+        - option "Los Angeles"
+        - option "London"
+        - option "Tokyo"
