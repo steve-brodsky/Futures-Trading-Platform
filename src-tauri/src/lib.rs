@@ -643,6 +643,7 @@ async fn run_quote_stream(
 ) {
     let path = format!("/marketdata/stream/quotes/{}", symbols.join(","));
     let mut attempt = 0u32;
+    let mut quotes = HashMap::new();
     loop {
         emit_stream_state(
             &app,
@@ -683,7 +684,7 @@ async fn run_quote_stream(
                             go_away = true;
                             break;
                         }
-                        if let Some(quote) = tradestation::quote_from_value(&value) {
+                        if let Some(quote) = tradestation::merge_quote_update(&mut quotes, &value) {
                             let _ = app.emit(
                                 "quote-update",
                                 QuoteUpdateEvent {

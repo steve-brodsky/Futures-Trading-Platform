@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -689,6 +690,20 @@ pub fn bar_from_value(item: &Value, timeframe: &str) -> Option<Bar> {
 }
 
 pub fn quote_from_value(item: &Value) -> Option<Quote> {
+    quote_from_value_with_previous(item, None)
+}
+
+pub fn merge_quote_update(quotes: &mut HashMap<String, Quote>, item: &Value) -> Option<Quote> {
+    let symbol = string(item, "Symbol");
+    if symbol.is_empty() {
+        return None;
+    }
+    let quote = quote_from_value_with_previous(item, quotes.get(&symbol))?;
+    quotes.insert(symbol, quote.clone());
+    Some(quote)
+}
+
+fn quote_from_value_with_previous(item: &Value, previous: Option<&Quote>) -> Option<Quote> {
     let symbol = string(item, "Symbol");
     if symbol.is_empty() {
         return None;
@@ -696,20 +711,34 @@ pub fn quote_from_value(item: &Value) -> Option<Quote> {
     let flags = item.get("MarketFlags").unwrap_or(&Value::Null);
     Some(Quote {
         symbol,
-        last: number(item, "Last"),
-        bid: number(item, "Bid"),
-        ask: number(item, "Ask"),
-        change: number(item, "NetChange"),
-        change_pct: number(item, "NetChangePct"),
+        last: optional_number(item, "Last")
+            .or_else(|| previous.map(|quote| quote.last))
+            .unwrap_or_default(),
+        bid: optional_number(item, "Bid")
+            .or_else(|| previous.map(|quote| quote.bid))
+            .unwrap_or_default(),
+        ask: optional_number(item, "Ask")
+            .or_else(|| previous.map(|quote| quote.ask))
+            .unwrap_or_default(),
+        change: optional_number(item, "NetChange")
+            .or_else(|| previous.map(|quote| quote.change))
+            .unwrap_or_default(),
+        change_pct: optional_number(item, "NetChangePct")
+            .or_else(|| previous.map(|quote| quote.change_pct))
+            .unwrap_or_default(),
         delayed: flags
             .get("IsDelayed")
             .and_then(Value::as_bool)
+            .or_else(|| previous.map(|quote| quote.delayed))
             .unwrap_or(true),
         halted: flags
             .get("IsHalted")
             .and_then(Value::as_bool)
+            .or_else(|| previous.map(|quote| quote.halted))
             .unwrap_or(false),
-        timestamp: string(item, "TradeTime"),
+        timestamp: optional_string(item, "TradeTime")
+            .or_else(|| previous.map(|quote| quote.timestamp.clone()))
+            .unwrap_or_default(),
     })
 }
 
@@ -862,6 +891,110 @@ mod tests {
         });
         assert_eq!(bar_from_value(&value, "D").unwrap().time, 86_400);
     }
+
+    fn full_quote(symbol: &str, bid: f64, ask: f64) -> Value {
+        json!({
+            "Symbol": symbol,
+            "Last": (bid + ask) / 2.0,
+            "Bid": bid,
+            "Ask": ask,
+            "NetChange": 12.5,
+            "NetChangePct": 0.2,
+            "MarketFlags": { "IsDelayed": false, "IsHalted": false },
+            "TradeTime": "2026-07-13T20:00:00Z"
+        })
+    }
+
+    #[test]
+    fn full_quote_snapshot_initializes_every_supported_field() {
+        let quote = quote_from_value(&full_quote("MESU26", 6250.0, 6250.25)).unwrap();
+        assert_eq!(quote.symbol, "MESU26");
+        assert_eq!(quote.last, 6250.125);
+        assert_eq!(quote.bid, 6250.0);
+        assert_eq!(quote.ask, 6250.25);
+        assert_eq!(quote.change, 12.5);
+        assert_eq!(quote.change_pct, 0.2);
+        assert!(!quote.delayed);
+        assert!(!quote.halted);
+        assert_eq!(quote.timestamp, "2026-07-13T20:00:00Z");
+    }
+
+    #[test]
+    fn sparse_price_updates_preserve_the_opposite_side_and_unrelated_fields() {
+        let mut quotes = HashMap::new();
+        merge_quote_update(&mut quotes, &full_quote("MESU26", 6250.0, 6250.25)).unwrap();
+
+        let bid_update = merge_quote_update(
+            &mut quotes,
+            &json!({ "Symbol": "MESU26", "Bid": "6250.25" }),
+        )
+        .unwrap();
+        assert_eq!(bid_update.bid, 6250.25);
+        assert_eq!(bid_update.ask, 6250.25);
+        assert_eq!(bid_update.last, 6250.125);
+        assert_eq!(bid_update.change, 12.5);
+        assert!(!bid_update.delayed);
+        assert_eq!(bid_update.timestamp, "2026-07-13T20:00:00Z");
+
+        let ask_update = merge_quote_update(
+            &mut quotes,
+            &json!({ "Symbol": "MESU26", "Ask": "6250.50" }),
+        )
+        .unwrap();
+        assert_eq!(ask_update.bid, 6250.25);
+        assert_eq!(ask_update.ask, 6250.5);
+    }
+
+    #[test]
+    fn sparse_market_flags_preserve_missing_flags_and_honor_explicit_values() {
+        let mut quotes = HashMap::new();
+        merge_quote_update(&mut quotes, &full_quote("MESU26", 6250.0, 6250.25)).unwrap();
+
+        let halted = merge_quote_update(
+            &mut quotes,
+            &json!({ "Symbol": "MESU26", "MarketFlags": { "IsHalted": true } }),
+        )
+        .unwrap();
+        assert!(!halted.delayed);
+        assert!(halted.halted);
+
+        let delayed = merge_quote_update(
+            &mut quotes,
+            &json!({ "Symbol": "MESU26", "MarketFlags": { "IsDelayed": true } }),
+        )
+        .unwrap();
+        assert!(delayed.delayed);
+        assert!(delayed.halted);
+
+        let cleared = merge_quote_update(
+            &mut quotes,
+            &json!({
+                "Symbol": "MESU26",
+                "Bid": 0,
+                "Ask": 0,
+                "MarketFlags": { "IsDelayed": false, "IsHalted": false }
+            }),
+        )
+        .unwrap();
+        assert_eq!(cleared.bid, 0.0);
+        assert_eq!(cleared.ask, 0.0);
+        assert!(!cleared.delayed);
+        assert!(!cleared.halted);
+    }
+
+    #[test]
+    fn quote_accumulator_keeps_symbols_independent() {
+        let mut quotes = HashMap::new();
+        merge_quote_update(&mut quotes, &full_quote("MESU26", 6250.0, 6250.25)).unwrap();
+        merge_quote_update(&mut quotes, &full_quote("MNQU26", 23000.0, 23000.5)).unwrap();
+        merge_quote_update(&mut quotes, &json!({ "Symbol": "MESU26", "Bid": 6251.0 })).unwrap();
+
+        assert_eq!(quotes["MESU26"].bid, 6251.0);
+        assert_eq!(quotes["MESU26"].ask, 6250.25);
+        assert_eq!(quotes["MNQU26"].bid, 23000.0);
+        assert_eq!(quotes["MNQU26"].ask, 23000.5);
+    }
+
     #[test]
     fn masks_account_numbers() {
         assert_eq!(mask_account("123456789"), "•••6789");
