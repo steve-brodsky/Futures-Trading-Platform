@@ -1,4 +1,5 @@
-import type { ChartTabState, ChartWindowState, Drawing, WorkspaceState } from "../types";
+import type { ChartTabState, ChartWindowState, Drawing, EntryRuleNode, WorkspaceState } from "../types";
+import { normalizeEntryRules } from "./entryRules";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 
 export const MAX_CHART_TABS = 6;
@@ -108,11 +109,23 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     bottomPanelHeight: value.bottomPanelHeight ?? fallback.bottomPanelHeight,
     selectedAccountId: value.selectedAccountId ?? fallback.selectedAccountId,
     confirmOrders: value.confirmOrders ?? true,
+    entryRules: normalizeEntryRules(value.entryRules),
   };
 }
 
 function sameArray<T>(left: T[], right: T[], equal: (a: T, b: T) => boolean): boolean {
   return left.length === right.length && left.every((item, index) => equal(item, right[index]));
+}
+
+function sameEntryRuleNode(left: EntryRuleNode, right: EntryRuleNode): boolean {
+  if (left.id !== right.id || left.kind !== right.kind) return false;
+  if (left.kind === "group" && right.kind === "group") {
+    return left.combinator === right.combinator && sameArray(left.children, right.children, sameEntryRuleNode);
+  }
+  if (left.kind !== "condition" || right.kind !== "condition" || left.operator !== right.operator) return false;
+  const sameOperand = (a: typeof left.left, b: typeof right.left) => a.kind === b.kind
+    && (a.kind === "marketPrice" || (b.kind === "movingAverage" && a.average === b.average && a.period === b.period));
+  return sameOperand(left.left, right.left) && sameOperand(left.right, right.right);
 }
 
 /** Reuse unchanged nested state after a whole-workspace cross-window broadcast. */
@@ -159,6 +172,10 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     ));
     return [symbol, stable ? prior : items];
   }));
+  const entryRules = sameEntryRuleNode(current.entryRules.long, incoming.entryRules.long)
+    && sameEntryRuleNode(current.entryRules.short, incoming.entryRules.short)
+    ? current.entryRules
+    : incoming.entryRules;
 
   return {
     ...incoming,
@@ -169,6 +186,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
       && Object.entries(drawings).every(([symbol, items]) => current.drawings[symbol] === items)
       ? current.drawings
       : drawings,
+    entryRules,
   };
 }
 

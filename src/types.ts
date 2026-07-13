@@ -152,6 +152,41 @@ export interface IndicatorConfig {
   visible: boolean;
 }
 
+export type EntryRuleSide = "long" | "short";
+
+export type EntryRuleOperand =
+  | { kind: "marketPrice" }
+  | { kind: "movingAverage"; average: "EMA" | "SMA"; period: number };
+
+export interface EntryRuleCondition {
+  id: string;
+  kind: "condition";
+  left: EntryRuleOperand;
+  operator: "above" | "below";
+  right: EntryRuleOperand;
+}
+
+export interface EntryRuleGroup {
+  id: string;
+  kind: "group";
+  combinator: "and" | "or";
+  children: EntryRuleNode[];
+}
+
+export type EntryRuleNode = EntryRuleCondition | EntryRuleGroup;
+
+export interface EntryRules {
+  long: EntryRuleGroup;
+  short: EntryRuleGroup;
+}
+
+export interface EntryRuleResult {
+  allowed: boolean;
+  status: "allowed" | "blocked" | "waiting";
+  reason: string;
+  nodeResults: Record<string, boolean | null>;
+}
+
 export interface Drawing {
   id: string;
   kind: "trend" | "horizontal" | "horizontal-ray" | "ray" | "rectangle" | "fibonacci" | "text";
@@ -196,6 +231,7 @@ export interface WorkspaceState {
   bottomPanelHeight?: number;
   selectedAccountId?: string;
   confirmOrders: boolean;
+  entryRules: EntryRules;
 }
 
 export interface BarSnapshotEvent {

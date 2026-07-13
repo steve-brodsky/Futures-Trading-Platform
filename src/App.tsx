@@ -1,22 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, Download,
-  LineChart, LockKeyhole, Maximize2, Minus,
+  LineChart, ListChecks, LockKeyhole, Maximize2, Minus,
   Magnet, MousePointer2, PanelBottom, PanelRight, Plus, RotateCcw,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
   Undo2, Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart } from "./components/TradingChart";
+import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { estimateOrderRisk, roundToTick, validateTick } from "./lib/indicators";
+import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { flattenOrderDraft, withOrderPrice } from "./lib/tradeLines";
 import { defaultIndicators } from "./lib/workspace";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
-import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, Drawing, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const newYorkClock = new Intl.DateTimeFormat("en-US", {
@@ -33,7 +35,7 @@ const defaultWorkspace: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators, chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
-  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true,
+  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -48,7 +50,7 @@ interface TabMarketState {
 interface StripBounds { windowId: string; left: number; top: number; right: number; bottom: number; }
 
 type ReviewState =
-  | { kind: "entry"; draft: OrderDraft; preview: OrderPreview }
+  | { kind: "entry"; draft: OrderDraft; preview: OrderPreview; sourceTabId: string }
   | { kind: "close-position"; draft: OrderDraft; preview: OrderPreview; positionId: string };
 
 function mergeBars(current: Bar[], incoming: Bar[]): Bar[] {
@@ -63,6 +65,10 @@ function formatPrice(value?: number): string {
 
 async function syncWorkspaceToOpenWindows(workspace: WorkspaceState): Promise<void> {
   await Promise.all(workspace.windows.map((window) => emitTo(window.id, "workspace-sync", workspace).catch(() => undefined)));
+}
+
+function blockedEntryResult(reason: string): EntryRuleResult {
+  return { allowed: false, status: "waiting", reason, nodeResults: {} };
 }
 
 function IconButton({ label, active, children, onClick }: { label: string; active?: boolean; children: React.ReactNode; onClick?: () => void }) {
@@ -94,6 +100,7 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<SymbolMeta[]>(futures);
   const [indicatorOpen, setIndicatorOpen] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [entryRulesOpen, setEntryRulesOpen] = useState(false);
   const [review, setReview] = useState<ReviewState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [envConfirm, setEnvConfirm] = useState<TradingEnvironment | null>(null);
@@ -123,6 +130,10 @@ export default function App() {
   const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
     ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
     : quoteFor(activeTab.symbol.symbol));
+  const activeEntryEligibility = useMemo(
+    () => evaluateEntryRules(workspace.entryRules, bars, activeQuote),
+    [workspace.entryRules, bars, activeQuote],
+  );
   const tabStreamKey = workspace.tabs.map((tab) => `${tab.id}:${tab.symbol.symbol}:${tab.timeframe}`).join("|");
   const quoteSymbolsKey = [...new Set([...workspace.watchlist, ...workspace.tabs.map((tab) => tab.symbol.symbol)])].sort().join("|");
 
@@ -525,16 +536,32 @@ export default function App() {
     finally { setBusy(false); setSecret(""); }
   }
 
-  async function openReview(draft: OrderDraft) {
+  function eligibilityForEntry(sourceTabId: string, expectedSymbol: string): Record<EntryRuleSide, EntryRuleResult> {
+    const tab = workspace.tabs.find((item) => item.id === sourceTabId);
+    if (!tab || tab.symbol.symbol !== expectedSymbol) {
+      const result = blockedEntryResult("The originating chart is no longer available for rule evaluation.");
+      return { long: result, short: result };
+    }
+    const sourceBars = tabMarkets[sourceTabId]?.bars ?? [];
+    const sourceQuote = quotes[tab.symbol.symbol] ?? (api.isNative
+      ? { symbol: tab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+      : quoteFor(tab.symbol.symbol));
+    return evaluateEntryRules(workspace.entryRules, sourceBars, sourceQuote);
+  }
+
+  async function openReview(draft: OrderDraft, sourceTabId: string) {
     if (!api.isNative) return showToast("Browser demo mode cannot place orders. Run the Tauri app to connect.");
     setBusy(true);
-    try { setReview({ kind: "entry", draft, preview: await api.confirmOrder(draft) }); }
+    try { setReview({ kind: "entry", sourceTabId, draft, preview: await api.confirmOrder(draft) }); }
     catch (error) { showToast(String(error)); }
     finally { setBusy(false); }
   }
 
-  async function submitOrder(draft: OrderDraft) {
-    if (workspace.confirmOrders) return openReview(draft);
+  async function submitOrder(draft: OrderDraft, sourceTabId: string) {
+    const side = draft.side === "Buy" ? "long" : "short";
+    const eligibility = eligibilityForEntry(sourceTabId, draft.symbol)[side];
+    if (!eligibility.allowed) return showToast(`${draft.side} entry blocked: ${eligibility.reason}`);
+    if (workspace.confirmOrders) return openReview(draft, sourceTabId);
     if (!api.isNative) return showToast("Browser demo mode cannot place orders. Run the Tauri app to connect.");
     setBusy(true);
     try {
@@ -619,6 +646,9 @@ export default function App() {
       setReview(null);
       return executeClosePosition(positionId);
     }
+    const side = review.draft.side === "Buy" ? "long" : "short";
+    const eligibility = eligibilityForEntry(review.sourceTabId, review.draft.symbol)[side];
+    if (!eligibility.allowed) return showToast(`${review.draft.side} entry blocked: ${eligibility.reason}`);
     setBusy(true);
     try {
       const update = await api.placeOrder(review.draft);
@@ -631,6 +661,9 @@ export default function App() {
 
   const connectionLabel = api.isNative ? (authenticated ? market.streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
   const marketTime = newYorkClock.format(new Date(currentTime));
+  const reviewEntryEligibility = review?.kind === "entry"
+    ? eligibilityForEntry(review.sourceTabId, review.draft.symbol)[review.draft.side === "Buy" ? "long" : "short"]
+    : null;
 
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
@@ -664,7 +697,7 @@ export default function App() {
       <IconButton label="Undo"><Undo2 size={17} /></IconButton>
       <IconButton label="Reset chart"><RotateCcw size={17} /></IconButton>
       <span className="toolbar-spacer" />
-      {!isDetached && <><IconButton label="Toggle bottom panel" active={workspace.bottomPanelOpen} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}><PanelBottom size={17} /></IconButton><IconButton label="Toggle right panel" active={workspace.rightPanelOpen} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}><PanelRight size={17} /></IconButton></>}
+      {!isDetached && <><IconButton label="Toggle bottom panel" active={workspace.bottomPanelOpen} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}><PanelBottom size={17} /></IconButton><IconButton label="Toggle right panel" active={workspace.rightPanelOpen} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}><PanelRight size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton></>}
       <IconButton label="Fullscreen"><Maximize2 size={17} /></IconButton>
     </nav>
 
@@ -685,7 +718,7 @@ export default function App() {
 
       {!isDetached && workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
-        {workspace.rightTab === "order" ? <OrderTicket symbol={activeTab.symbol} quote={activeQuote} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onSubmit={submitOrder} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta }); }} />}
+        {workspace.rightTab === "order" ? <OrderTicket symbol={activeTab.symbol} quote={activeQuote} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onSubmit={(draft) => submitOrder(draft, activeTab.id)} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta }); }} />}
       </aside>}
 
       {!isDetached && workspace.bottomPanelOpen && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
@@ -697,7 +730,9 @@ export default function App() {
 
     {envConfirm && <Modal title={`Switch to ${envConfirm.toUpperCase()}?`} onClose={() => setEnvConfirm(null)}><div className={`environment-confirm ${envConfirm}`}><Zap size={22} /><div><strong>{envConfirm === "live" ? "Real orders and real money" : "Simulated execution"}</strong><p>{envConfirm === "live" ? "Changing to LIVE clears SIM account data and disables quick-submit for this session." : "SIM uses a separate account environment and simulated fills."}</p></div></div><div className="modal-actions"><button className="secondary-button" onClick={() => setEnvConfirm(null)}>Cancel</button><button className={envConfirm === "live" ? "danger-button" : "primary-button"} disabled={busy} onClick={confirmEnvironment}>Switch to {envConfirm.toUpperCase()}</button></div></Modal>}
 
-    {review && <Modal title={review.kind === "close-position" ? "Close position" : "Review order"} onClose={() => setReview(null)}><div className="review-hero"><span className={review.draft.side === "Buy" ? "buy" : "sell"}>{review.draft.side}</span><strong>{review.draft.quantity} {review.draft.symbol}</strong><small>{review.kind === "close-position" ? "Market close · cancels working exits first" : `${review.draft.type} · ${review.draft.duration}`}</small></div><dl className="review-list">{review.kind === "entry" && <><div><dt>Take profit</dt><dd>{formatPrice(review.draft.takeProfit)}</dd></div><div><dt>Stop loss</dt><dd>{formatPrice(review.draft.stopLoss)}</dd></div></>}<div><dt>Estimated commission</dt><dd>{review.preview.estimatedCommission ?? "—"}</dd></div><div><dt>Initial margin</dt><dd>{review.preview.initialMargin ?? "—"}</dd></div><div><dt>Environment</dt><dd className={environment === "live" ? "negative" : "cyan"}>{environment.toUpperCase()}</dd></div></dl><p className="preview-summary">{review.kind === "close-position" ? "All working close-side orders for this symbol will be cancelled and confirmed inactive before the market close is submitted." : review.preview.summary}</p><button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview.valid || busy} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button></Modal>}
+    {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder rules={workspace.entryRules} bars={bars} quote={activeQuote} onClose={() => setEntryRulesOpen(false)} onSave={(entryRules) => { updateWorkspace({ entryRules }); setEntryRulesOpen(false); showToast("Entry rules saved."); }} /></Modal>}
+
+    {review && <Modal title={review.kind === "close-position" ? "Close position" : "Review order"} onClose={() => setReview(null)}><div className="review-hero"><span className={review.draft.side === "Buy" ? "buy" : "sell"}>{review.draft.side}</span><strong>{review.draft.quantity} {review.draft.symbol}</strong><small>{review.kind === "close-position" ? "Market close · cancels working exits first" : `${review.draft.type} · ${review.draft.duration}`}</small></div><dl className="review-list">{review.kind === "entry" && <><div><dt>Take profit</dt><dd>{formatPrice(review.draft.takeProfit)}</dd></div><div><dt>Stop loss</dt><dd>{formatPrice(review.draft.stopLoss)}</dd></div></>}<div><dt>Estimated commission</dt><dd>{review.preview.estimatedCommission ?? "—"}</dd></div><div><dt>Initial margin</dt><dd>{review.preview.initialMargin ?? "—"}</dd></div><div><dt>Environment</dt><dd className={environment === "live" ? "negative" : "cyan"}>{environment.toUpperCase()}</dd></div></dl><p className="preview-summary">{review.kind === "close-position" ? "All working close-side orders for this symbol will be cancelled and confirmed inactive before the market close is submitted." : review.preview.summary}</p>{reviewEntryEligibility && <p className={`entry-review-rule ${reviewEntryEligibility.status}`}>{reviewEntryEligibility.reason}</p>}<button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview.valid || busy || Boolean(reviewEntryEligibility && !reviewEntryEligibility.allowed)} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button></Modal>}
 
     {toast && <div className="toast" role="status">{toast}</div>}
   </main>;
@@ -779,7 +814,7 @@ function Watchlist({ symbols, quotes, active, onSelect }: { symbols: string[]; q
   return <div className="watchlist"><header><span>Symbol</span><span>Last</span><span>Chg%</span></header>{symbols.map((symbol) => { const quote = quotes[symbol] ?? quoteFor(symbol); return <button key={symbol} className={active === symbol ? "active" : ""} onClick={() => onSelect(symbol)}><span><strong>{symbol}</strong><small>{futures.find((f) => f.symbol === symbol)?.exchange}</small></span><b>{quote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</b><em className={quote.changePct >= 0 ? "positive" : "negative"}>{quote.changePct >= 0 ? "+" : ""}{quote.changePct.toFixed(2)}%</em></button>; })}</div>;
 }
 
-function OrderTicket({ symbol, quote, account, environment, busy, confirmOrders, onConfirmOrdersChange, onSubmit }: { symbol: SymbolMeta; quote: Quote; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; onConfirmOrdersChange: (enabled: boolean) => void; onSubmit: (draft: OrderDraft) => void }) {
+function OrderTicket({ symbol, quote, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, onConfirmOrdersChange, onSubmit }: { symbol: SymbolMeta; quote: Quote; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; onConfirmOrdersChange: (enabled: boolean) => void; onSubmit: (draft: OrderDraft) => void }) {
   const [side, setSide] = useState<"Buy" | "Sell">("Buy");
   const [quantity, setQuantity] = useState(1);
   const [duration, setDuration] = useState<"DAY" | "GTC">("DAY");
@@ -811,6 +846,11 @@ function OrderTicket({ symbol, quote, account, environment, busy, confirmOrders,
   const marketUnavailable = quote.last <= 0 || quote.halted || quote.delayed || !quote.receivedAt || Date.now() - quote.receivedAt > 5_000;
   const tickValue = symbol.minMove * symbol.pointValue;
   const estimatedRisk = stopLossValid ? estimateOrderRisk(entryPrice, stopLossPrice, side, quantity, symbol.minMove, tickValue) : null;
+  const selectedEligibility = entryEligibility[side === "Buy" ? "long" : "short"];
+  const orderDisabled = busy || !account || marketUnavailable || !takeProfitValid || !stopLossValid || estimatedRisk == null || !selectedEligibility.allowed;
+  const orderLabel = marketUnavailable ? "Market data unavailable"
+    : !selectedEligibility.allowed ? `${side === "Buy" ? "Long" : "Short"} entry blocked`
+    : `${confirmOrders ? "Review" : "Place"} ${side} market order`;
   return <div className="order-ticket">
     <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
     <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => setSide("Sell")}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => setSide("Buy")}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
@@ -821,8 +861,9 @@ function OrderTicket({ symbol, quote, account, environment, busy, confirmOrders,
     <div className="section-label"><span>Time in force</span></div>
     <select value={duration} onChange={(e) => setDuration(e.target.value as "DAY" | "GTC")}><option value="DAY">DAY</option><option value="GTC">GTC</option></select>
     <dl className="ticket-info"><div><dt>Tick value</dt><dd>{tickValue.toFixed(2)} USD</dd></div><div><dt>Data</dt><dd className={quote.delayed ? "negative" : "positive"}>{quote.delayed ? "Delayed" : "Real-time"}</dd></div><div><dt>Estimated risk</dt><dd className={estimatedRisk == null ? "" : "negative"}>{estimatedRisk == null ? "—" : `${estimatedRisk.toFixed(2)} USD`}</dd></div></dl>
+    {rulesConfigured && <div className={`ticket-rule-status ${selectedEligibility.status}`}><span /> <strong>{side === "Buy" ? "Long" : "Short"} entry</strong><small>{selectedEligibility.reason}</small></div>}
     <label className="confirm-orders-toggle"><input type="checkbox" checked={confirmOrders} onChange={(event) => onConfirmOrdersChange(event.target.checked)} /><span><strong>Confirm orders</strong><small>Review buy, sell, and close actions</small></span></label>
-    <button className={side === "Buy" ? "buy-button" : "sell-button"} disabled={busy || !account || marketUnavailable || !takeProfitValid || !stopLossValid || estimatedRisk == null} onClick={() => onSubmit(draft())}>{marketUnavailable ? "Market data unavailable" : `${confirmOrders ? "Review" : "Place"} ${side} market order`}</button>
+    <button className={side === "Buy" ? "buy-button" : "sell-button"} disabled={orderDisabled} onClick={() => onSubmit(draft())}>{orderLabel}</button>
   </div>;
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
+import { defaultEntryRules } from "./entryRules";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./chartWorkspace";
 
 const fallback: WorkspaceState = {
@@ -7,7 +8,7 @@ const fallback: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
-  watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true,
+  watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
 };
 
 describe("chart workspace", () => {
@@ -21,6 +22,7 @@ describe("chart workspace", () => {
     expect(result.tabs[0].indicators).toBe(current.tabs[0].indicators);
     expect(result.windows).toBe(current.windows);
     expect(result.drawings).toBe(current.drawings);
+    expect(result.entryRules).toBe(current.entryRules);
   });
 
   it("only replaces the tab whose chart configuration changed", () => {
@@ -102,6 +104,12 @@ describe("chart workspace", () => {
   it("preserves an explicit disabled confirmation preference", () => {
     const result = normalizeChartWorkspace({ ...fallback, confirmOrders: false }, fallback);
     expect(result.confirmOrders).toBe(false);
+  });
+
+  it("defaults legacy workspaces to unrestricted entry rules", () => {
+    const result = normalizeChartWorkspace({ ...fallback, entryRules: undefined }, fallback);
+    expect(result.entryRules.long.children).toEqual([]);
+    expect(result.entryRules.short.children).toEqual([]);
   });
 
   it("moves an off-screen detached window onto an available monitor", () => {

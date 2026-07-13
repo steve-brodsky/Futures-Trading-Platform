@@ -193,6 +193,13 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .confirm-orders-toggle span { display: flex; flex-direction: column; gap: 3px; }
 .confirm-orders-toggle strong { font-size: 9px; font-weight: 600; }
 .confirm-orders-toggle small { color: var(--muted); font: 400 8px DM Mono, monospace; }
+.ticket-rule-status { position: relative; display: grid; grid-template-columns: 8px auto; gap: 2px 7px; margin: 4px 0 9px; padding: 8px 9px; border: 1px solid #2b3542; border-radius: 5px; background: #121820; animation: rule-status-in .18s ease-out; }
+.ticket-rule-status > span { width: 7px; height: 7px; margin-top: 2px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 3px rgba(239,70,111,.09); }
+.ticket-rule-status.allowed > span { background: var(--green); box-shadow: 0 0 0 3px rgba(22,199,154,.09); }
+.ticket-rule-status.waiting > span { background: var(--amber); box-shadow: 0 0 0 3px rgba(240,184,75,.09); }
+.ticket-rule-status strong { color: #c9d2dd; font-size: 8px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em; }
+.ticket-rule-status small { grid-column: 2; color: #7f8b9b; font: 400 8px/1.45 DM Mono, monospace; }
+@keyframes rule-status-in { from { opacity: 0; transform: translateY(3px); } }
 .buy-button, .sell-button, .primary-button, .danger-button, .secondary-button { width: 100%; height: 42px; border: 0; border-radius: 5px; color: #07110e; background: var(--green); font-size: 11px; font-weight: 700; cursor: pointer; transition: filter .15s, transform .15s; }
 .sell-button, .danger-button { color: #fff; background: var(--red); }
 .primary-button { color: #061115; background: var(--cyan); }
@@ -314,6 +321,49 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .demo-warning code, .callback-note code { font-family: DM Mono, monospace; color: #d7dee8; }
 .callback-note { display: flex; justify-content: space-between; margin-top: -4px; margin-bottom: 16px; padding: 9px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
 .modal .primary-button { margin-bottom: 17px; width: calc(100% - 34px); }
+.entry-rules-builder { margin-top: 0; margin-bottom: 17px; }
+.entry-rules-intro { margin: 0; padding: 13px 0; border-bottom: 1px solid var(--line); color: #8793a3; font-size: 9px; line-height: 1.55; }
+.entry-rule-side { padding: 15px 0 17px; border-bottom: 1px solid var(--line); }
+.entry-rule-side > header { display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 10px; }
+.entry-rule-side > header > div { display: flex; flex-direction: column; gap: 3px; }
+.entry-rule-side > header strong { color: #e3e8ee; font-size: 11px; font-weight: 650; }
+.entry-rule-side > header small { color: #778394; font: 400 8px DM Mono, monospace; }
+.entry-rule-status { min-width: 62px; padding: 4px 7px; border-radius: 3px; color: var(--red); background: rgba(239,70,111,.09); font: 700 8px DM Mono, monospace; text-align: center; text-transform: uppercase; letter-spacing: .06em; transition: color .16s, background .16s; }
+.entry-rule-status.allowed { color: var(--green); background: rgba(22,199,154,.09); }
+.entry-rule-status.waiting { color: var(--amber); background: rgba(240,184,75,.09); }
+.entry-rule-clear { height: 25px; padding: 0 8px; border: 0; border-radius: 4px; color: #8793a3; background: #1a212b; font-size: 8px; cursor: pointer; }
+.entry-rule-clear:hover { color: #eef2f7; background: #252e3a; }
+.entry-rule-reason { margin: 10px 0 12px; color: #8490a0; font: 400 8px/1.5 DM Mono, monospace; }
+.entry-rule-group { position: relative; border-left: 1px solid #344151; padding-left: 10px; animation: entry-rule-in .18s ease-out; }
+.entry-rule-group.depth-1 { border-left-color: #516174; }
+@keyframes entry-rule-in { from { opacity: 0; transform: translateY(4px); } }
+.entry-rule-group-head { min-height: 28px; display: flex; align-items: center; gap: 6px; color: #738093; font-size: 8px; text-transform: uppercase; letter-spacing: .05em; }
+.entry-rule-group-head select, .entry-rule-condition select, .entry-rule-condition input { height: 28px; border: 1px solid #2c3745; border-radius: 4px; color: #cbd3dd; background: #10161e; padding: 0 8px; font: 500 9px DM Mono, monospace; outline: none; }
+.entry-rule-group-head select:focus, .entry-rule-condition select:focus, .entry-rule-condition input:focus { border-color: var(--cyan); }
+.entry-rule-group-head select { width: 126px; text-transform: none; }
+.entry-rule-group-head .entry-rule-icon { margin-left: auto; }
+.entry-rule-children { display: grid; gap: 6px; }
+.entry-rule-condition { display: grid; grid-template-columns: 20px minmax(145px,1fr) 84px minmax(145px,1fr) 26px; align-items: center; gap: 6px; min-height: 36px; padding: 4px 0; border-bottom: 1px solid rgba(42,52,66,.52); }
+.entry-rule-condition-state { display: grid; place-items: center; color: var(--red); transition: color .16s; }
+.entry-rule-condition.passing .entry-rule-condition-state { color: var(--green); }
+.entry-rule-condition.waiting .entry-rule-condition-state { color: var(--amber); }
+.entry-rule-operand { min-width: 0; display: flex; gap: 5px; }
+.entry-rule-operand select { min-width: 0; flex: 1; }
+.entry-rule-operand input { width: 64px; flex: 0 0 64px; }
+.entry-rule-operator { width: 84px; }
+.entry-rule-icon { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #738093; background: transparent; cursor: pointer; }
+.entry-rule-icon:hover { color: #e9edf3; background: #222b37; }
+.entry-rule-icon.danger:hover { color: var(--red); background: rgba(239,70,111,.1); }
+.entry-rule-empty { margin: 5px 0 7px; padding: 10px; color: #657184; background: rgba(10,14,20,.35); font: 400 8px DM Mono, monospace; }
+.entry-rule-add-row { display: flex; gap: 5px; padding-top: 8px; }
+.entry-rule-add-row button { height: 26px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border: 1px solid #2c3745; border-radius: 4px; color: #8e9aaa; background: #151c25; font-size: 8px; cursor: pointer; }
+.entry-rule-add-row button:hover:not(:disabled) { color: #e8edf3; border-color: #455468; background: #1b2430; }
+.entry-rule-validation { display: flex; align-items: center; gap: 7px; margin: 12px 0 0; padding: 9px; border: 1px solid rgba(239,70,111,.22); border-radius: 4px; color: #e37b94; background: rgba(239,70,111,.06); font-size: 9px; }
+.entry-rule-actions { display: grid; grid-template-columns: 1fr 1.5fr; gap: 8px; margin-top: 15px; }
+.entry-rule-actions .primary-button, .entry-rule-actions .secondary-button { width: 100%; margin: 0; }
+.entry-review-rule { margin: 0 17px 3px; padding: 8px 10px; border-left: 2px solid var(--red); color: #b8c1cd; background: rgba(239,70,111,.06); font: 400 8px/1.5 DM Mono, monospace; }
+.entry-review-rule.allowed { border-left-color: var(--green); background: rgba(22,199,154,.06); }
+.entry-review-rule.waiting { border-left-color: var(--amber); background: rgba(240,184,75,.06); }
 .modal-actions { display: grid; grid-template-columns: 1fr 1.5fr; gap: 8px; margin-top: 17px; margin-bottom: 17px; }
 .review-hero { display: flex; flex-direction: column; gap: 5px; margin-top: 17px; padding-bottom: 15px; border-bottom: 1px solid var(--line); }
 .review-hero > span { align-self: flex-start; padding: 3px 7px; border-radius: 3px; font: 700 8px DM Mono, monospace; }
@@ -340,4 +390,13 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
   .timeframe-group button:nth-child(6), .timeframe-group button:nth-child(8) { display: none; }
   .toolbar .text-tool-button:nth-of-type(2) { display: none; }
   .ohlc { display: none; }
+}
+
+@media (max-width: 760px) {
+  .entry-rule-condition { grid-template-columns: 20px minmax(0,1fr) 26px; padding: 7px 0; }
+  .entry-rule-condition-state { grid-row: 1 / 4; }
+  .entry-rule-condition .entry-rule-operand, .entry-rule-condition .entry-rule-operator { grid-column: 2; width: 100%; }
+  .entry-rule-condition > .entry-rule-icon { grid-column: 3; grid-row: 1 / 4; }
+  .entry-rule-side > header { grid-template-columns: minmax(0,1fr) auto; }
+  .entry-rule-side > header .entry-rule-clear { grid-column: 2; }
 }
