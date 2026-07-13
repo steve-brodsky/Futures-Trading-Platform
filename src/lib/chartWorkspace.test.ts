@@ -7,7 +7,7 @@ const fallback: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
-  watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false,
+  watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true,
 };
 
 describe("chart workspace", () => {
@@ -92,6 +92,16 @@ describe("chart workspace", () => {
     expect(result.windows).toHaveLength(1);
     expect(result.windows[0].tabIds).toEqual(["chart-1"]);
     expect(result.tabs.map((tab) => tab.id)).toEqual(["chart-1"]);
+  });
+
+  it("defaults legacy workspaces to order confirmation", () => {
+    const result = normalizeChartWorkspace({ ...fallback, confirmOrders: undefined }, fallback);
+    expect(result.confirmOrders).toBe(true);
+  });
+
+  it("preserves an explicit disabled confirmation preference", () => {
+    const result = normalizeChartWorkspace({ ...fallback, confirmOrders: false }, fallback);
+    expect(result.confirmOrders).toBe(false);
   });
 
   it("moves an off-screen detached window onto an available monitor", () => {

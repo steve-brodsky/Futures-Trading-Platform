@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ChevronsRight, Lock, LockOpen, MoveVertical, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, X } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type Time,
@@ -10,6 +10,7 @@ import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
 import { HorizontalRayPrimitive, nearestChartTime } from "../lib/horizontalRay";
+import { buildTradeLines, snapTradeLinePrice, tradeLinePriceChanged } from "../lib/tradeLines";
 
 interface Props {
   bars: Bar[];
@@ -24,6 +25,10 @@ interface Props {
   indicators: IndicatorConfig[];
   orders: OrderUpdate[];
   positions: Position[];
+  closingPositionIds: Set<string>;
+  replacingOrderIds: Set<string>;
+  onClosePosition: (position: Position) => void;
+  onReplaceOrder: (order: OrderUpdate, newPrice: number) => void | Promise<void>;
   loadingOlder: boolean;
   activeTool: string;
   drawings: Drawing[];
@@ -44,13 +49,13 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
   const volumeRef = useRef<ISeriesApi<any> | null>(null);
   const indicatorRefs = useRef<Array<{ config: IndicatorConfig; series: ISeriesApi<any> }>>([]);
-  const tradeLineRefs = useRef<IPriceLine[]>([]);
+  const tradeLineRefs = useRef<Map<string, IPriceLine>>(new Map());
   const drawingLineRefs = useRef<IPriceLine[]>([]);
   const rayPrimitiveRef = useRef<HorizontalRayPrimitive | null>(null);
   const sessionShadingRef = useRef<SessionShading | null>(null);
@@ -68,9 +73,14 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   const [chartGeneration, setChartGeneration] = useState(0);
   const [drawingMenu, setDrawingMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [movingDrawingId, setMovingDrawingId] = useState<string | null>(null);
+  const [tradeLineTops, setTradeLineTops] = useState<Record<string, number>>({});
+  const [draggingOrder, setDraggingOrder] = useState<{ id: string; originalPrice: number; price: number } | null>(null);
+  const draggingOrderRef = useRef<typeof draggingOrder>(null);
+  const syncTradeLabelsRef = useRef<() => void>(() => undefined);
   const movingDrawingIdRef = useRef<string | null>(null);
   const latest = hovered ?? bars.at(-1) ?? null;
   const change = latest ? latest.close - latest.open : 0;
+  const tradeLines = buildTradeLines(symbol, positions, orders);
 
   barsRef.current = bars;
   magnetEnabledRef.current = magnetEnabled;
@@ -79,6 +89,21 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   drawingCallbacksRef.current = { onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing };
   loadOlderRef.current = onLoadOlder;
   visibleRangeChangeRef.current = onVisibleRangeChange;
+  syncTradeLabelsRef.current = () => {
+    const price = priceRef.current;
+    const height = host.current?.clientHeight ?? 0;
+    if (!price || !height) return;
+    const next: Record<string, number> = {};
+    tradeLineRefs.current.forEach((line, id) => {
+      const coordinate = price.priceToCoordinate(line.options().price);
+      if (coordinate != null && coordinate >= -16 && coordinate <= height + 16) next[id] = coordinate;
+    });
+    setTradeLineTops((current) => {
+      const keys = Object.keys(next);
+      if (keys.length === Object.keys(current).length && keys.every((key) => current[key] === next[key])) return current;
+      return next;
+    });
+  };
 
   useEffect(() => {
     setDrawingMenu(null);
@@ -142,6 +167,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
 
     let settingCrosshair = false;
     chart.subscribeCrosshairMove((param) => {
+      syncTradeLabelsRef.current();
       if (!param.time) return setHovered(null);
       const bar = barsRef.current.find((item) => item.time === Number(param.time)) ?? null;
       setHovered(bar);
@@ -204,6 +230,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       setDrawingMenu(null);
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
+      syncTradeLabelsRef.current();
       if (!range) return;
       setShowScrollToLatest(Number(range.to) < barsRef.current.length - 1);
       visibleRangeChangeRef.current?.({ from: Number(range.from), to: Number(range.to) });
@@ -213,9 +240,17 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
 
     previousBars.current = [];
     firstData.current = true;
+    const syncLabels = () => syncTradeLabelsRef.current();
+    const resizeObserver = new ResizeObserver(syncLabels);
+    resizeObserver.observe(host.current);
+    host.current.addEventListener("wheel", syncLabels, { passive: true });
+    host.current.addEventListener("pointermove", syncLabels, { passive: true });
     setChartGeneration((value) => value + 1);
     return () => {
-      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = []; drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null;
+      resizeObserver.disconnect();
+      host.current?.removeEventListener("wheel", syncLabels);
+      host.current?.removeEventListener("pointermove", syncLabels);
+      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone, indicators]);
 
@@ -224,15 +259,69 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     if (!price) return;
 
     tradeLineRefs.current.forEach((line) => price.removePriceLine(line));
-    tradeLineRefs.current = [
-      ...positions
-        .filter((position) => position.symbol === symbol)
-        .map((position) => price.createPriceLine({ price: position.averagePrice, color: "#37d5e8", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${position.side} ${position.quantity}` })),
-      ...orders
-        .filter((order) => order.symbol === symbol && order.status === "Working" && (order.price != null || order.stopPrice != null))
-        .map((order) => price.createPriceLine({ price: order.price ?? order.stopPrice!, color: "#f0b84b", lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${order.side} ${order.quantity}` })),
-    ];
+    const next = new Map<string, IPriceLine>();
+    buildTradeLines(symbol, positions, orders).forEach((line) => {
+      next.set(line.id, price.createPriceLine({ price: line.price, color: line.color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: "" }));
+    });
+    tradeLineRefs.current = next;
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
   }, [orders, positions, symbol, chartGeneration]);
+
+  useEffect(() => {
+    if (!draggingOrder?.id) return;
+    const restoreChartScroll = () => chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
+    const restoreOriginalPrice = () => {
+      const current = draggingOrderRef.current;
+      if (!current) return;
+      tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: current.originalPrice });
+      requestAnimationFrame(() => syncTradeLabelsRef.current());
+    };
+    const move = (event: PointerEvent) => {
+      const current = draggingOrderRef.current;
+      const price = priceRef.current;
+      const bounds = host.current?.getBoundingClientRect();
+      if (!current || !price || !bounds) return;
+      const rawPrice = price.coordinateToPrice(event.clientY - bounds.top);
+      if (rawPrice == null) return;
+      const snapped = snapTradeLinePrice(rawPrice, minMove);
+      if (snapped == null) return;
+      const next = { ...current, price: snapped };
+      draggingOrderRef.current = next;
+      setDraggingOrder(next);
+      tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: snapped });
+      syncTradeLabelsRef.current();
+    };
+    const finish = () => {
+      const current = draggingOrderRef.current;
+      if (current && !tradeLinePriceChanged(current.originalPrice, current.price, minMove)) {
+        tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: current.originalPrice });
+      }
+      draggingOrderRef.current = null;
+      setDraggingOrder(null);
+      restoreChartScroll();
+      if (!current || !tradeLinePriceChanged(current.originalPrice, current.price, minMove)) {
+        requestAnimationFrame(() => syncTradeLabelsRef.current());
+        return;
+      }
+      const order = orders.find((item) => item.id === current.id);
+      if (order) void onReplaceOrder(order, current.price);
+    };
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      restoreOriginalPrice();
+      draggingOrderRef.current = null;
+      setDraggingOrder(null);
+      restoreChartScroll();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("keydown", cancel);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("keydown", cancel);
+    };
+  }, [draggingOrder?.id, minMove, onReplaceOrder, orders]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -291,7 +380,19 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
     const visibleRange = chart.timeScale().getVisibleLogicalRange();
     setShowScrollToLatest(Boolean(visibleRange && Number(visibleRange.to) < bars.length - 1));
     previousBars.current = bars;
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
   }, [bars, kind, chartGeneration]);
+
+  const startOrderDrag = (event: ReactPointerEvent<HTMLDivElement>, order: OrderUpdate, price: number) => {
+    if (replacingOrderIds.has(order.id)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const drag = { id: order.id, originalPrice: price, price };
+    draggingOrderRef.current = drag;
+    setDraggingOrder(drag);
+    chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: false, horzTouchDrag: false, vertTouchDrag: false } });
+  };
 
   const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
 
@@ -303,6 +404,24 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
       </div>
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />
+      {tradeLines.map((line) => {
+        const top = tradeLineTops[line.id];
+        if (top == null) return null;
+        const dragging = draggingOrder?.id === line.order?.id;
+        const pending = line.order && replacingOrderIds.has(line.order.id);
+        const displayPrice = dragging ? draggingOrder?.price ?? line.price : line.price;
+        const label = line.kind === "position" ? `${line.side.toUpperCase()} ${line.quantity}` : line.kind === "take-profit" ? `TP ${line.quantity}` : line.kind === "stop-loss" ? `SL ${line.quantity}` : `${line.side.toUpperCase()} ${line.quantity}`;
+        return <div
+          key={line.id}
+          className={`trade-line-label ${line.kind} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}
+          style={{ top }}
+          onPointerDown={line.draggable && line.order ? (event) => startOrderDrag(event, line.order!, line.price) : undefined}
+          title={line.draggable ? "Drag to replace this protective order" : undefined}
+        >
+          <span>{pending ? "UPDATING" : label}</span><strong>{displayPrice.toFixed(pricePrecision(minMove))}</strong>
+          {line.position && <button type="button" aria-label={`Close ${line.position.symbol} position`} title="Close position" disabled={closingPositionIds.has(line.position.id)} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onClosePosition(line.position!); }}><X size={11} /></button>}
+        </div>;
+      })}
       <div className="chart-watermark">{symbol}</div>
       {movingDrawingId && <div className="drawing-move-hint">Click a new chart position to move the drawing · Esc to cancel</div>}
       {selectedDrawing && drawingMenu && <>

@@ -240,7 +240,10 @@ async fn start_bar_stream(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn stop_bar_stream(subscription_id: String, state: State<'_, NativeState>) -> Result<(), AppError> {
+async fn stop_bar_stream(
+    subscription_id: String,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
     if let Some(task) = state.bar_streams.lock().await.remove(&subscription_id) {
         task.abort();
     }
@@ -257,7 +260,9 @@ async fn start_quote_stream(
     symbols.sort();
     symbols.dedup();
     if symbols.len() > 100 {
-        return Err(AppError::Validation("A maximum of 100 streamed quote symbols is supported".into()));
+        return Err(AppError::Validation(
+            "A maximum of 100 streamed quote symbols is supported".into(),
+        ));
     }
     let environment = state.api.environment().await;
     let task = tauri::async_runtime::spawn(run_quote_stream(
@@ -275,9 +280,15 @@ async fn start_quote_stream(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn stop_quote_stream(subscription_id: String, state: State<'_, NativeState>) -> Result<(), AppError> {
+async fn stop_quote_stream(
+    subscription_id: String,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
     let mut current = state.quote_stream.lock().await;
-    if current.as_ref().is_some_and(|(id, _)| id == &subscription_id) {
+    if current
+        .as_ref()
+        .is_some_and(|(id, _)| id == &subscription_id)
+    {
         if let Some((_, task)) = current.take() {
             task.abort();
         }
@@ -286,22 +297,40 @@ async fn stop_quote_stream(subscription_id: String, state: State<'_, NativeState
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn start_brokerage_stream(app: tauri::AppHandle, account_id: String, state: State<'_, NativeState>) -> Result<(), AppError> {
+async fn start_brokerage_stream(
+    app: tauri::AppHandle,
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
     let mut tasks = state.brokerage_streams.lock().await;
-    for task in tasks.drain(..) { task.abort(); }
+    for task in tasks.drain(..) {
+        task.abort();
+    }
     for channel in ["positions", "orders"] {
-        tasks.push(tauri::async_runtime::spawn(run_brokerage_stream(app.clone(), state.api.clone(), account_id.clone(), channel.to_string())));
+        tasks.push(tauri::async_runtime::spawn(run_brokerage_stream(
+            app.clone(),
+            state.api.clone(),
+            account_id.clone(),
+            channel.to_string(),
+        )));
     }
     Ok(())
 }
 
 #[tauri::command]
 async fn stop_brokerage_stream(state: State<'_, NativeState>) -> Result<(), AppError> {
-    for task in state.brokerage_streams.lock().await.drain(..) { task.abort(); }
+    for task in state.brokerage_streams.lock().await.drain(..) {
+        task.abort();
+    }
     Ok(())
 }
 
-async fn run_brokerage_stream(app: tauri::AppHandle, api: TradeStation, account_id: String, channel: String) {
+async fn run_brokerage_stream(
+    app: tauri::AppHandle,
+    api: TradeStation,
+    account_id: String,
+    channel: String,
+) {
     let path = if channel == "positions" {
         format!("/brokerage/stream/accounts/{account_id}/{channel}?changes=true")
     } else {
@@ -312,12 +341,25 @@ async fn run_brokerage_stream(app: tauri::AppHandle, api: TradeStation, account_
         match api.open_stream(&path).await {
             Ok(response) => {
                 attempt = 0;
-                let mut bytes = response.bytes_stream(); let mut buffer = Vec::new();
+                let mut bytes = response.bytes_stream();
+                let mut buffer = Vec::new();
                 while let Some(Ok(chunk)) = bytes.next().await {
-                    let values = match decode_stream_values(&mut buffer, &chunk) { Ok(values) => values, Err(_) => break };
+                    let values = match decode_stream_values(&mut buffer, &chunk) {
+                        Ok(values) => values,
+                        Err(_) => break,
+                    };
                     for data in values {
-                        if data.get("StreamStatus").is_some() { continue; }
-                        let _ = app.emit("brokerage-update", BrokerageUpdateEvent { account_id: account_id.clone(), channel: channel.clone(), data });
+                        if data.get("StreamStatus").is_some() {
+                            continue;
+                        }
+                        let _ = app.emit(
+                            "brokerage-update",
+                            BrokerageUpdateEvent {
+                                account_id: account_id.clone(),
+                                channel: channel.clone(),
+                                data,
+                            },
+                        );
                     }
                 }
             }
@@ -325,38 +367,63 @@ async fn run_brokerage_stream(app: tauri::AppHandle, api: TradeStation, account_
                 let message = error.to_string();
                 // Some TradeStation account/environment combinations do not permit
                 // brokerage streams. The UI's snapshot polling remains authoritative.
-                if message.contains("403") || message.to_ascii_lowercase().contains("forbidden") { break; }
+                if message.contains("403") || message.to_ascii_lowercase().contains("forbidden") {
+                    break;
+                }
                 let _ = app.emit("brokerage-stream-error", message);
             }
         }
         attempt = attempt.saturating_add(1);
-        tokio::time::sleep(std::time::Duration::from_secs((1u64 << attempt.min(5)).min(30))).await;
+        tokio::time::sleep(std::time::Duration::from_secs(
+            (1u64 << attempt.min(5)).min(30),
+        ))
+        .await;
     }
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn get_positions(account_id: String, state: State<'_, NativeState>) -> Result<Vec<Position>, AppError> {
+async fn get_positions(
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<Position>, AppError> {
     state.api.positions(&account_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn get_orders(account_id: String, state: State<'_, NativeState>) -> Result<Vec<OrderUpdate>, AppError> {
+async fn get_orders(
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<OrderUpdate>, AppError> {
     state.api.orders(&account_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn get_balances(account_id: String, state: State<'_, NativeState>) -> Result<Vec<AccountBalance>, AppError> {
+async fn get_balances(
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<AccountBalance>, AppError> {
     state.api.balances(&account_id, false).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn get_bod_balances(account_id: String, state: State<'_, NativeState>) -> Result<Vec<AccountBalance>, AppError> {
+async fn get_bod_balances(
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<AccountBalance>, AppError> {
     state.api.balances(&account_id, true).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn get_historical_orders(account_id: String, since: String, next_token: Option<String>, state: State<'_, NativeState>) -> Result<HistoricalOrderPage, AppError> {
-    state.api.historical_orders(&account_id, &since, next_token.as_deref()).await
+async fn get_historical_orders(
+    account_id: String,
+    since: String,
+    next_token: Option<String>,
+    state: State<'_, NativeState>,
+) -> Result<HistoricalOrderPage, AppError> {
+    state
+        .api
+        .historical_orders(&account_id, &since, next_token.as_deref())
+        .await
 }
 
 #[tauri::command]
@@ -373,6 +440,28 @@ async fn place_order(
     state: State<'_, NativeState>,
 ) -> Result<OrderUpdate, AppError> {
     state.api.place_order(&order).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn replace_order(
+    account_id: String,
+    order_id: String,
+    new_price: f64,
+    state: State<'_, NativeState>,
+) -> Result<OrderUpdate, AppError> {
+    state
+        .api
+        .replace_order(&account_id, &order_id, new_price)
+        .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn close_position(
+    account_id: String,
+    position_id: String,
+    state: State<'_, NativeState>,
+) -> Result<ClosePositionResult, AppError> {
+    state.api.close_position(&account_id, &position_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -763,6 +852,8 @@ pub fn run() {
             get_historical_orders,
             confirm_order,
             place_order,
+            replace_order,
+            close_position,
             cancel_order,
             load_workspace,
             save_workspace

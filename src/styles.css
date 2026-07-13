@@ -103,6 +103,18 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 
 .chart-stage { position: relative; min-width: 0; min-height: 0; grid-column: 2; grid-row: 1; overflow: hidden; background: #0b0f17; }
 .chart-host { position: absolute; inset: 0; }
+.trade-line-label { position: absolute; z-index: 7; right: 74px; height: 21px; display: flex; align-items: center; transform: translateY(-50%); border: 1px solid currentColor; border-radius: 3px 0 0 3px; color: #f0b84b; background: rgba(28,24,16,.96); box-shadow: 0 2px 8px rgba(0,0,0,.34); font: 600 8px DM Mono, monospace; user-select: none; touch-action: none; }
+.trade-line-label > span { padding: 0 6px; letter-spacing: .05em; }
+.trade-line-label > strong { align-self: stretch; display: flex; align-items: center; padding: 0 6px; border-left: 1px solid currentColor; color: #eef3f8; font-weight: 600; background: rgba(5,8,12,.28); }
+.trade-line-label.position { color: var(--cyan); background: rgba(10,35,40,.96); }
+.trade-line-label.take-profit { color: var(--green); background: rgba(8,34,28,.96); }
+.trade-line-label.stop-loss { color: var(--red); background: rgba(42,12,20,.96); }
+.trade-line-label.draggable { cursor: ns-resize; }
+.trade-line-label.draggable:hover { filter: brightness(1.16); }
+.trade-line-label.pending { opacity: .66; cursor: wait; }
+.trade-line-label button { align-self: stretch; width: 21px; display: grid; place-items: center; padding: 0; border: 0; border-left: 1px solid currentColor; color: inherit; background: rgba(5,8,12,.34); cursor: pointer; }
+.trade-line-label button:hover:not(:disabled) { color: #fff; background: rgba(239,70,111,.45); }
+.trade-line-label button:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
 .chart-heading { position: absolute; z-index: 5; top: 10px; left: 13px; display: flex; align-items: center; gap: 7px; font-size: 11px; pointer-events: none; }
 .chart-heading strong { color: #d8dee8; font-weight: 500; }
 .chart-heading > span { color: var(--muted); }
@@ -175,6 +187,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .ticket-info div { display: flex; justify-content: space-between; }
 .ticket-info dt { color: var(--muted); }
 .ticket-info dd { margin: 0; font: 500 9px DM Mono, monospace; }
+.confirm-orders-toggle { min-height: 42px; display: flex; align-items: center; gap: 9px; margin: 5px 0 9px; color: #c8d0db; cursor: pointer; }
+.confirm-orders-toggle input { appearance: none; width: 15px; height: 15px; flex: 0 0 auto; border: 1px solid #475363; border-radius: 3px; background: #11161d; cursor: pointer; }
+.confirm-orders-toggle input:checked { border-color: var(--cyan); background: var(--cyan); box-shadow: inset 0 0 0 3px #11161d; }
+.confirm-orders-toggle span { display: flex; flex-direction: column; gap: 3px; }
+.confirm-orders-toggle strong { font-size: 9px; font-weight: 600; }
+.confirm-orders-toggle small { color: var(--muted); font: 400 8px DM Mono, monospace; }
 .buy-button, .sell-button, .primary-button, .danger-button, .secondary-button { width: 100%; height: 42px; border: 0; border-radius: 5px; color: #07110e; background: var(--green); font-size: 11px; font-weight: 700; cursor: pointer; transition: filter .15s, transform .15s; }
 .sell-button, .danger-button { color: #fff; background: var(--red); }
 .primary-button { color: #061115; background: var(--cyan); }
@@ -238,6 +256,8 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .balance-grid span { color: #77777d; font-size: 9px; }
 .balance-grid strong { color: #c5c5c8; font: 500 10px DM Mono,monospace; }
 .load-more { display: block; margin: 12px auto; padding: 7px 14px; border: 1px solid #38383b; border-radius: 5px; color: #ccc; background: #202022; cursor: pointer; }
+.close-position-button { min-width: 108px; height: 26px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; border: 1px solid rgba(239,70,111,.38); border-radius: 4px; color: #ef7892; background: rgba(239,70,111,.08); font-size: 8px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.close-position-button:hover:not(:disabled) { color: #fff; border-color: var(--red); background: rgba(239,70,111,.24); }
 @keyframes panel-in { from { opacity: .5; transform: translateY(12px); } }
 table { width: 100%; border-collapse: collapse; font-size: 9px; }
 th { position: sticky; top: 0; height: 26px; padding: 0 12px; text-align: left; color: var(--muted-2); background: #0d1117; font-weight: 500; border-bottom: 1px solid var(--line-soft); }

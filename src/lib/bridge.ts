@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, HistoricalOrderPage, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, ClosePositionResult, HistoricalOrderPage, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
 import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, futures, makeDemoBars, quoteFor } from "./demo";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -98,6 +98,14 @@ export const api = {
   async placeOrder(order: OrderDraft): Promise<OrderUpdate> {
     if (isTauri) return native("place_order", { order });
     throw new Error("Order placement is disabled in browser demo mode.");
+  },
+  async replaceOrder(accountId: string, orderId: string, newPrice: number): Promise<OrderUpdate> {
+    if (isTauri) return native("replace_order", { accountId, orderId, newPrice });
+    throw new Error("Order replacement is disabled in browser demo mode.");
+  },
+  async closePosition(accountId: string, positionId: string): Promise<ClosePositionResult> {
+    if (isTauri) return native("close_position", { accountId, positionId });
+    throw new Error("Position closing is disabled in browser demo mode.");
   },
   async cancelOrder(orderId: string): Promise<void> {
     if (isTauri) await native("cancel_order", { orderId });

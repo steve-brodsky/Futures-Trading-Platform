@@ -426,22 +426,52 @@ impl TradeStation {
             .collect())
     }
 
-    pub async fn balances(&self, account: &str, bod: bool) -> Result<Vec<AccountBalance>, AppError> {
+    pub async fn balances(
+        &self,
+        account: &str,
+        bod: bool,
+    ) -> Result<Vec<AccountBalance>, AppError> {
         let resource = if bod { "bodbalances" } else { "balances" };
-        let body = self.send(Method::GET, &format!("/brokerage/accounts/{account}/{resource}"), None).await?;
+        let body = self
+            .send(
+                Method::GET,
+                &format!("/brokerage/accounts/{account}/{resource}"),
+                None,
+            )
+            .await?;
         let key = if bod { "BODBalances" } else { "Balances" };
-        Ok(body.get(key).or_else(|| body.get("Balances")).and_then(Value::as_array).into_iter().flatten().map(balance_from_value).collect())
+        Ok(body
+            .get(key)
+            .or_else(|| body.get("Balances"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(balance_from_value)
+            .collect())
     }
 
-    pub async fn historical_orders(&self, account: &str, since: &str, next_token: Option<&str>) -> Result<HistoricalOrderPage, AppError> {
-        let mut path = format!("/brokerage/accounts/{account}/historicalorders?since={since}&pageSize=100");
+    pub async fn historical_orders(
+        &self,
+        account: &str,
+        since: &str,
+        next_token: Option<&str>,
+    ) -> Result<HistoricalOrderPage, AppError> {
+        let mut path =
+            format!("/brokerage/accounts/{account}/historicalorders?since={since}&pageSize=100");
         if let Some(token) = next_token.filter(|value| !value.is_empty()) {
             let encoded: String = url::form_urlencoded::byte_serialize(token.as_bytes()).collect();
-            path.push_str("&nextToken="); path.push_str(&encoded);
+            path.push_str("&nextToken=");
+            path.push_str(&encoded);
         }
         let body = self.send(Method::GET, &path, None).await?;
         Ok(HistoricalOrderPage {
-            orders: body.get("Orders").and_then(Value::as_array).into_iter().flatten().map(order_from_value).collect(),
+            orders: body
+                .get("Orders")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(order_from_value)
+                .collect(),
             next_token: optional_string(&body, "NextToken"),
         })
     }
@@ -505,9 +535,20 @@ impl TradeStation {
             stop_price: draft.stop_price,
             status: "Pending".into(),
             timestamp: Utc::now().to_rfc3339(),
-            account_id: Some(draft.account_id.clone()), filled_quantity: Some(0.0), remaining_quantity: Some(draft.quantity as f64),
-            average_fill_price: None, duration: Some(draft.duration.clone()), closed_at: None, commission: None,
-            stop_loss: draft.stop_loss, take_profit: draft.take_profit,
+            account_id: Some(draft.account_id.clone()),
+            filled_quantity: Some(0.0),
+            remaining_quantity: Some(draft.quantity as f64),
+            average_fill_price: None,
+            duration: Some(draft.duration.clone()),
+            closed_at: None,
+            commission: None,
+            stop_loss: draft.stop_loss,
+            take_profit: draft.take_profit,
+            raw_status: None,
+            status_description: None,
+            open_or_close: None,
+            group_name: None,
+            related_orders: vec![],
         })
     }
 
@@ -522,6 +563,220 @@ impl TradeStation {
         )
         .await?;
         Ok(())
+    }
+
+    pub async fn replace_order(
+        &self,
+        account_id: &str,
+        order_id: &str,
+        new_price: f64,
+    ) -> Result<OrderUpdate, AppError> {
+        validate_order_id(order_id)?;
+        if !self
+            .accounts()
+            .await?
+            .iter()
+            .any(|account| account.id == account_id)
+        {
+            return Err(AppError::Validation(
+                "Selected futures account is unavailable".into(),
+            ));
+        }
+        let mut order = self
+            .orders(account_id)
+            .await?
+            .into_iter()
+            .find(|order| order.id == order_id)
+            .ok_or_else(|| AppError::Validation("The order is no longer available".into()))?;
+        if order.status != "Working" {
+            return Err(AppError::Validation(
+                "Only working orders can be repositioned".into(),
+            ));
+        }
+        if order.open_or_close.as_deref() != Some("Close") || !is_bracket_order(&order) {
+            return Err(AppError::Validation(
+                "Only bracket take-profit and stop-loss orders can be repositioned".into(),
+            ));
+        }
+        if !matches!(order.order_type.as_str(), "Limit" | "StopMarket") {
+            return Err(AppError::Validation(
+                "This order type cannot be repositioned on the chart".into(),
+            ));
+        }
+        let meta = self.symbol_details(&order.symbol).await?;
+        if new_price <= 0.0 || !aligned(new_price, meta.min_move) {
+            return Err(AppError::Validation(format!(
+                "Price {new_price} is not aligned to the {} tick",
+                meta.min_move
+            )));
+        }
+        let payload = replacement_payload(&order, new_price)?;
+        if order.order_type == "Limit" {
+            order.price = Some(new_price);
+        } else {
+            order.stop_price = Some(new_price);
+        }
+        self.send(
+            Method::PUT,
+            &format!("/orderexecution/orders/{order_id}"),
+            Some(payload),
+        )
+        .await?;
+        order.raw_status = Some("ReplacePending".into());
+        order.status_description = Some("Cancel/replace request sent".into());
+        Ok(order)
+    }
+
+    pub async fn close_position(
+        &self,
+        account_id: &str,
+        position_id: &str,
+    ) -> Result<ClosePositionResult, AppError> {
+        if !self
+            .accounts()
+            .await?
+            .iter()
+            .any(|account| account.id == account_id)
+        {
+            return Err(AppError::Validation(
+                "Selected futures account is unavailable".into(),
+            ));
+        }
+        let position = self
+            .positions(account_id)
+            .await?
+            .into_iter()
+            .find(|position| position.id == position_id)
+            .ok_or_else(|| AppError::Validation("The position is no longer open".into()))?;
+        let orders = self.orders(account_id).await?;
+        let relevant = closing_orders_for_position(&orders, account_id, &position.symbol);
+        if relevant.iter().any(|order| order.status == "Indeterminate") {
+            return Ok(aborted_close(
+                position_id,
+                &position.symbol,
+                vec![],
+                "A closing order has an indeterminate status; the position was not flattened",
+            ));
+        }
+        let active_ids: Vec<String> = relevant
+            .iter()
+            .filter(|order| order.status == "Working")
+            .map(|order| order.id.clone())
+            .collect();
+        let mut cancellation_requests: Vec<String> = relevant
+            .iter()
+            .filter(|order| order.raw_status.as_deref() == Some("UCN"))
+            .map(|order| order.id.clone())
+            .collect();
+        for order in relevant
+            .iter()
+            .filter(|order| order.status == "Working" && order.raw_status.as_deref() != Some("UCN"))
+        {
+            if let Err(error) = self.cancel_order(&order.id).await {
+                return Ok(aborted_close(
+                    position_id,
+                    &position.symbol,
+                    cancellation_requests,
+                    format!(
+                        "Cancellation failed for order {}: {error}. The position was not flattened",
+                        order.id
+                    ),
+                ));
+            }
+            cancellation_requests.push(order.id.clone());
+        }
+        if !active_ids.is_empty() {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let current = match self.orders(account_id).await {
+                    Ok(current) => current,
+                    Err(error) => {
+                        return Ok(aborted_close(
+                            position_id,
+                            &position.symbol,
+                            cancellation_requests,
+                            format!(
+                                "Could not verify exit cancellations: {error}. The position was not flattened"
+                            ),
+                        ))
+                    }
+                };
+                let complete = match cancellation_poll_complete(
+                    &active_ids,
+                    &current,
+                    tokio::time::Instant::now() >= deadline,
+                ) {
+                    Ok(complete) => complete,
+                    Err(error) => {
+                        return Ok(aborted_close(
+                            position_id,
+                            &position.symbol,
+                            cancellation_requests,
+                            error.to_string(),
+                        ))
+                    }
+                };
+                if complete {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        let cancelled_order_ids = active_ids;
+        let current_positions = match self.positions(account_id).await {
+            Ok(positions) => positions,
+            Err(error) => {
+                return Ok(aborted_close(
+                    position_id,
+                    &position.symbol,
+                    cancelled_order_ids,
+                    format!(
+                        "Could not re-fetch the position after cancelling exits: {error}. No flatten order was submitted"
+                    ),
+                ))
+            }
+        };
+        let Some(current_position) = current_positions
+            .into_iter()
+            .find(|position| position.id == position_id)
+        else {
+            return Ok(ClosePositionResult {
+                position_id: position_id.into(),
+                symbol: position.symbol,
+                cancelled_order_ids,
+                flatten_order: None,
+                error: None,
+            });
+        };
+        let draft = match flatten_draft(account_id, &current_position) {
+            Ok(draft) => draft,
+            Err(error) => {
+                return Ok(aborted_close(
+                    position_id,
+                    &current_position.symbol,
+                    cancelled_order_ids,
+                    error.to_string(),
+                ))
+            }
+        };
+        let flatten_order = match self.place_order(&draft).await {
+            Ok(order) => order,
+            Err(error) => {
+                return Ok(aborted_close(
+                    position_id,
+                    &current_position.symbol,
+                    cancelled_order_ids,
+                    format!("Exit orders were cancelled, but the flatten order failed: {error}"),
+                ))
+            }
+        };
+        Ok(ClosePositionResult {
+            position_id: position_id.into(),
+            symbol: current_position.symbol,
+            cancelled_order_ids,
+            flatten_order: Some(flatten_order),
+            error: None,
+        })
     }
 
     async fn validate_order(&self, draft: &OrderDraft) -> Result<(), AppError> {
@@ -605,6 +860,23 @@ fn order_from_value(item: &Value) -> OrderUpdate {
         .and_then(Value::as_array)
         .and_then(|v| v.first())
         .unwrap_or(item);
+    let raw_status = string(item, "Status");
+    let related_orders = item
+        .get("ConditionalOrders")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|related| {
+            let order_id = string(related, "OrderID");
+            if order_id.is_empty() {
+                return None;
+            }
+            Some(RelatedOrder {
+                order_id,
+                relationship: string(related, "Relationship"),
+            })
+        })
+        .collect();
     OrderUpdate {
         id: string(item, "OrderID"),
         symbol: string(leg, "Symbol"),
@@ -613,7 +885,7 @@ fn order_from_value(item: &Value) -> OrderUpdate {
         quantity: number(leg, "QuantityOrdered") as u32,
         price: optional_number(item, "LimitPrice"),
         stop_price: optional_number(item, "StopPrice"),
-        status: string(item, "Status"),
+        status: normalize_order_status(&raw_status).into(),
         timestamp: string(item, "OpenedDateTime"),
         account_id: optional_string(item, "AccountID"),
         filled_quantity: optional_number(leg, "ExecQuantity"),
@@ -624,19 +896,174 @@ fn order_from_value(item: &Value) -> OrderUpdate {
         commission: optional_number(item, "CommissionFee"),
         stop_loss: None,
         take_profit: None,
+        raw_status: if raw_status.is_empty() {
+            None
+        } else {
+            Some(raw_status)
+        },
+        status_description: optional_string(item, "StatusDescription"),
+        open_or_close: optional_string(leg, "OpenOrClose"),
+        group_name: optional_string(item, "GroupName"),
+        related_orders,
     }
+}
+
+fn normalize_order_status(status: &str) -> &'static str {
+    match status.to_ascii_uppercase().as_str() {
+        "OPN" | "ACK" | "UCN" | "FPR" | "DON" | "WORKING" => "Working",
+        "FLL" | "FLP" | "FILLED" => "Filled",
+        "OUT" | "CAN" | "EXP" | "CANCELLED" | "CANCELED" => "Cancelled",
+        "REJ" | "REJECTED" => "Rejected",
+        "PENDING" => "Pending",
+        _ => "Indeterminate",
+    }
+}
+
+fn is_bracket_order(order: &OrderUpdate) -> bool {
+    order
+        .group_name
+        .as_deref()
+        .is_some_and(|name| name.to_ascii_uppercase().starts_with("OCO"))
+        || order
+            .related_orders
+            .iter()
+            .any(|related| related.relationship.eq_ignore_ascii_case("OCO"))
+}
+
+fn closing_orders_for_position<'a>(
+    orders: &'a [OrderUpdate],
+    account_id: &str,
+    symbol: &str,
+) -> Vec<&'a OrderUpdate> {
+    orders
+        .iter()
+        .filter(|order| {
+            order.account_id.as_deref() == Some(account_id)
+                && order.symbol == symbol
+                && order.open_or_close.as_deref() == Some("Close")
+                && matches!(order.status.as_str(), "Working" | "Indeterminate")
+        })
+        .collect()
+}
+
+fn flatten_draft(account_id: &str, position: &Position) -> Result<OrderDraft, AppError> {
+    let rounded = position.quantity.round();
+    if position.quantity <= 0.0
+        || (position.quantity - rounded).abs() > 1e-8
+        || rounded > u32::MAX as f64
+    {
+        return Err(AppError::Validation(
+            "Position quantity cannot be flattened as a futures order".into(),
+        ));
+    }
+    let side = match position.side.as_str() {
+        "Long" => "Sell",
+        "Short" => "Buy",
+        _ => return Err(AppError::Validation("Position side is invalid".into())),
+    };
+    Ok(OrderDraft {
+        account_id: account_id.into(),
+        symbol: position.symbol.clone(),
+        side: side.into(),
+        order_type: "Market".into(),
+        quantity: rounded as u32,
+        limit_price: None,
+        stop_price: None,
+        duration: "DAY".into(),
+        take_profit: None,
+        stop_loss: None,
+    })
+}
+
+fn replacement_payload(order: &OrderUpdate, new_price: f64) -> Result<Value, AppError> {
+    let quantity = order.remaining_quantity.unwrap_or(order.quantity as f64);
+    if quantity <= 0.0 {
+        return Err(AppError::Validation(
+            "The order has no remaining quantity".into(),
+        ));
+    }
+    let mut payload = json!({ "Quantity": format_price(quantity) });
+    match order.order_type.as_str() {
+        "Limit" => payload["LimitPrice"] = json!(format_price(new_price)),
+        "StopMarket" => payload["StopPrice"] = json!(format_price(new_price)),
+        _ => {
+            return Err(AppError::Validation(
+                "This order type cannot be repositioned on the chart".into(),
+            ))
+        }
+    }
+    Ok(payload)
+}
+
+fn cancellation_poll_complete(
+    active_ids: &[String],
+    current: &[OrderUpdate],
+    timed_out: bool,
+) -> Result<bool, AppError> {
+    if active_ids.iter().any(|id| {
+        current
+            .iter()
+            .any(|order| order.id == *id && order.status == "Indeterminate")
+    }) {
+        return Err(AppError::Api(
+            "A closing order became indeterminate; the position was not flattened".into(),
+        ));
+    }
+    let unresolved = active_ids.iter().any(|id| {
+        current
+            .iter()
+            .any(|order| order.id == *id && order.status == "Working")
+    });
+    if unresolved && timed_out {
+        return Err(AppError::Api(
+            "Closing orders did not cancel within 10 seconds; the position was not flattened"
+                .into(),
+        ));
+    }
+    Ok(!unresolved)
+}
+
+fn aborted_close(
+    position_id: &str,
+    symbol: &str,
+    cancelled_order_ids: Vec<String>,
+    error: impl Into<String>,
+) -> ClosePositionResult {
+    ClosePositionResult {
+        position_id: position_id.into(),
+        symbol: symbol.into(),
+        cancelled_order_ids,
+        flatten_order: None,
+        error: Some(error.into()),
+    }
+}
+
+fn validate_order_id(order_id: &str) -> Result<(), AppError> {
+    if order_id.is_empty() || !order_id.chars().all(|character| character.is_ascii_digit()) {
+        return Err(AppError::Validation("Invalid order ID".into()));
+    }
+    Ok(())
 }
 
 fn balance_from_value(item: &Value) -> AccountBalance {
     let detail = item.get("BalanceDetail").unwrap_or(item);
     AccountBalance {
-        account_id: string(item, "AccountID"), account_type: string(item, "AccountType"), currency: string(item, "Currency"),
-        cash_balance: optional_number(item, "CashBalance"), buying_power: optional_number(item, "BuyingPower"), equity: optional_number(item, "Equity"),
-        market_value: optional_number(item, "MarketValue"), todays_profit_loss: optional_number(item, "TodaysProfitLoss"),
-        unrealized_profit_loss: optional_number(item, "UnrealizedProfitLoss"), uncleared_deposit: optional_number(item, "UnclearedDeposit"),
-        commission: optional_number(item, "Commission").or_else(|| optional_number(detail, "Commission")),
-        initial_margin: optional_number(detail, "InitialMargin"), maintenance_margin: optional_number(detail, "MaintenanceMargin"),
-        open_order_margin: optional_number(detail, "OpenOrderMargin"), balance_date: optional_string(item, "BalanceDate"),
+        account_id: string(item, "AccountID"),
+        account_type: string(item, "AccountType"),
+        currency: string(item, "Currency"),
+        cash_balance: optional_number(item, "CashBalance"),
+        buying_power: optional_number(item, "BuyingPower"),
+        equity: optional_number(item, "Equity"),
+        market_value: optional_number(item, "MarketValue"),
+        todays_profit_loss: optional_number(item, "TodaysProfitLoss"),
+        unrealized_profit_loss: optional_number(item, "UnrealizedProfitLoss"),
+        uncleared_deposit: optional_number(item, "UnclearedDeposit"),
+        commission: optional_number(item, "Commission")
+            .or_else(|| optional_number(detail, "Commission")),
+        initial_margin: optional_number(detail, "InitialMargin"),
+        maintenance_margin: optional_number(detail, "MaintenanceMargin"),
+        open_order_margin: optional_number(detail, "OpenOrderMargin"),
+        balance_date: optional_string(item, "BalanceDate"),
     }
 }
 
@@ -801,7 +1228,12 @@ fn optional_number(value: &Value, key: &str) -> Option<f64> {
         .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()))
 }
 fn optional_string(value: &Value, key: &str) -> Option<String> {
-    let value = string(value, key); if value.is_empty() { None } else { Some(value) }
+    let value = string(value, key);
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 fn number(value: &Value, key: &str) -> f64 {
     optional_number(value, key).unwrap_or(0.0)
@@ -840,10 +1272,162 @@ fn mask_account(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_order(id: &str) -> OrderUpdate {
+        OrderUpdate {
+            id: id.into(),
+            symbol: "MESU26".into(),
+            side: "Sell".into(),
+            order_type: "Limit".into(),
+            quantity: 2,
+            price: Some(6260.0),
+            stop_price: None,
+            status: "Working".into(),
+            timestamp: String::new(),
+            account_id: Some("account-1".into()),
+            filled_quantity: Some(0.0),
+            remaining_quantity: Some(2.0),
+            average_fill_price: None,
+            duration: Some("DAY".into()),
+            closed_at: None,
+            commission: None,
+            stop_loss: None,
+            take_profit: None,
+            raw_status: Some("ACK".into()),
+            status_description: Some("Received".into()),
+            open_or_close: Some("Close".into()),
+            group_name: Some("OCO bracket".into()),
+            related_orders: vec![],
+        }
+    }
+
+    fn sample_position(side: &str, quantity: f64) -> Position {
+        Position {
+            id: "position-1".into(),
+            symbol: "MESU26".into(),
+            side: side.into(),
+            quantity,
+            average_price: 6250.0,
+            last: 6251.0,
+            unrealized_pnl: 10.0,
+            bid: None,
+            ask: None,
+            unrealized_pnl_percent: None,
+            unrealized_pnl_quantity: None,
+            initial_requirement: None,
+            maintenance_margin: None,
+            market_value: None,
+            timestamp: None,
+        }
+    }
+
     #[test]
     fn tick_alignment_is_decimal_safe_enough_for_validation() {
         assert!(aligned(6260.25, 0.25));
         assert!(!aligned(6260.10, 0.25));
+    }
+
+    #[test]
+    fn normalizes_tradestation_order_status_codes() {
+        for code in ["OPN", "ACK", "UCN", "FPR", "DON"] {
+            assert_eq!(normalize_order_status(code), "Working");
+        }
+        for code in ["FLL", "FLP"] {
+            assert_eq!(normalize_order_status(code), "Filled");
+        }
+        for code in ["OUT", "CAN", "EXP"] {
+            assert_eq!(normalize_order_status(code), "Cancelled");
+        }
+        assert_eq!(normalize_order_status("REJ"), "Rejected");
+        for code in ["TSC", "BRO", "LAT", "future-code"] {
+            assert_eq!(normalize_order_status(code), "Indeterminate");
+        }
+    }
+
+    #[test]
+    fn parses_bracket_metadata_and_preserves_raw_status() {
+        let order = order_from_value(&json!({
+            "OrderID": "123", "AccountID": "account-1", "Status": "ACK",
+            "StatusDescription": "Received", "OrderType": "Limit", "LimitPrice": "6260",
+            "GroupName": "OCO bracket", "OpenedDateTime": "2026-07-13T20:00:00Z",
+            "Legs": [{ "Symbol": "MESU26", "BuyOrSell": "Sell", "OpenOrClose": "Close", "QuantityOrdered": "2", "QuantityRemaining": "2" }],
+            "ConditionalOrders": [{ "OrderID": "124", "Relationship": "OCO" }]
+        }));
+        assert_eq!(order.status, "Working");
+        assert_eq!(order.raw_status.as_deref(), Some("ACK"));
+        assert_eq!(order.status_description.as_deref(), Some("Received"));
+        assert_eq!(order.open_or_close.as_deref(), Some("Close"));
+        assert_eq!(order.group_name.as_deref(), Some("OCO bracket"));
+        assert!(is_bracket_order(&order));
+        assert_eq!(order.related_orders[0].order_id, "124");
+    }
+
+    #[test]
+    fn replacement_payload_uses_the_protective_order_price_field() {
+        let limit = sample_order("1");
+        assert_eq!(
+            replacement_payload(&limit, 6261.25).unwrap(),
+            json!({
+                "Quantity": "2", "LimitPrice": "6261.25"
+            })
+        );
+        let mut stop = sample_order("2");
+        stop.order_type = "StopMarket".into();
+        stop.price = None;
+        stop.stop_price = Some(6240.0);
+        stop.remaining_quantity = Some(1.0);
+        assert_eq!(
+            replacement_payload(&stop, 6239.75).unwrap(),
+            json!({
+                "Quantity": "1", "StopPrice": "6239.75"
+            })
+        );
+        stop.remaining_quantity = Some(0.0);
+        assert!(replacement_payload(&stop, 6239.5).is_err());
+    }
+
+    #[test]
+    fn close_order_selection_is_scoped_to_account_symbol_and_close_side() {
+        let included = sample_order("1");
+        let mut opening = sample_order("2");
+        opening.open_or_close = Some("Open".into());
+        let mut other_symbol = sample_order("3");
+        other_symbol.symbol = "MNQU26".into();
+        let mut other_account = sample_order("4");
+        other_account.account_id = Some("account-2".into());
+        let mut filled = sample_order("5");
+        filled.status = "Filled".into();
+        let orders = vec![included, opening, other_symbol, other_account, filled];
+        assert_eq!(
+            closing_orders_for_position(&orders, "account-1", "MESU26")
+                .iter()
+                .map(|order| order.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1"]
+        );
+    }
+
+    #[test]
+    fn flatten_draft_uses_current_quantity_and_opposite_side() {
+        let long = flatten_draft("account-1", &sample_position("Long", 2.0)).unwrap();
+        assert_eq!((long.side.as_str(), long.quantity), ("Sell", 2));
+        let reduced = flatten_draft("account-1", &sample_position("Short", 1.0)).unwrap();
+        assert_eq!((reduced.side.as_str(), reduced.quantity), ("Buy", 1));
+        assert!(flatten_draft("account-1", &sample_position("Long", 0.0)).is_err());
+    }
+
+    #[test]
+    fn cancellation_poll_blocks_indeterminate_and_timed_out_orders() {
+        let ids = vec!["1".into()];
+        let working = vec![sample_order("1")];
+        assert!(!cancellation_poll_complete(&ids, &working, false).unwrap());
+        assert!(cancellation_poll_complete(&ids, &working, true).is_err());
+        let mut indeterminate = sample_order("1");
+        indeterminate.status = "Indeterminate".into();
+        assert!(cancellation_poll_complete(&ids, &[indeterminate], false).is_err());
+        let mut cancelled = sample_order("1");
+        cancelled.status = "Cancelled".into();
+        assert!(cancellation_poll_complete(&ids, &[cancelled], false).unwrap());
     }
 
     #[test]

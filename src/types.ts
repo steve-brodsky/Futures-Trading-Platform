@@ -84,6 +84,19 @@ export interface OrderUpdate {
   commission?: number;
   stopLoss?: number;
   takeProfit?: number;
+  rawStatus?: string;
+  statusDescription?: string;
+  openOrClose?: "Open" | "Close";
+  groupName?: string;
+  relatedOrders?: Array<{ orderId: string; relationship: string }>;
+}
+
+export interface ClosePositionResult {
+  positionId: string;
+  symbol: string;
+  cancelledOrderIds: string[];
+  flattenOrder: OrderUpdate | null;
+  error?: string;
 }
 
 export interface AccountBalance {
@@ -182,6 +195,7 @@ export interface WorkspaceState {
   bottomPanelOpen: boolean;
   bottomPanelHeight?: number;
   selectedAccountId?: string;
+  confirmOrders: boolean;
 }
 
 export interface BarSnapshotEvent {

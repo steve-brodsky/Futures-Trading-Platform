@@ -140,6 +140,28 @@ pub struct OrderUpdate {
     pub commission: Option<f64>,
     pub stop_loss: Option<f64>,
     pub take_profit: Option<f64>,
+    pub raw_status: Option<String>,
+    pub status_description: Option<String>,
+    pub open_or_close: Option<String>,
+    pub group_name: Option<String>,
+    pub related_orders: Vec<RelatedOrder>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedOrder {
+    pub order_id: String,
+    pub relationship: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosePositionResult {
+    pub position_id: String,
+    pub symbol: String,
+    pub cancelled_order_ids: Vec<String>,
+    pub flatten_order: Option<OrderUpdate>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

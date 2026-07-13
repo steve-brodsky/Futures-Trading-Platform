@@ -107,6 +107,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     bottomPanelOpen: value.bottomPanelOpen ?? fallback.bottomPanelOpen,
     bottomPanelHeight: value.bottomPanelHeight ?? fallback.bottomPanelHeight,
     selectedAccountId: value.selectedAccountId ?? fallback.selectedAccountId,
+    confirmOrders: value.confirmOrders ?? true,
   };
 }
 
