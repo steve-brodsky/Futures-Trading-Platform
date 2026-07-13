@@ -97,6 +97,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [orderProjection, setOrderProjection] = useState<(OrderProjection & { tradeSymbol?: string }) | null>(null);
+  const [orderTicketResetEpochs, setOrderTicketResetEpochs] = useState<Record<string, number>>({});
   const [tradeDetails, setTradeDetails] = useState<Record<string, SymbolMeta>>({});
   const [tradeDetailErrors, setTradeDetailErrors] = useState<Record<string, string>>({});
   const [contractChoices, setContractChoices] = useState<Record<string, SymbolMeta[]>>({});
@@ -645,6 +646,13 @@ export default function App() {
     finally { setBusy(false); }
   }
 
+  function clearSubmittedEntry(symbol: string) {
+    setOrderProjection((current) => current?.tradeSymbol === symbol
+      ? { tradeSymbol: symbol, takeProfit: undefined, stopLoss: undefined }
+      : current);
+    setOrderTicketResetEpochs((current) => ({ ...current, [symbol]: (current[symbol] ?? 0) + 1 }));
+  }
+
   async function submitOrder(draft: OrderDraft, sourceTabId: string, chartSymbol: string) {
     const side = draft.side === "Buy" ? "long" : "short";
     const eligibility = eligibilityForEntry(sourceTabId, chartSymbol, draft.symbol)[side];
@@ -656,6 +664,7 @@ export default function App() {
       const update = await api.placeOrder(draft);
       setOrders((current) => [update, ...current]);
       setBrokerageEpoch((value) => value + 1);
+      if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(draft.symbol);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
     } catch (error) { showToast(String(error)); }
     finally { setBusy(false); }
@@ -741,6 +750,7 @@ export default function App() {
     try {
       const update = await api.placeOrder(review.draft);
       setOrders((current) => [update, ...current]);
+      if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(review.draft.symbol);
       setReview(null);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
     } catch (error) { showToast(String(error)); }
@@ -762,6 +772,7 @@ export default function App() {
 
   const activeOrderProjection = !isDetached && workspace.rightPanelOpen && workspace.rightTab === "order"
     && orderProjection && orderProjection.tradeSymbol === activeTradeSymbol ? orderProjection : undefined;
+  const activeOrderTicketResetEpoch = activeTradeSymbol ? orderTicketResetEpochs[activeTradeSymbol] ?? 0 : 0;
 
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
@@ -816,7 +827,7 @@ export default function App() {
 
       {!isDetached && workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
-        {workspace.rightTab === "order" ? <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={(projection) => setOrderProjection({ ...projection, tradeSymbol: activeTradeSymbol })} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta, tradeContract: undefined }); }} />}
+        {workspace.rightTab === "order" ? <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={(projection) => setOrderProjection({ ...projection, tradeSymbol: activeTradeSymbol })} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta, tradeContract: undefined }); }} />}
       </aside>}
 
       {!isDetached && workspace.bottomPanelOpen && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
@@ -912,7 +923,7 @@ function Watchlist({ symbols, quotes, active, onSelect }: { symbols: string[]; q
   return <div className="watchlist"><header><span>Symbol</span><span>Last</span><span>Chg%</span></header>{symbols.map((symbol) => { const quote = quotes[symbol] ?? quoteFor(symbol); return <button key={symbol} className={active === symbol ? "active" : ""} onClick={() => onSelect(symbol)}><span><strong>{symbol}</strong><small>{futures.find((f) => f.symbol === symbol)?.exchange}</small></span><b>{quote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</b><em className={quote.changePct >= 0 ? "positive" : "negative"}>{quote.changePct >= 0 ? "+" : ""}{quote.changePct.toFixed(2)}%</em></button>; })}</div>;
 }
 
-function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract, contractStatus, contractLookupError, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, onTradeContractChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; onTradeContractChange: (symbol?: string) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {
+function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract, contractStatus, contractLookupError, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, resetEpoch, onTradeContractChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; resetEpoch: number; onTradeContractChange: (symbol?: string) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {
   const symbol = tradeSymbol ?? chartSymbol;
   const continuous = isContinuousFuture(chartSymbol);
   const [side, setSide] = useState<"Buy" | "Sell">("Buy");
@@ -921,6 +932,7 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
   const [takeProfit, setTakeProfit] = useState("");
   const [stopLoss, setStopLoss] = useState("");
   const initializedLevelsRef = useRef("");
+  const handledResetRef = useRef(`${symbol.symbol}:${resetEpoch}`);
 
   const projectionPrice = (value: string) => {
     if (!value.trim()) return undefined;
@@ -935,14 +947,30 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
   useEffect(() => {
     const key = `${symbol.symbol}:${side}`;
     const entryPrice = side === "Buy" ? quote.ask : quote.bid;
-    if (entryPrice <= 0 || initializedLevelsRef.current === key) return;
+    if (initializedLevelsRef.current === key) return;
+    if (resetEpoch > 0 || orderProjection?.takeProfit != null || orderProjection?.stopLoss != null) {
+      initializedLevelsRef.current = key;
+      return;
+    }
+    if (entryPrice <= 0) return;
     const nextTakeProfit = String(roundToTick(side === "Buy" ? entryPrice + symbol.minMove * 20 : entryPrice - symbol.minMove * 20, symbol.minMove));
     const nextStopLoss = String(roundToTick(side === "Buy" ? entryPrice - symbol.minMove * 12 : entryPrice + symbol.minMove * 12, symbol.minMove));
     setTakeProfit(nextTakeProfit);
     setStopLoss(nextStopLoss);
     publishProjection(nextTakeProfit, nextStopLoss);
     initializedLevelsRef.current = key;
-  }, [symbol.symbol, symbol.minMove, side, quote.ask, quote.bid]);
+  }, [symbol.symbol, symbol.minMove, side, quote.ask, quote.bid, resetEpoch]);
+
+  useEffect(() => {
+    const resetKey = `${symbol.symbol}:${resetEpoch}`;
+    if (handledResetRef.current === resetKey) return;
+    handledResetRef.current = resetKey;
+    if (resetEpoch <= 0) return;
+    setTakeProfit("");
+    setStopLoss("");
+    initializedLevelsRef.current = `${symbol.symbol}:${side}`;
+    onProjectionChange({});
+  }, [symbol.symbol, side, resetEpoch]);
 
   useEffect(() => {
     if (orderProjection?.takeProfit != null && orderProjection.takeProfit !== projectionPrice(takeProfit)) {
