@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChartTabState, SymbolMeta } from "../types";
-import { isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol } from "./futuresContracts";
+import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol } from "./futuresContracts";
 
 const continuous: SymbolMeta = { symbol: "@MES", root: "MES", underlying: "MESU26", description: "Continuous MES", exchange: "CME", assetType: "FUTURE", minMove: .25, pointValue: 5 };
 const tab = (symbol: SymbolMeta, tradeContract?: string): ChartTabState => ({ id: symbol.symbol, symbol, tradeContract, timeframe: "1m", chartKind: "candles", indicators: [], chartTimezone: "exchange", magnetEnabled: false });
@@ -28,5 +28,13 @@ describe("futures trade-contract resolution", () => {
       watchlist: ["MESU26", "MNQU26"],
       tabs: [tab(continuous), tab({ ...continuous, symbol: "MNQU26", root: "MNQ", underlying: undefined })],
     })).toEqual(["@MES", "MESU26", "MNQU26"]);
+  });
+
+  it("formats TradeStation Microsoft JSON and ISO expiration dates", () => {
+    expect(formatContractExpiration("/Date(1789704000000)/")).toBe("Sep 2026");
+    expect(formatContractExpiration("/Date(1789704000000-0700)/")).toBe("Sep 2026");
+    expect(formatContractExpiration("2027-03-19")).toBe("Mar 2027");
+    expect(formatContractExpiration("not-a-date")).toBe("not-a-date");
+    expect(formatContractExpiration()).toBe("Expiration unavailable");
   });
 });

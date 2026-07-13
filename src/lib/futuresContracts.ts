@@ -38,7 +38,14 @@ export function sameSymbolMeta(left: SymbolMeta, right: SymbolMeta): boolean {
 
 export function formatContractExpiration(expiration?: string): string {
   if (!expiration) return "Expiration unavailable";
-  const date = new Date(`${expiration.slice(0, 10)}T12:00:00Z`);
+  const value = expiration.trim();
+  const microsoftDate = /^\/Date\((-?\d+)(?:[+-]\d{4})?\)\/$/.exec(value);
+  const isoDate = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  const date = microsoftDate
+    ? new Date(Number(microsoftDate[1]))
+    : isoDate
+      ? new Date(Date.UTC(Number(isoDate[1]), Number(isoDate[2]) - 1, Number(isoDate[3]), 12))
+      : new Date(value);
   if (Number.isNaN(date.getTime())) return expiration;
   return new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric", timeZone: "UTC" }).format(date);
 }
