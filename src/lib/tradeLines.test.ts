@@ -21,6 +21,14 @@ describe("chart trade lines", () => {
     expect(line.draggable).toBe(false);
   });
 
+  it("shows only the selected concrete contract on a continuous chart", () => {
+    const selected = { ...position, symbol: "MESU26" };
+    const other = { ...position, id: "p2", symbol: "MESZ26" };
+    const lines = buildTradeLines("MESU26", [selected, other], [{ ...baseOrder, symbol: "MESZ26" }]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].position?.symbol).toBe("MESU26");
+  });
+
   it("builds the opposite-side flatten market draft", () => {
     expect(flattenOrderDraft("account", position)).toMatchObject({ side: "Sell", quantity: 2, type: "Market" });
     expect(flattenOrderDraft("account", { ...position, side: "Short" })).toMatchObject({ side: "Buy" });

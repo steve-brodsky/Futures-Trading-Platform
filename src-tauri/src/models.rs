@@ -44,6 +44,8 @@ pub struct SymbolMeta {
     pub min_move: f64,
     pub point_value: f64,
     pub expiration: Option<String>,
+    pub root: Option<String>,
+    pub underlying: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

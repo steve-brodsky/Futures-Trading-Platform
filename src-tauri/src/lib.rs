@@ -162,6 +162,14 @@ async fn get_symbol_details(
     state.api.symbol_details(symbol.trim()).await
 }
 
+#[tauri::command(rename_all = "camelCase")]
+async fn get_future_contracts(
+    root: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<SymbolMeta>, AppError> {
+    state.api.future_contracts(root.trim()).await
+}
+
 #[tauri::command]
 async fn get_bars(
     symbol: String,
@@ -835,6 +843,7 @@ pub fn run() {
             get_accounts,
             search_symbols,
             get_symbol_details,
+            get_future_contracts,
             get_bars,
             get_quotes,
             load_cached_bars,

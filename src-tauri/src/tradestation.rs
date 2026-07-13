@@ -277,6 +277,38 @@ impl TradeStation {
             .collect())
     }
 
+    pub async fn future_contracts(&self, root: &str) -> Result<Vec<SymbolMeta>, AppError> {
+        let root = root.trim().to_ascii_uppercase();
+        if root.is_empty() || root.len() > 16 || !root.chars().all(|ch| ch.is_ascii_alphanumeric())
+        {
+            return Err(AppError::Validation("Invalid futures root".into()));
+        }
+        let token = self.token().await?;
+        let live = matches!(
+            self.session.lock().await.environment,
+            TradingEnvironment::Live
+        );
+        let host = if live {
+            "https://api.tradestation.com/v2"
+        } else {
+            "https://sim-api.tradestation.com/v2"
+        };
+        let criteria = format!("R={root}&C=Future&FT=Electronic&Exp=false");
+        let url = format!("{host}/data/symbols/search/{criteria}");
+        let response = self.client.get(url).bearer_auth(token).send().await?;
+        if !response.status().is_success() {
+            return Err(AppError::Api(format!(
+                "Futures contract lookup returned HTTP {}",
+                response.status()
+            )));
+        }
+        let body: Value = response.json().await?;
+        Ok(filter_future_contracts(
+            &root,
+            body.as_array().into_iter().flatten(),
+        ))
+    }
+
     pub async fn symbol_details(&self, symbol: &str) -> Result<SymbolMeta, AppError> {
         let path = format!("/marketdata/symbols/{symbol}");
         let body = self.send(Method::GET, &path, None).await?;
@@ -780,6 +812,7 @@ impl TradeStation {
     }
 
     async fn validate_order(&self, draft: &OrderDraft) -> Result<(), AppError> {
+        validate_tradable_symbol(&draft.symbol)?;
         if draft.quantity == 0 {
             return Err(AppError::Validation("Quantity must be at least one".into()));
         }
@@ -1190,7 +1223,50 @@ fn symbol_from_value(item: &Value) -> SymbolMeta {
             .get("ExpirationDate")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        root: optional_string(item, "Root"),
+        underlying: optional_string(item, "Underlying"),
     }
+}
+
+fn filter_future_contracts<'a>(
+    root: &str,
+    items: impl Iterator<Item = &'a Value>,
+) -> Vec<SymbolMeta> {
+    let mut contracts: Vec<_> = items
+        .map(symbol_from_value)
+        .filter(|symbol| {
+            !symbol.symbol.starts_with('@')
+                && symbol
+                    .expiration
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                && symbol
+                    .root
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(root))
+                && symbol.asset_type.eq_ignore_ascii_case("Future")
+        })
+        .collect();
+    contracts.sort_by(|left, right| {
+        left.expiration
+            .cmp(&right.expiration)
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+    contracts.dedup_by(|left, right| left.symbol == right.symbol);
+    contracts
+}
+
+fn validate_tradable_symbol(symbol: &str) -> Result<(), AppError> {
+    let symbol = symbol.trim();
+    if symbol.is_empty() {
+        return Err(AppError::Validation("Order symbol is required".into()));
+    }
+    if symbol.starts_with('@') {
+        return Err(AppError::Validation(
+            "Continuous futures symbols cannot be traded; select a concrete contract".into(),
+        ));
+    }
+    Ok(())
 }
 
 trait EmptyFallback {
@@ -1446,6 +1522,43 @@ mod tests {
         assert_eq!(symbol.min_move, 0.25);
         assert_eq!(symbol.point_value, 5.0);
         assert_eq!(symbol.min_move * symbol.point_value, 1.25);
+    }
+
+    #[test]
+    fn parses_continuous_root_and_underlying() {
+        let symbol = symbol_from_value(&json!({
+            "AssetType": "FUTURE", "Symbol": "@MES", "Root": "MES", "Underlying": "MESU26",
+            "PriceFormat": { "Increment": "0.25", "PointValue": "5" }
+        }));
+        assert_eq!(symbol.root.as_deref(), Some("MES"));
+        assert_eq!(symbol.underlying.as_deref(), Some("MESU26"));
+    }
+
+    #[test]
+    fn future_contract_search_filters_and_sorts_concrete_expirations() {
+        let values = json!([
+            { "Name": "MESZ26", "Root": "MES", "Category": "Future", "ExpirationDate": "2026-12-18" },
+            { "Name": "@MES", "Root": "MES", "Category": "Future", "ExpirationDate": "2026-09-18" },
+            { "Name": "MNQU26", "Root": "MNQ", "Category": "Future", "ExpirationDate": "2026-09-18" },
+            { "Name": "MESH27", "Root": "MES", "Category": "Future", "ExpirationDate": "2027-03-19" },
+            { "Name": "MESU26", "Root": "MES", "Category": "Future", "ExpirationDate": "2026-09-18" },
+            { "Name": "MESOLD", "Root": "MES", "Category": "Future" }
+        ]);
+        let contracts = filter_future_contracts("MES", values.as_array().unwrap().iter());
+        assert_eq!(
+            contracts
+                .iter()
+                .map(|symbol| symbol.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["MESU26", "MESZ26", "MESH27"]
+        );
+    }
+
+    #[test]
+    fn continuous_symbols_are_rejected_for_orders() {
+        assert!(validate_tradable_symbol("MESU26").is_ok());
+        assert!(validate_tradable_symbol("@MES").is_err());
+        assert!(validate_tradable_symbol("").is_err());
     }
 
     #[test]

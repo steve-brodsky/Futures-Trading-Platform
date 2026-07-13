@@ -15,6 +15,7 @@ import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { estimateOrderRisk, roundToTick, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
+import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { flattenOrderDraft, withOrderPrice } from "./lib/tradeLines";
 import { defaultIndicators } from "./lib/workspace";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
@@ -50,7 +51,7 @@ interface TabMarketState {
 interface StripBounds { windowId: string; left: number; top: number; right: number; bottom: number; }
 
 type ReviewState =
-  | { kind: "entry"; draft: OrderDraft; preview: OrderPreview; sourceTabId: string }
+  | { kind: "entry"; draft: OrderDraft; preview: OrderPreview; sourceTabId: string; chartSymbol: string }
   | { kind: "close-position"; draft: OrderDraft; preview: OrderPreview; positionId: string };
 
 function mergeBars(current: Bar[], incoming: Bar[]): Bar[] {
@@ -95,6 +96,10 @@ export default function App() {
   const [brokerageError, setBrokerageError] = useState<string>();
   const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
+  const [tradeDetails, setTradeDetails] = useState<Record<string, SymbolMeta>>({});
+  const [tradeDetailErrors, setTradeDetailErrors] = useState<Record<string, string>>({});
+  const [contractChoices, setContractChoices] = useState<Record<string, SymbolMeta[]>>({});
+  const [contractLookupErrors, setContractLookupErrors] = useState<Record<string, string>>({});
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<SymbolMeta[]>(futures);
@@ -124,6 +129,11 @@ export default function App() {
   const activeTab = workspace.tabs.find((item) => item.id === windowState?.activeTabId) ?? workspace.tabs[0];
   const market = tabMarkets[activeTab.id] ?? { bars: [], hasOlder: true, loadingOlder: false, streamState: api.isNative ? "disconnected" : "streaming" };
   const bars = market.bars;
+  const activeContinuous = isContinuousFuture(activeTab.symbol);
+  const activeTradeSymbol = resolveTradeSymbol(activeTab);
+  const activeTradeMeta = activeContinuous
+    ? activeTradeSymbol ? tradeDetails[activeTradeSymbol] : undefined
+    : activeTab.symbol;
 
   workspaceRef.current = workspace;
 
@@ -135,7 +145,14 @@ export default function App() {
     [workspace.entryRules, bars, activeQuote],
   );
   const tabStreamKey = workspace.tabs.map((tab) => `${tab.id}:${tab.symbol.symbol}:${tab.timeframe}`).join("|");
-  const quoteSymbolsKey = [...new Set([...workspace.watchlist, ...workspace.tabs.map((tab) => tab.symbol.symbol)])].sort().join("|");
+  const chartSymbolsKey = [...new Set(workspace.tabs.map((tab) => tab.symbol.symbol))].sort().join("|");
+  const tradeDetailSymbolsKey = [...new Set(workspace.tabs.filter((tab) => isContinuousFuture(tab.symbol)).map(resolveTradeSymbol).filter((symbol): symbol is string => Boolean(symbol)))].sort().join("|");
+  const quoteSymbolsKey = quoteSubscriptionSymbols(workspace).join("|");
+  const activeTradeQuote = activeTradeSymbol
+    ? quotes[activeTradeSymbol] ?? (api.isNative
+      ? { symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+      : quoteFor(activeTradeSymbol))
+    : { symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
 
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
@@ -310,13 +327,79 @@ export default function App() {
   }, [search, searchOpen]);
 
   useEffect(() => {
-    if (!workspaceLoaded || !api.isNative || !authenticated) return;
+    setTradeDetails({});
+    setTradeDetailErrors({});
+    setContractChoices({});
+    setContractLookupErrors({});
+  }, [environment]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || api.isNative && !authenticated) return;
     let active = true;
-    api.symbolDetails(activeTab.symbol.symbol).then((details) => {
-      if (active) updateActiveTab({ symbol: details });
-    }).catch((error) => showToast(String(error)));
+    const refresh = async () => {
+      const symbols = chartSymbolsKey.split("|").filter(Boolean);
+      const settled = await Promise.all(symbols.map(async (symbol) => {
+        try { return await api.symbolDetails(symbol); }
+        catch { return null; }
+      }));
+      if (!active) return;
+      const details = new Map(settled.filter((item): item is SymbolMeta => Boolean(item)).map((item) => [item.symbol, item]));
+      if (!details.size) return;
+      commitWorkspace((current) => {
+        let changed = false;
+        const tabs = current.tabs.map((tab) => {
+          const next = details.get(tab.symbol.symbol);
+          if (!next || sameSymbolMeta(tab.symbol, next)) return tab;
+          changed = true;
+          return { ...tab, symbol: next };
+        });
+        return changed ? { ...current, tabs } : current;
+      });
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 15 * 60_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [workspaceLoaded, authenticated, environment, authEpoch, chartSymbolsKey]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || api.isNative && !authenticated) return;
+    let active = true;
+    const symbols = tradeDetailSymbolsKey.split("|").filter(Boolean);
+    if (!symbols.length) return;
+    Promise.all(symbols.map(async (symbol) => {
+      try { return { symbol, details: await api.symbolDetails(symbol) }; }
+      catch (error) { return { symbol, error: String(error) }; }
+    })).then((items) => {
+      if (!active) return;
+      setTradeDetails((current) => {
+        const next = { ...current };
+        items.forEach((item) => { if (item.details) next[item.symbol] = item.details; });
+        return next;
+      });
+      setTradeDetailErrors((current) => {
+        const next = { ...current };
+        items.forEach((item) => {
+          if (item.error) next[item.symbol] = item.error;
+          else delete next[item.symbol];
+        });
+        return next;
+      });
+    });
     return () => { active = false; };
-  }, [workspaceLoaded, authenticated, environment, activeTab.symbol.symbol]);
+  }, [workspaceLoaded, authenticated, environment, authEpoch, tradeDetailSymbolsKey]);
+
+  useEffect(() => {
+    const root = activeContinuous ? activeTab.symbol.root : undefined;
+    if (!workspaceLoaded || !root || api.isNative && !authenticated) return;
+    let active = true;
+    setContractLookupErrors((current) => ({ ...current, [root]: "" }));
+    api.futureContracts(root).then((contracts) => {
+      if (active) setContractChoices((current) => ({ ...current, [root]: contracts }));
+    }).catch((error) => {
+      if (active) setContractLookupErrors((current) => ({ ...current, [root]: String(error) }));
+    });
+    return () => { active = false; };
+  }, [workspaceLoaded, authenticated, environment, authEpoch, activeContinuous, activeTab.symbol.root]);
 
   function showToast(message: string) {
     setToast(message);
@@ -536,10 +619,14 @@ export default function App() {
     finally { setBusy(false); setSecret(""); }
   }
 
-  function eligibilityForEntry(sourceTabId: string, expectedSymbol: string): Record<EntryRuleSide, EntryRuleResult> {
+  function eligibilityForEntry(sourceTabId: string, expectedChartSymbol: string, expectedTradeSymbol: string): Record<EntryRuleSide, EntryRuleResult> {
     const tab = workspace.tabs.find((item) => item.id === sourceTabId);
-    if (!tab || tab.symbol.symbol !== expectedSymbol) {
+    if (!tab || tab.symbol.symbol !== expectedChartSymbol) {
       const result = blockedEntryResult("The originating chart is no longer available for rule evaluation.");
+      return { long: result, short: result };
+    }
+    if (resolveTradeSymbol(tab) !== expectedTradeSymbol) {
+      const result = blockedEntryResult("The trade contract changed. Close this review and submit a fresh order.");
       return { long: result, short: result };
     }
     const sourceBars = tabMarkets[sourceTabId]?.bars ?? [];
@@ -549,19 +636,19 @@ export default function App() {
     return evaluateEntryRules(workspace.entryRules, sourceBars, sourceQuote);
   }
 
-  async function openReview(draft: OrderDraft, sourceTabId: string) {
+  async function openReview(draft: OrderDraft, sourceTabId: string, chartSymbol: string) {
     if (!api.isNative) return showToast("Browser demo mode cannot place orders. Run the Tauri app to connect.");
     setBusy(true);
-    try { setReview({ kind: "entry", sourceTabId, draft, preview: await api.confirmOrder(draft) }); }
+    try { setReview({ kind: "entry", sourceTabId, chartSymbol, draft, preview: await api.confirmOrder(draft) }); }
     catch (error) { showToast(String(error)); }
     finally { setBusy(false); }
   }
 
-  async function submitOrder(draft: OrderDraft, sourceTabId: string) {
+  async function submitOrder(draft: OrderDraft, sourceTabId: string, chartSymbol: string) {
     const side = draft.side === "Buy" ? "long" : "short";
-    const eligibility = eligibilityForEntry(sourceTabId, draft.symbol)[side];
+    const eligibility = eligibilityForEntry(sourceTabId, chartSymbol, draft.symbol)[side];
     if (!eligibility.allowed) return showToast(`${draft.side} entry blocked: ${eligibility.reason}`);
-    if (workspace.confirmOrders) return openReview(draft, sourceTabId);
+    if (workspace.confirmOrders) return openReview(draft, sourceTabId, chartSymbol);
     if (!api.isNative) return showToast("Browser demo mode cannot place orders. Run the Tauri app to connect.");
     setBusy(true);
     try {
@@ -647,7 +734,7 @@ export default function App() {
       return executeClosePosition(positionId);
     }
     const side = review.draft.side === "Buy" ? "long" : "short";
-    const eligibility = eligibilityForEntry(review.sourceTabId, review.draft.symbol)[side];
+    const eligibility = eligibilityForEntry(review.sourceTabId, review.chartSymbol, review.draft.symbol)[side];
     if (!eligibility.allowed) return showToast(`${review.draft.side} entry blocked: ${eligibility.reason}`);
     setBusy(true);
     try {
@@ -662,8 +749,15 @@ export default function App() {
   const connectionLabel = api.isNative ? (authenticated ? market.streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
   const marketTime = newYorkClock.format(new Date(currentTime));
   const reviewEntryEligibility = review?.kind === "entry"
-    ? eligibilityForEntry(review.sourceTabId, review.draft.symbol)[review.draft.side === "Buy" ? "long" : "short"]
+    ? eligibilityForEntry(review.sourceTabId, review.chartSymbol, review.draft.symbol)[review.draft.side === "Buy" ? "long" : "short"]
     : null;
+  const activeRoot = activeTab.symbol.root;
+  const activeContracts = activeRoot ? contractChoices[activeRoot] ?? [] : [];
+  const tradeContractStatus = !activeContinuous ? undefined
+    : !activeTradeSymbol ? "Auto unavailable: TradeStation did not return an underlying contract."
+    : tradeDetailErrors[activeTradeSymbol] ? `Contract details unavailable for ${activeTradeSymbol}.`
+    : !activeTradeMeta ? `Loading contract details for ${activeTradeSymbol}…`
+    : undefined;
 
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
@@ -714,17 +808,17 @@ export default function App() {
         </div>
       </aside>
 
-      <TradingChart key={activeTab.id} bars={bars} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={(range) => { viewRangesRef.current.set(activeTab.id, range); emit("chart-viewport", { tabId: activeTab.id, range }); }} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
+      <TradingChart key={activeTab.id} bars={bars} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={(range) => { viewRangesRef.current.set(activeTab.id, range); emit("chart-viewport", { tabId: activeTab.id, range }); }} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
 
       {!isDetached && workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
-        {workspace.rightTab === "order" ? <OrderTicket symbol={activeTab.symbol} quote={activeQuote} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onSubmit={(draft) => submitOrder(draft, activeTab.id)} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta }); }} />}
+        {workspace.rightTab === "order" ? <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta, tradeContract: undefined }); }} />}
       </aside>}
 
       {!isDetached && workspace.bottomPanelOpen && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
     </section>
 
-    {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateActiveTab({ symbol: result }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
+    {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateActiveTab({ symbol: result, tradeContract: undefined }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
 
     {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><div className="setup-intro"><LockKeyhole size={20} /><div><strong>Credentials stay on this device</strong><p>Your secret and refresh token are handled by the native process and stored in the operating system credential vault.</p></div></div>{!api.isNative && <div className="demo-warning">You are viewing the browser-safe demo. Launch with <code>npm run tauri dev</code> to connect.</div>}<label className="field"><span>Auth0 API key / client ID</span><input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Enter client ID" autoComplete="off" /></label><label className="field"><span>Client secret</span><input value={secret} onChange={(e) => setSecret(e.target.value)} type="password" placeholder="Enter client secret" autoComplete="new-password" /></label><div className="callback-note"><span>Callback URL</span><code>http://localhost:8080</code></div><button className="primary-button" disabled={busy || !api.isNative} onClick={connect}>{busy ? "Starting…" : "Continue to TradeStation"}</button></Modal>}
 
@@ -732,7 +826,7 @@ export default function App() {
 
     {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder rules={workspace.entryRules} bars={bars} quote={activeQuote} onClose={() => setEntryRulesOpen(false)} onSave={(entryRules) => { updateWorkspace({ entryRules }); setEntryRulesOpen(false); showToast("Entry rules saved."); }} /></Modal>}
 
-    {review && <Modal title={review.kind === "close-position" ? "Close position" : "Review order"} onClose={() => setReview(null)}><div className="review-hero"><span className={review.draft.side === "Buy" ? "buy" : "sell"}>{review.draft.side}</span><strong>{review.draft.quantity} {review.draft.symbol}</strong><small>{review.kind === "close-position" ? "Market close · cancels working exits first" : `${review.draft.type} · ${review.draft.duration}`}</small></div><dl className="review-list">{review.kind === "entry" && <><div><dt>Take profit</dt><dd>{formatPrice(review.draft.takeProfit)}</dd></div><div><dt>Stop loss</dt><dd>{formatPrice(review.draft.stopLoss)}</dd></div></>}<div><dt>Estimated commission</dt><dd>{review.preview.estimatedCommission ?? "—"}</dd></div><div><dt>Initial margin</dt><dd>{review.preview.initialMargin ?? "—"}</dd></div><div><dt>Environment</dt><dd className={environment === "live" ? "negative" : "cyan"}>{environment.toUpperCase()}</dd></div></dl><p className="preview-summary">{review.kind === "close-position" ? "All working close-side orders for this symbol will be cancelled and confirmed inactive before the market close is submitted." : review.preview.summary}</p>{reviewEntryEligibility && <p className={`entry-review-rule ${reviewEntryEligibility.status}`}>{reviewEntryEligibility.reason}</p>}<button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview.valid || busy || Boolean(reviewEntryEligibility && !reviewEntryEligibility.allowed)} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button></Modal>}
+    {review && <Modal title={review.kind === "close-position" ? "Close position" : "Review order"} onClose={() => setReview(null)}><div className="review-hero"><span className={review.draft.side === "Buy" ? "buy" : "sell"}>{review.draft.side}</span><strong>{review.draft.quantity} {review.draft.symbol}</strong><small>{review.kind === "close-position" ? "Market close · cancels working exits first" : `${review.draft.type} · ${review.draft.duration}${review.chartSymbol !== review.draft.symbol ? ` · Chart ${review.chartSymbol} · Trading ${review.draft.symbol}` : ""}`}</small></div><dl className="review-list">{review.kind === "entry" && <><div><dt>Take profit</dt><dd>{formatPrice(review.draft.takeProfit)}</dd></div><div><dt>Stop loss</dt><dd>{formatPrice(review.draft.stopLoss)}</dd></div></>}<div><dt>Estimated commission</dt><dd>{review.preview.estimatedCommission ?? "—"}</dd></div><div><dt>Initial margin</dt><dd>{review.preview.initialMargin ?? "—"}</dd></div><div><dt>Environment</dt><dd className={environment === "live" ? "negative" : "cyan"}>{environment.toUpperCase()}</dd></div></dl><p className="preview-summary">{review.kind === "close-position" ? "All working close-side orders for this symbol will be cancelled and confirmed inactive before the market close is submitted." : review.preview.summary}</p>{reviewEntryEligibility && <p className={`entry-review-rule ${reviewEntryEligibility.status}`}>{reviewEntryEligibility.reason}</p>}<button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview.valid || busy || Boolean(reviewEntryEligibility && !reviewEntryEligibility.allowed)} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button></Modal>}
 
     {toast && <div className="toast" role="status">{toast}</div>}
   </main>;
@@ -814,7 +908,9 @@ function Watchlist({ symbols, quotes, active, onSelect }: { symbols: string[]; q
   return <div className="watchlist"><header><span>Symbol</span><span>Last</span><span>Chg%</span></header>{symbols.map((symbol) => { const quote = quotes[symbol] ?? quoteFor(symbol); return <button key={symbol} className={active === symbol ? "active" : ""} onClick={() => onSelect(symbol)}><span><strong>{symbol}</strong><small>{futures.find((f) => f.symbol === symbol)?.exchange}</small></span><b>{quote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</b><em className={quote.changePct >= 0 ? "positive" : "negative"}>{quote.changePct >= 0 ? "+" : ""}{quote.changePct.toFixed(2)}%</em></button>; })}</div>;
 }
 
-function OrderTicket({ symbol, quote, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, onConfirmOrdersChange, onSubmit }: { symbol: SymbolMeta; quote: Quote; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; onConfirmOrdersChange: (enabled: boolean) => void; onSubmit: (draft: OrderDraft) => void }) {
+function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract, contractStatus, contractLookupError, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, onTradeContractChange, onConfirmOrdersChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; onTradeContractChange: (symbol?: string) => void; onConfirmOrdersChange: (enabled: boolean) => void; onSubmit: (draft: OrderDraft) => void }) {
+  const symbol = tradeSymbol ?? chartSymbol;
+  const continuous = isContinuousFuture(chartSymbol);
   const [side, setSide] = useState<"Buy" | "Sell">("Buy");
   const [quantity, setQuantity] = useState(1);
   const [duration, setDuration] = useState<"DAY" | "GTC">("DAY");
@@ -840,19 +936,21 @@ function OrderTicket({ symbol, quote, account, environment, busy, confirmOrders,
     && (side === "Buy" ? stopLossPrice < entryPrice : stopLossPrice > entryPrice);
 
   function draft(): OrderDraft {
-    return { accountId: account?.id ?? "", symbol: symbol.symbol, side, type: "Market", quantity, duration, takeProfit: takeProfitPrice, stopLoss: stopLossPrice };
+    return { accountId: account?.id ?? "", symbol: tradeSymbol?.symbol ?? "", side, type: "Market", quantity, duration, takeProfit: takeProfitPrice, stopLoss: stopLossPrice };
   }
 
-  const marketUnavailable = quote.last <= 0 || quote.halted || quote.delayed || !quote.receivedAt || Date.now() - quote.receivedAt > 5_000;
+  const marketUnavailable = !tradeSymbol || quote.last <= 0 || quote.halted || quote.delayed || !quote.receivedAt || Date.now() - quote.receivedAt > 5_000;
   const tickValue = symbol.minMove * symbol.pointValue;
   const estimatedRisk = stopLossValid ? estimateOrderRisk(entryPrice, stopLossPrice, side, quantity, symbol.minMove, tickValue) : null;
   const selectedEligibility = entryEligibility[side === "Buy" ? "long" : "short"];
-  const orderDisabled = busy || !account || marketUnavailable || !takeProfitValid || !stopLossValid || estimatedRisk == null || !selectedEligibility.allowed;
-  const orderLabel = marketUnavailable ? "Market data unavailable"
+  const orderDisabled = busy || !account || Boolean(contractStatus) || marketUnavailable || !takeProfitValid || !stopLossValid || estimatedRisk == null || !selectedEligibility.allowed;
+  const orderLabel = contractStatus ?? (marketUnavailable ? "Contract market data unavailable"
     : !selectedEligibility.allowed ? `${side === "Buy" ? "Long" : "Short"} entry blocked`
-    : `${confirmOrders ? "Review" : "Place"} ${side} market order`;
+    : `${confirmOrders ? "Review" : "Place"} ${side} market order`);
+  const manualMissing = tradeContract && !contracts.some((contract) => contract.symbol === tradeContract);
   return <div className="order-ticket">
     <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
+    {continuous && <label className="trade-contract-field"><span><strong>Trade contract</strong><small>Chart {chartSymbol.symbol}</small></span><select aria-label="Trade contract" value={tradeContract ?? "__auto__"} onChange={(event) => onTradeContractChange(event.target.value === "__auto__" ? undefined : event.target.value)}><option value="__auto__">Auto · {chartSymbol.underlying ?? "Unavailable"}</option>{manualMissing && <option value={tradeContract}>{tradeContract} · Saved selection</option>}{contracts.map((contract) => <option key={contract.symbol} value={contract.symbol}>{contract.symbol} · {formatContractExpiration(contract.expiration)}</option>)}</select>{contractStatus && <small className="negative">{contractStatus}</small>}{!contractStatus && contractLookupError && <small className="negative">Contract list unavailable; the current selection is unchanged.</small>}</label>}
     <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => setSide("Sell")}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => setSide("Buy")}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
     <label className="field compact"><span>Contracts</span><div className="stepper"><button onClick={() => setQuantity(Math.max(1, quantity - 1))}><Minus size={14} /></button><input type="number" min="1" value={quantity} onChange={(e) => setQuantity(Math.max(1, Number(e.target.value)))} /><button onClick={() => setQuantity(quantity + 1)}><Plus size={14} /></button></div></label>
     <div className="section-label"><span>Exits</span><small>Server-side bracket</small></div>

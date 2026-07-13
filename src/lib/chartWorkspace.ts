@@ -56,6 +56,9 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       indicators: normalizeIndicators(tab.indicators).map((indicator) => ({ ...indicator })),
       chartTimezone: tab.chartTimezone ?? "exchange",
       magnetEnabled: normalizeMagnetEnabled(tab.magnetEnabled),
+      tradeContract: typeof tab.tradeContract === "string" && tab.tradeContract.trim() && !tab.tradeContract.trim().startsWith("@")
+        ? tab.tradeContract.trim().toUpperCase()
+        : undefined,
     };
   });
   const tabIds = new Set(tabs.map((tab) => tab.id));
@@ -141,6 +144,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
       && prior.symbol.minMove === tab.symbol.minMove
       && prior.symbol.pointValue === tab.symbol.pointValue
       && prior.symbol.expiration === tab.symbol.expiration
+      && prior.symbol.root === tab.symbol.root
+      && prior.symbol.underlying === tab.symbol.underlying
       ? prior.symbol
       : tab.symbol;
     const indicators = sameArray(prior.indicators, tab.indicators, (a, b) => (
@@ -149,6 +154,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     return symbol === prior.symbol && indicators === prior.indicators
       && prior.timeframe === tab.timeframe && prior.chartKind === tab.chartKind
       && prior.chartTimezone === tab.chartTimezone && prior.magnetEnabled === tab.magnetEnabled
+      && prior.tradeContract === tab.tradeContract
       ? prior
       : { ...tab, symbol, indicators };
   });

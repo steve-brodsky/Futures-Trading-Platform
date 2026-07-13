@@ -106,6 +106,13 @@ describe("chart workspace", () => {
     expect(result.confirmOrders).toBe(false);
   });
 
+  it("keeps legacy tabs automatic and persists a concrete manual contract", () => {
+    const automatic = normalizeChartWorkspace(fallback, fallback);
+    expect(automatic.tabs[0].tradeContract).toBeUndefined();
+    const manual = normalizeChartWorkspace({ ...fallback, tabs: [{ ...fallback.tabs[0], tradeContract: "mesz26" }] }, fallback);
+    expect(manual.tabs[0].tradeContract).toBe("MESZ26");
+  });
+
   it("defaults legacy workspaces to unrestricted entry rules", () => {
     const result = normalizeChartWorkspace({ ...fallback, entryRules: undefined }, fallback);
     expect(result.entryRules.long.children).toEqual([]);

@@ -17,6 +17,7 @@ interface Props {
   kind: ChartKind;
   magnetEnabled: boolean;
   symbol: string;
+  tradeSymbol?: string;
   description: string;
   exchange: string;
   minMove: number;
@@ -49,7 +50,7 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, kind, magnetEnabled, symbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -80,7 +81,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
   const movingDrawingIdRef = useRef<string | null>(null);
   const latest = hovered ?? bars.at(-1) ?? null;
   const change = latest ? latest.close - latest.open : 0;
-  const tradeLines = buildTradeLines(symbol, positions, orders);
+  const tradeLines = buildTradeLines(tradeSymbol, positions, orders);
 
   barsRef.current = bars;
   magnetEnabledRef.current = magnetEnabled;
@@ -286,12 +287,12 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
 
     tradeLineRefs.current.forEach((line) => price.removePriceLine(line));
     const next = new Map<string, IPriceLine>();
-    buildTradeLines(symbol, positions, orders).forEach((line) => {
+    buildTradeLines(tradeSymbol, positions, orders).forEach((line) => {
       next.set(line.id, price.createPriceLine({ price: line.price, color: line.color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: "" }));
     });
     tradeLineRefs.current = next;
     requestAnimationFrame(() => syncTradeLabelsRef.current());
-  }, [orders, positions, symbol, chartGeneration]);
+  }, [orders, positions, tradeSymbol, chartGeneration]);
 
   useEffect(() => {
     if (!draggingOrder?.id) return;
@@ -436,7 +437,8 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, description, e
         const dragging = draggingOrder?.id === line.order?.id;
         const pending = line.order && replacingOrderIds.has(line.order.id);
         const displayPrice = dragging ? draggingOrder?.price ?? line.price : line.price;
-        const label = line.kind === "position" ? `${line.side.toUpperCase()} ${line.quantity}` : line.kind === "take-profit" ? `TP ${line.quantity}` : line.kind === "stop-loss" ? `SL ${line.quantity}` : `${line.side.toUpperCase()} ${line.quantity}`;
+        const contractPrefix = tradeSymbol && tradeSymbol !== symbol ? `${tradeSymbol} ` : "";
+        const label = line.kind === "position" ? `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}` : line.kind === "take-profit" ? `${contractPrefix}TP ${line.quantity}` : line.kind === "stop-loss" ? `${contractPrefix}SL ${line.quantity}` : `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`;
         return <div
           key={line.id}
           className={`trade-line-label ${line.kind} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}

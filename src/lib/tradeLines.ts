@@ -22,9 +22,10 @@ export function isBracketExit(order: OrderUpdate): boolean {
   );
 }
 
-export function buildTradeLines(symbol: string, positions: Position[], orders: OrderUpdate[]): TradeLineModel[] {
+export function buildTradeLines(tradeSymbol: string | undefined, positions: Position[], orders: OrderUpdate[]): TradeLineModel[] {
+  if (!tradeSymbol) return [];
   const positionLines = positions
-    .filter((position) => position.symbol === symbol && position.quantity > 0)
+    .filter((position) => position.symbol === tradeSymbol && position.quantity > 0)
     .map((position): TradeLineModel => ({
       id: `position:${position.id}`,
       kind: "position",
@@ -36,7 +37,7 @@ export function buildTradeLines(symbol: string, positions: Position[], orders: O
       position,
     }));
   const orderLines = orders.flatMap((order): TradeLineModel[] => {
-    if (order.symbol !== symbol || order.status !== "Working") return [];
+    if (order.symbol !== tradeSymbol || order.status !== "Working") return [];
     const price = order.price ?? order.stopPrice;
     if (price == null || price <= 0) return [];
     const bracket = isBracketExit(order);

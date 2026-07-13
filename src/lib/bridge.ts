@@ -42,6 +42,12 @@ export const api = {
     if (!match) throw new Error(`Symbol details unavailable for ${symbol}`);
     return match;
   },
+  async futureContracts(root: string): Promise<SymbolMeta[]> {
+    if (isTauri) return native("get_future_contracts", { root });
+    return futures
+      .filter((item) => item.root === root.toUpperCase() && !item.symbol.startsWith("@") && item.expiration)
+      .sort((left, right) => (left.expiration ?? "").localeCompare(right.expiration ?? ""));
+  },
   async bars(symbol: string, timeframe: Timeframe): Promise<Bar[]> {
     if (isTauri) return native("get_bars", { symbol, timeframe });
     const base = symbol.startsWith("MNQ") ? 23010 : symbol.startsWith("MCL") ? 67 : symbol.startsWith("MGC") ? 3450 : symbol.startsWith("MYM") ? 44920 : 6218;

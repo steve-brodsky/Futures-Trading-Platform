@@ -1,11 +1,13 @@
 import type { Account, AccountBalance, Bar, OrderUpdate, Position, Quote, SymbolMeta } from "../types";
 
 export const futures: SymbolMeta[] = [
-  { symbol: "MESU26", description: "Micro E-mini S&P 500 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5, expiration: "2026-09-18" },
-  { symbol: "MNQU26", description: "Micro E-mini Nasdaq-100 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 2, expiration: "2026-09-18" },
-  { symbol: "MCLU26", description: "Micro WTI Crude Oil Sep 2026", exchange: "NYMEX", assetType: "FUTURE", minMove: 0.01, pointValue: 100, expiration: "2026-08-20" },
-  { symbol: "MGCQ26", description: "Micro Gold Aug 2026", exchange: "COMEX", assetType: "FUTURE", minMove: 0.1, pointValue: 10, expiration: "2026-07-29" },
-  { symbol: "MYMU26", description: "Micro E-mini Dow Sep 2026", exchange: "CBOT", assetType: "FUTURE", minMove: 1, pointValue: 0.5, expiration: "2026-09-18" },
+  { symbol: "@MES", root: "MES", underlying: "MESU26", description: "Micro E-mini S&P 500 Continuous", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5 },
+  { symbol: "MESU26", root: "MES", description: "Micro E-mini S&P 500 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5, expiration: "2026-09-18" },
+  { symbol: "MESZ26", root: "MES", description: "Micro E-mini S&P 500 Dec 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5, expiration: "2026-12-18" },
+  { symbol: "MNQU26", root: "MNQ", description: "Micro E-mini Nasdaq-100 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 2, expiration: "2026-09-18" },
+  { symbol: "MCLU26", root: "MCL", description: "Micro WTI Crude Oil Sep 2026", exchange: "NYMEX", assetType: "FUTURE", minMove: 0.01, pointValue: 100, expiration: "2026-08-20" },
+  { symbol: "MGCQ26", root: "MGC", description: "Micro Gold Aug 2026", exchange: "COMEX", assetType: "FUTURE", minMove: 0.1, pointValue: 10, expiration: "2026-07-29" },
+  { symbol: "MYMU26", root: "MYM", description: "Micro E-mini Dow Sep 2026", exchange: "CBOT", assetType: "FUTURE", minMove: 1, pointValue: 0.5, expiration: "2026-09-18" },
 ];
 
 function noise(index: number) {

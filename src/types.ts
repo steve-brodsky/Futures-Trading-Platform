@@ -45,6 +45,8 @@ export interface SymbolMeta {
   minMove: number;
   pointValue: number;
   expiration?: string;
+  root?: string;
+  underlying?: string;
 }
 
 export interface Position {
@@ -205,6 +207,8 @@ export interface ChartTabState {
   indicators: IndicatorConfig[];
   chartTimezone: ChartTimezone;
   magnetEnabled: boolean;
+  /** Concrete contract override for a continuous chart. Undefined means Auto. */
+  tradeContract?: string;
 }
 
 export interface ChartWindowState {
