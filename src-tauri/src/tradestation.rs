@@ -421,23 +421,7 @@ impl TradeStation {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .map(|item| Position {
-                id: string(item, "PositionID"),
-                symbol: string(item, "Symbol"),
-                side: string(item, "LongShort"),
-                quantity: number(item, "Quantity"),
-                average_price: number(item, "AveragePrice"),
-                last: number(item, "Last"),
-                unrealized_pnl: number(item, "UnrealizedProfitLoss"),
-                bid: optional_number(item, "Bid"),
-                ask: optional_number(item, "Ask"),
-                unrealized_pnl_percent: optional_number(item, "UnrealizedProfitLossPercent"),
-                unrealized_pnl_quantity: optional_number(item, "UnrealizedProfitLossQty"),
-                initial_requirement: optional_number(item, "InitialRequirement"),
-                maintenance_margin: optional_number(item, "MaintenanceMargin"),
-                market_value: optional_number(item, "MarketValue"),
-                timestamp: optional_string(item, "Timestamp"),
-            })
+            .map(position_from_value)
             .collect())
     }
 
@@ -625,7 +609,7 @@ impl TradeStation {
                 "Only working orders can be repositioned".into(),
             ));
         }
-        if order.open_or_close.as_deref() != Some("Close") || !is_bracket_order(&order) {
+        if !is_close_order(&order) || !is_bracket_order(&order) {
             return Err(AppError::Validation(
                 "Only bracket take-profit and stop-loss orders can be repositioned".into(),
             ));
@@ -953,14 +937,22 @@ fn normalize_order_status(status: &str) -> &'static str {
 }
 
 fn is_bracket_order(order: &OrderUpdate) -> bool {
+    order.group_name.as_deref().is_some_and(|name| {
+        let name = name.to_ascii_uppercase();
+        name.starts_with("OCO") || name.starts_with("BRK")
+    }) || order.related_orders.iter().any(|related| {
+        matches!(
+            related.relationship.to_ascii_uppercase().as_str(),
+            "OCO" | "BRK" | "BRACKET"
+        )
+    })
+}
+
+fn is_close_order(order: &OrderUpdate) -> bool {
     order
-        .group_name
+        .open_or_close
         .as_deref()
-        .is_some_and(|name| name.to_ascii_uppercase().starts_with("OCO"))
-        || order
-            .related_orders
-            .iter()
-            .any(|related| related.relationship.eq_ignore_ascii_case("OCO"))
+        .is_some_and(|value| value.eq_ignore_ascii_case("Close"))
 }
 
 fn closing_orders_for_position<'a>(
@@ -973,18 +965,16 @@ fn closing_orders_for_position<'a>(
         .filter(|order| {
             order.account_id.as_deref() == Some(account_id)
                 && order.symbol == symbol
-                && order.open_or_close.as_deref() == Some("Close")
+                && is_close_order(order)
                 && matches!(order.status.as_str(), "Working" | "Indeterminate")
         })
         .collect()
 }
 
 fn flatten_draft(account_id: &str, position: &Position) -> Result<OrderDraft, AppError> {
-    let rounded = position.quantity.round();
-    if position.quantity <= 0.0
-        || (position.quantity - rounded).abs() > 1e-8
-        || rounded > u32::MAX as f64
-    {
+    let quantity = position.quantity.abs();
+    let rounded = quantity.round();
+    if quantity <= 0.0 || (quantity - rounded).abs() > 1e-8 || rounded > u32::MAX as f64 {
         return Err(AppError::Validation(
             "Position quantity cannot be flattened as a futures order".into(),
         ));
@@ -1006,6 +996,28 @@ fn flatten_draft(account_id: &str, position: &Position) -> Result<OrderDraft, Ap
         take_profit: None,
         stop_loss: None,
     })
+}
+
+fn position_from_value(item: &Value) -> Position {
+    Position {
+        id: string(item, "PositionID"),
+        symbol: string(item, "Symbol"),
+        side: string(item, "LongShort"),
+        // LongShort is authoritative for direction. Normalize signed quantities
+        // to an absolute futures contract count for display and flattening.
+        quantity: number(item, "Quantity").abs(),
+        average_price: number(item, "AveragePrice"),
+        last: number(item, "Last"),
+        unrealized_pnl: number(item, "UnrealizedProfitLoss"),
+        bid: optional_number(item, "Bid"),
+        ask: optional_number(item, "Ask"),
+        unrealized_pnl_percent: optional_number(item, "UnrealizedProfitLossPercent"),
+        unrealized_pnl_quantity: optional_number(item, "UnrealizedProfitLossQty"),
+        initial_requirement: optional_number(item, "InitialRequirement"),
+        maintenance_margin: optional_number(item, "MaintenanceMargin"),
+        market_value: optional_number(item, "MarketValue"),
+        timestamp: optional_string(item, "Timestamp"),
+    }
 }
 
 fn replacement_payload(order: &OrderUpdate, new_price: f64) -> Result<Value, AppError> {
@@ -1439,6 +1451,15 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_brk_groups_and_case_insensitive_close_metadata() {
+        let mut order = sample_order("1");
+        order.group_name = Some("BRK 123".into());
+        order.open_or_close = Some("CLOSE".into());
+        assert!(is_bracket_order(&order));
+        assert!(is_close_order(&order));
+    }
+
+    #[test]
     fn replacement_payload_uses_the_protective_order_price_field() {
         let limit = sample_order("1");
         assert_eq!(
@@ -1487,9 +1508,19 @@ mod tests {
     fn flatten_draft_uses_current_quantity_and_opposite_side() {
         let long = flatten_draft("account-1", &sample_position("Long", 2.0)).unwrap();
         assert_eq!((long.side.as_str(), long.quantity), ("Sell", 2));
-        let reduced = flatten_draft("account-1", &sample_position("Short", 1.0)).unwrap();
+        let reduced = flatten_draft("account-1", &sample_position("Short", -1.0)).unwrap();
         assert_eq!((reduced.side.as_str(), reduced.quantity), ("Buy", 1));
         assert!(flatten_draft("account-1", &sample_position("Long", 0.0)).is_err());
+    }
+
+    #[test]
+    fn position_parser_normalizes_signed_futures_quantities() {
+        let position = position_from_value(&json!({
+            "PositionID": "p1", "Symbol": "MESU26", "LongShort": "Short",
+            "Quantity": "-2", "AveragePrice": "6250"
+        }));
+        assert_eq!(position.side, "Short");
+        assert_eq!(position.quantity, 2.0);
     }
 
     #[test]

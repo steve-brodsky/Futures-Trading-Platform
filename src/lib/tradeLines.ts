@@ -16,23 +16,24 @@ export interface TradeLineModel {
 }
 
 export function isBracketExit(order: OrderUpdate): boolean {
-  return order.openOrClose === "Close" && (
-    order.groupName?.toUpperCase().startsWith("OCO") === true
-    || order.relatedOrders?.some((related) => related.relationship.toUpperCase() === "OCO") === true
+  const groupName = order.groupName?.toUpperCase() ?? "";
+  return order.openOrClose?.toUpperCase() === "CLOSE" && (
+    groupName.startsWith("OCO") || groupName.startsWith("BRK")
+    || order.relatedOrders?.some((related) => ["OCO", "BRK", "BRACKET"].includes(related.relationship.toUpperCase())) === true
   );
 }
 
 export function buildTradeLines(tradeSymbol: string | undefined, positions: Position[], orders: OrderUpdate[]): TradeLineModel[] {
   if (!tradeSymbol) return [];
   const positionLines = positions
-    .filter((position) => position.symbol === tradeSymbol && position.quantity > 0)
+    .filter((position) => position.symbol === tradeSymbol && Math.abs(position.quantity) > 0)
     .map((position): TradeLineModel => ({
       id: `position:${position.id}`,
       kind: "position",
       price: position.averagePrice,
       color: "#37d5e8",
       side: position.side,
-      quantity: position.quantity,
+      quantity: Math.abs(position.quantity),
       draggable: false,
       position,
     }));
@@ -66,7 +67,7 @@ export function flattenOrderDraft(accountId: string, position: Position): OrderD
     symbol: position.symbol,
     side: position.side === "Long" ? "Sell" : "Buy",
     type: "Market",
-    quantity: position.quantity,
+    quantity: Math.abs(position.quantity),
     duration: "DAY",
   };
 }

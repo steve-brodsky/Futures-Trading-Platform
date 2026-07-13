@@ -296,59 +296,19 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
 
   useEffect(() => {
     if (!draggingOrder?.id) return;
-    const restoreChartScroll = () => chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
-    const restoreOriginalPrice = () => {
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
       const current = draggingOrderRef.current;
       if (!current) return;
       tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: current.originalPrice });
       requestAnimationFrame(() => syncTradeLabelsRef.current());
-    };
-    const move = (event: PointerEvent) => {
-      const current = draggingOrderRef.current;
-      const price = priceRef.current;
-      const bounds = host.current?.getBoundingClientRect();
-      if (!current || !price || !bounds) return;
-      const rawPrice = price.coordinateToPrice(event.clientY - bounds.top);
-      if (rawPrice == null) return;
-      const snapped = snapTradeLinePrice(rawPrice, minMove);
-      if (snapped == null) return;
-      const next = { ...current, price: snapped };
-      draggingOrderRef.current = next;
-      setDraggingOrder(next);
-      tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: snapped });
-      syncTradeLabelsRef.current();
-    };
-    const finish = () => {
-      const current = draggingOrderRef.current;
-      if (current && !tradeLinePriceChanged(current.originalPrice, current.price, minMove)) {
-        tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: current.originalPrice });
-      }
       draggingOrderRef.current = null;
       setDraggingOrder(null);
-      restoreChartScroll();
-      if (!current || !tradeLinePriceChanged(current.originalPrice, current.price, minMove)) {
-        requestAnimationFrame(() => syncTradeLabelsRef.current());
-        return;
-      }
-      const order = orders.find((item) => item.id === current.id);
-      if (order) void onReplaceOrder(order, current.price);
+      chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
     };
-    const cancel = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      restoreOriginalPrice();
-      draggingOrderRef.current = null;
-      setDraggingOrder(null);
-      restoreChartScroll();
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", finish, { once: true });
     window.addEventListener("keydown", cancel);
-    return () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", finish);
-      window.removeEventListener("keydown", cancel);
-    };
-  }, [draggingOrder?.id, minMove, onReplaceOrder, orders]);
+    return () => window.removeEventListener("keydown", cancel);
+  }, [draggingOrder?.id]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -421,6 +381,51 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
     chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: false, horzTouchDrag: false, vertTouchDrag: false } });
   };
 
+  const moveOrderDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = draggingOrderRef.current;
+    const price = priceRef.current;
+    const bounds = host.current?.getBoundingClientRect();
+    if (!current || !price || !bounds) return;
+    event.preventDefault();
+    const rawPrice = price.coordinateToPrice(event.clientY - bounds.top);
+    if (rawPrice == null) return;
+    const snapped = snapTradeLinePrice(rawPrice, minMove);
+    if (snapped == null) return;
+    const next = { ...current, price: snapped };
+    draggingOrderRef.current = next;
+    setDraggingOrder(next);
+    tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: snapped });
+    syncTradeLabelsRef.current();
+  };
+
+  const finishOrderDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = draggingOrderRef.current;
+    if (!current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    const changed = tradeLinePriceChanged(current.originalPrice, current.price, minMove);
+    if (!changed) tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: current.originalPrice });
+    draggingOrderRef.current = null;
+    setDraggingOrder(null);
+    chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
+    if (!changed) return;
+    const order = orders.find((item) => item.id === current.id);
+    if (order) void onReplaceOrder(order, current.price);
+  };
+
+  const cancelOrderDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = draggingOrderRef.current;
+    if (!current) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: current.originalPrice });
+    draggingOrderRef.current = null;
+    setDraggingOrder(null);
+    chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
+  };
+
   const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
 
   return (
@@ -444,6 +449,9 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
           className={`trade-line-label ${line.kind} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}
           style={{ top }}
           onPointerDown={line.draggable && line.order ? (event) => startOrderDrag(event, line.order!, line.price) : undefined}
+          onPointerMove={line.draggable ? moveOrderDrag : undefined}
+          onPointerUp={line.draggable ? finishOrderDrag : undefined}
+          onPointerCancel={line.draggable ? cancelOrderDrag : undefined}
           title={line.draggable ? "Drag to replace this protective order" : undefined}
         >
           <span>{pending ? "UPDATING" : label}</span><strong>{displayPrice.toFixed(pricePrecision(minMove))}</strong>

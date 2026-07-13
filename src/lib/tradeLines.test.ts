@@ -21,6 +21,11 @@ describe("chart trade lines", () => {
     expect(line.draggable).toBe(false);
   });
 
+  it("recognizes TradeStation BRK groups and case-insensitive close metadata", () => {
+    const [line] = buildTradeLines("MES", [], [{ ...baseOrder, openOrClose: "Close", groupName: "BRK 123" }]);
+    expect(line).toMatchObject({ kind: "take-profit", draggable: true });
+  });
+
   it("shows only the selected concrete contract on a continuous chart", () => {
     const selected = { ...position, symbol: "MESU26" };
     const other = { ...position, id: "p2", symbol: "MESZ26" };
@@ -32,6 +37,12 @@ describe("chart trade lines", () => {
   it("builds the opposite-side flatten market draft", () => {
     expect(flattenOrderDraft("account", position)).toMatchObject({ side: "Sell", quantity: 2, type: "Market" });
     expect(flattenOrderDraft("account", { ...position, side: "Short" })).toMatchObject({ side: "Buy" });
+    expect(flattenOrderDraft("account", { ...position, side: "Short", quantity: -2 })).toMatchObject({ side: "Buy", quantity: 2 });
+  });
+
+  it("draws signed broker quantities as absolute contract counts", () => {
+    const [line] = buildTradeLines("MES", [{ ...position, side: "Short", quantity: -2 }], []);
+    expect(line).toMatchObject({ kind: "position", side: "Short", quantity: 2 });
   });
 
   it("snaps drag previews and ignores unchanged drops", () => {
