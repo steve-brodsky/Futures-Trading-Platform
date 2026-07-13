@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrderUpdate, Position } from "../types";
-import { buildTradeLines, flattenOrderDraft, isPositionExit, snapTradeLinePrice, tradeLinePriceChanged, withOrderPrice } from "./tradeLines";
+import { buildProjectedTradeLines, buildTradeLines, flattenOrderDraft, isPositionExit, snapTradeLinePrice, tradeLinePriceChanged, withOrderPrice } from "./tradeLines";
 
 const position: Position = { id: "p1", symbol: "MES", side: "Long", quantity: 2, averagePrice: 6250, last: 6251, unrealizedPnl: 10 };
 const baseOrder: OrderUpdate = { id: "o1", symbol: "MES", side: "Sell", type: "Limit", quantity: 2, price: 6260, status: "Working", timestamp: "", openOrClose: "Close", groupName: "OCO 1" };
@@ -9,7 +9,7 @@ describe("chart trade lines", () => {
   it("classifies positions and bracket exits", () => {
     const lines = buildTradeLines("MES", [position], [baseOrder, { ...baseOrder, id: "o2", type: "StopMarket", price: undefined, stopPrice: 6240 }]);
     expect(lines.map((line) => [line.kind, line.draggable, line.color])).toEqual([
-      ["position", false, "#37d5e8"],
+      ["position", false, "#16c79a"],
       ["take-profit", true, "#16c79a"],
       ["stop-loss", true, "#ef466f"],
     ]);
@@ -54,7 +54,15 @@ describe("chart trade lines", () => {
 
   it("draws signed broker quantities as absolute contract counts", () => {
     const [line] = buildTradeLines("MES", [{ ...position, side: "Short", quantity: -2 }], []);
-    expect(line).toMatchObject({ kind: "position", side: "Short", quantity: 2 });
+    expect(line).toMatchObject({ kind: "position", side: "Short", quantity: 2, color: "#ef466f" });
+  });
+
+  it("builds green and red projected exit lines from non-empty ticket prices", () => {
+    expect(buildProjectedTradeLines({ takeProfit: 6260, stopLoss: 6240 }).map((line) => [line.kind, line.price, line.color])).toEqual([
+      ["projected-take-profit", 6260, "#16c79a"],
+      ["projected-stop-loss", 6240, "#ef466f"],
+    ]);
+    expect(buildProjectedTradeLines({ takeProfit: undefined, stopLoss: Number.NaN })).toEqual([]);
   });
 
   it("snaps drag previews and ignores unchanged drops", () => {

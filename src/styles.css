@@ -106,9 +106,12 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .trade-line-label { position: absolute; z-index: 7; right: 74px; height: 21px; display: flex; align-items: center; transform: translateY(-50%); border: 1px solid currentColor; border-radius: 3px 0 0 3px; color: #f0b84b; background: rgba(28,24,16,.96); box-shadow: 0 2px 8px rgba(0,0,0,.34); font: 600 8px DM Mono, monospace; user-select: none; touch-action: none; }
 .trade-line-label > span { padding: 0 6px; letter-spacing: .05em; }
 .trade-line-label > strong { align-self: stretch; display: flex; align-items: center; padding: 0 6px; border-left: 1px solid currentColor; color: #eef3f8; font-weight: 600; background: rgba(5,8,12,.28); }
-.trade-line-label.position { color: var(--cyan); background: rgba(10,35,40,.96); }
+.trade-line-label.position.long { color: var(--green); background: rgba(8,34,28,.96); }
+.trade-line-label.position.short { color: var(--red); background: rgba(42,12,20,.96); }
 .trade-line-label.take-profit { color: var(--green); background: rgba(8,34,28,.96); }
 .trade-line-label.stop-loss { color: var(--red); background: rgba(42,12,20,.96); }
+.trade-line-label.projected-take-profit { color: var(--green); background: rgba(8,34,28,.78); border-style: dashed; opacity: .76; }
+.trade-line-label.projected-stop-loss { color: var(--red); background: rgba(42,12,20,.78); border-style: dashed; opacity: .76; }
 .trade-line-label.draggable { cursor: ns-resize; }
 .trade-line-label.draggable:hover { filter: brightness(1.16); }
 .trade-line-label.pending { opacity: .66; cursor: wait; }

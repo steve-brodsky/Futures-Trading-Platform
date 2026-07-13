@@ -10,7 +10,7 @@ import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
 import { HorizontalRayPrimitive, nearestChartTime } from "../lib/horizontalRay";
-import { buildTradeLines, snapTradeLinePrice, tradeLinePriceChanged } from "../lib/tradeLines";
+import { buildProjectedTradeLines, buildTradeLines, snapTradeLinePrice, tradeLinePriceChanged, type OrderProjection } from "../lib/tradeLines";
 
 interface Props {
   bars: Bar[];
@@ -26,6 +26,7 @@ interface Props {
   indicators: IndicatorConfig[];
   orders: OrderUpdate[];
   positions: Position[];
+  orderProjection?: OrderProjection;
   closingPositionIds: Set<string>;
   replacingOrderIds: Set<string>;
   onClosePosition: (position: Position) => void;
@@ -50,7 +51,7 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, orderProjection, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -81,7 +82,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
   const movingDrawingIdRef = useRef<string | null>(null);
   const latest = hovered ?? bars.at(-1) ?? null;
   const change = latest ? latest.close - latest.open : 0;
-  const tradeLines = buildTradeLines(tradeSymbol, positions, orders);
+  const tradeLines = [...buildTradeLines(tradeSymbol, positions, orders), ...buildProjectedTradeLines(orderProjection)];
 
   barsRef.current = bars;
   magnetEnabledRef.current = magnetEnabled;
@@ -287,12 +288,13 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
 
     tradeLineRefs.current.forEach((line) => price.removePriceLine(line));
     const next = new Map<string, IPriceLine>();
-    buildTradeLines(tradeSymbol, positions, orders).forEach((line) => {
-      next.set(line.id, price.createPriceLine({ price: line.price, color: line.color, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: "" }));
+    [...buildTradeLines(tradeSymbol, positions, orders), ...buildProjectedTradeLines(orderProjection)].forEach((line) => {
+      const projected = line.kind === "projected-take-profit" || line.kind === "projected-stop-loss";
+      next.set(line.id, price.createPriceLine({ price: line.price, color: line.color, lineWidth: 1, lineStyle: projected ? LineStyle.Dotted : LineStyle.Dashed, axisLabelVisible: false, title: "" }));
     });
     tradeLineRefs.current = next;
     requestAnimationFrame(() => syncTradeLabelsRef.current());
-  }, [orders, positions, tradeSymbol, chartGeneration]);
+  }, [orders, positions, tradeSymbol, orderProjection?.takeProfit, orderProjection?.stopLoss, chartGeneration]);
 
   useEffect(() => {
     if (!draggingOrder?.id) return;
@@ -443,10 +445,15 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
         const pending = line.order && replacingOrderIds.has(line.order.id);
         const displayPrice = dragging ? draggingOrder?.price ?? line.price : line.price;
         const contractPrefix = tradeSymbol && tradeSymbol !== symbol ? `${tradeSymbol} ` : "";
-        const label = line.kind === "position" ? `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}` : line.kind === "take-profit" ? `${contractPrefix}TP ${line.quantity}` : line.kind === "stop-loss" ? `${contractPrefix}SL ${line.quantity}` : `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`;
+        const label = line.kind === "position" ? `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`
+          : line.kind === "take-profit" ? `${contractPrefix}TP ${line.quantity}`
+            : line.kind === "stop-loss" ? `${contractPrefix}SL ${line.quantity}`
+              : line.kind === "projected-take-profit" ? "PROJECTED TP"
+                : line.kind === "projected-stop-loss" ? "PROJECTED SL"
+                  : `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`;
         return <div
           key={line.id}
-          className={`trade-line-label ${line.kind} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}
+          className={`trade-line-label ${line.kind} ${line.kind === "position" ? line.side.toLowerCase() : ""} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}
           style={{ top }}
           onPointerDown={line.draggable && line.order ? (event) => startOrderDrag(event, line.order!, line.price) : undefined}
           onPointerMove={line.draggable ? moveOrderDrag : undefined}

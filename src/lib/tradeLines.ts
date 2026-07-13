@@ -1,7 +1,12 @@
 import type { OrderDraft, OrderUpdate, Position } from "../types";
 import { roundToTick } from "./indicators";
 
-export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "order";
+export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "projected-take-profit" | "projected-stop-loss" | "order";
+
+export interface OrderProjection {
+  takeProfit?: number;
+  stopLoss?: number;
+}
 
 export interface TradeLineModel {
   id: string;
@@ -43,7 +48,7 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
       id: `position:${position.id}`,
       kind: "position",
       price: position.averagePrice,
-      color: "#37d5e8",
+      color: position.side === "Long" ? "#16c79a" : "#ef466f",
       side: position.side,
       quantity: Math.abs(position.quantity),
       draggable: false,
@@ -71,6 +76,18 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
     }];
   });
   return [...positionLines, ...orderLines];
+}
+
+export function buildProjectedTradeLines(projection?: OrderProjection): TradeLineModel[] {
+  if (!projection) return [];
+  const lines: TradeLineModel[] = [];
+  if (projection.takeProfit != null && Number.isFinite(projection.takeProfit) && projection.takeProfit > 0) {
+    lines.push({ id: "projection:take-profit", kind: "projected-take-profit", price: projection.takeProfit, color: "#16c79a", side: "", quantity: 0, draggable: false });
+  }
+  if (projection.stopLoss != null && Number.isFinite(projection.stopLoss) && projection.stopLoss > 0) {
+    lines.push({ id: "projection:stop-loss", kind: "projected-stop-loss", price: projection.stopLoss, color: "#ef466f", side: "", quantity: 0, draggable: false });
+  }
+  return lines;
 }
 
 export function flattenOrderDraft(accountId: string, position: Position): OrderDraft {
