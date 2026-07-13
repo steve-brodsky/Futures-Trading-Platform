@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrderUpdate, Position } from "../types";
-import { buildTradeLines, flattenOrderDraft, snapTradeLinePrice, tradeLinePriceChanged, withOrderPrice } from "./tradeLines";
+import { buildTradeLines, flattenOrderDraft, isPositionExit, snapTradeLinePrice, tradeLinePriceChanged, withOrderPrice } from "./tradeLines";
 
 const position: Position = { id: "p1", symbol: "MES", side: "Long", quantity: 2, averagePrice: 6250, last: 6251, unrealizedPnl: 10 };
 const baseOrder: OrderUpdate = { id: "o1", symbol: "MES", side: "Sell", type: "Limit", quantity: 2, price: 6260, status: "Working", timestamp: "", openOrClose: "Close", groupName: "OCO 1" };
@@ -24,6 +24,18 @@ describe("chart trade lines", () => {
   it("recognizes TradeStation BRK groups and case-insensitive close metadata", () => {
     const [line] = buildTradeLines("MES", [], [{ ...baseOrder, openOrClose: "Close", groupName: "BRK 123" }]);
     expect(line).toMatchObject({ kind: "take-profit", draggable: true });
+  });
+
+  it("infers unlabeled protective exits from the live position side", () => {
+    const shortPosition = { ...position, side: "Short" as const, quantity: 1 };
+    const takeProfit = { ...baseOrder, side: "Buy" as const, openOrClose: undefined, groupName: undefined };
+    const stopLoss = { ...takeProfit, id: "o2", type: "StopMarket" as const, price: undefined, stopPrice: 6270 };
+    expect(isPositionExit(takeProfit, [shortPosition])).toBe(true);
+    expect(buildTradeLines("MES", [shortPosition], [takeProfit, stopLoss]).map((line) => [line.kind, line.draggable])).toEqual([
+      ["position", false],
+      ["take-profit", true],
+      ["stop-loss", true],
+    ]);
   });
 
   it("shows only the selected concrete contract on a continuous chart", () => {

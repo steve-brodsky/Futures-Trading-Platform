@@ -609,7 +609,11 @@ impl TradeStation {
                 "Only working orders can be repositioned".into(),
             ));
         }
-        if !is_close_order(&order) || !is_bracket_order(&order) {
+        let positions = self.positions(account_id).await?;
+        let position = positions
+            .iter()
+            .find(|position| position.symbol == order.symbol);
+        if !is_protective_order(&order, position) {
             return Err(AppError::Validation(
                 "Only bracket take-profit and stop-loss orders can be repositioned".into(),
             ));
@@ -665,7 +669,7 @@ impl TradeStation {
             .find(|position| position.id == position_id)
             .ok_or_else(|| AppError::Validation("The position is no longer open".into()))?;
         let orders = self.orders(account_id).await?;
-        let relevant = closing_orders_for_position(&orders, account_id, &position.symbol);
+        let relevant = closing_orders_for_position(&orders, account_id, &position);
         if relevant.iter().any(|order| order.status == "Indeterminate") {
             return Ok(aborted_close(
                 position_id,
@@ -955,17 +959,39 @@ fn is_close_order(order: &OrderUpdate) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("Close"))
 }
 
+fn is_opposite_position_side(order: &OrderUpdate, position: &Position) -> bool {
+    let closing_side = if position.side.eq_ignore_ascii_case("Long") {
+        "Sell"
+    } else if position.side.eq_ignore_ascii_case("Short") {
+        "Buy"
+    } else {
+        return false;
+    };
+    order.side.eq_ignore_ascii_case(closing_side)
+}
+
+fn is_protective_order(order: &OrderUpdate, position: Option<&Position>) -> bool {
+    let inferred_from_position =
+        position.is_some_and(|position| is_opposite_position_side(order, position));
+    matches!(order.order_type.as_str(), "Limit" | "StopMarket")
+        && (is_close_order(order) || inferred_from_position)
+        && (is_bracket_order(order) || inferred_from_position)
+}
+
 fn closing_orders_for_position<'a>(
     orders: &'a [OrderUpdate],
     account_id: &str,
-    symbol: &str,
+    position: &Position,
 ) -> Vec<&'a OrderUpdate> {
     orders
         .iter()
         .filter(|order| {
-            order.account_id.as_deref() == Some(account_id)
-                && order.symbol == symbol
-                && is_close_order(order)
+            order
+                .account_id
+                .as_deref()
+                .is_none_or(|value| value == account_id)
+                && order.symbol == position.symbol
+                && (is_close_order(order) || is_opposite_position_side(order, position))
                 && matches!(order.status.as_str(), "Working" | "Indeterminate")
         })
         .collect()
@@ -1485,9 +1511,11 @@ mod tests {
 
     #[test]
     fn close_order_selection_is_scoped_to_account_symbol_and_close_side() {
+        let position = sample_position("Long", 2.0);
         let included = sample_order("1");
         let mut opening = sample_order("2");
         opening.open_or_close = Some("Open".into());
+        opening.side = "Buy".into();
         let mut other_symbol = sample_order("3");
         other_symbol.symbol = "MNQU26".into();
         let mut other_account = sample_order("4");
@@ -1496,11 +1524,36 @@ mod tests {
         filled.status = "Filled".into();
         let orders = vec![included, opening, other_symbol, other_account, filled];
         assert_eq!(
-            closing_orders_for_position(&orders, "account-1", "MESU26")
+            closing_orders_for_position(&orders, "account-1", &position)
                 .iter()
                 .map(|order| order.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["1"]
+        );
+    }
+
+    #[test]
+    fn infers_unlabeled_exits_from_the_position_side() {
+        let position = sample_position("Short", 1.0);
+        let mut take_profit = sample_order("1");
+        take_profit.side = "Buy".into();
+        take_profit.open_or_close = None;
+        take_profit.group_name = None;
+        let mut stop_loss = take_profit.clone();
+        stop_loss.id = "2".into();
+        stop_loss.order_type = "StopMarket".into();
+        stop_loss.price = None;
+        stop_loss.stop_price = Some(6259.0);
+        let orders = vec![take_profit, stop_loss];
+        assert!(orders
+            .iter()
+            .all(|order| is_protective_order(order, Some(&position))));
+        assert_eq!(
+            closing_orders_for_position(&orders, "account-1", &position)
+                .iter()
+                .map(|order| order.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["1", "2"]
         );
     }
 

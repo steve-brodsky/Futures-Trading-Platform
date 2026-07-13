@@ -23,6 +23,18 @@ export function isBracketExit(order: OrderUpdate): boolean {
   );
 }
 
+export function isPositionExit(order: OrderUpdate, positions: Position[]): boolean {
+  if (!matchesProtectiveType(order)) return false;
+  const position = positions.find((item) => item.symbol === order.symbol && Math.abs(item.quantity) > 0);
+  if (!position) return false;
+  const closingSide = position.side === "Long" ? "SELL" : "BUY";
+  return order.side.toUpperCase() === closingSide;
+}
+
+function matchesProtectiveType(order: OrderUpdate): boolean {
+  return order.type === "Limit" || order.type === "StopMarket";
+}
+
 export function buildTradeLines(tradeSymbol: string | undefined, positions: Position[], orders: OrderUpdate[]): TradeLineModel[] {
   if (!tradeSymbol) return [];
   const positionLines = positions
@@ -41,10 +53,10 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
     if (order.symbol !== tradeSymbol || order.status !== "Working") return [];
     const price = order.price ?? order.stopPrice;
     if (price == null || price <= 0) return [];
-    const bracket = isBracketExit(order);
-    const kind: TradeLineKind = bracket && order.type === "Limit"
+    const protective = isBracketExit(order) || isPositionExit(order, positions);
+    const kind: TradeLineKind = protective && order.type === "Limit"
       ? "take-profit"
-      : bracket && order.type === "StopMarket"
+      : protective && order.type === "StopMarket"
         ? "stop-loss"
         : "order";
     return [{
