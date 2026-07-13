@@ -13,7 +13,7 @@ import { TradingChart } from "./components/TradingChart";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { api } from "./lib/bridge";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
-import { estimateOrderRisk, roundToTick, validateTick } from "./lib/indicators";
+import { estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { flattenOrderDraft, withOrderPrice, type OrderProjection } from "./lib/tradeLines";
@@ -931,7 +931,7 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
   const [duration, setDuration] = useState<"DAY" | "GTC">("DAY");
   const [takeProfit, setTakeProfit] = useState("");
   const [stopLoss, setStopLoss] = useState("");
-  const initializedLevelsRef = useRef("");
+  const ticketSymbolRef = useRef(symbol.symbol);
   const handledResetRef = useRef(`${symbol.symbol}:${resetEpoch}`);
 
   const projectionPrice = (value: string) => {
@@ -945,21 +945,12 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
   });
 
   useEffect(() => {
-    const key = `${symbol.symbol}:${side}`;
-    const entryPrice = side === "Buy" ? quote.ask : quote.bid;
-    if (initializedLevelsRef.current === key) return;
-    if (resetEpoch > 0 || orderProjection?.takeProfit != null || orderProjection?.stopLoss != null) {
-      initializedLevelsRef.current = key;
-      return;
-    }
-    if (entryPrice <= 0) return;
-    const nextTakeProfit = String(roundToTick(side === "Buy" ? entryPrice + symbol.minMove * 20 : entryPrice - symbol.minMove * 20, symbol.minMove));
-    const nextStopLoss = String(roundToTick(side === "Buy" ? entryPrice - symbol.minMove * 12 : entryPrice + symbol.minMove * 12, symbol.minMove));
-    setTakeProfit(nextTakeProfit);
-    setStopLoss(nextStopLoss);
-    publishProjection(nextTakeProfit, nextStopLoss);
-    initializedLevelsRef.current = key;
-  }, [symbol.symbol, symbol.minMove, side, quote.ask, quote.bid, resetEpoch]);
+    if (ticketSymbolRef.current === symbol.symbol) return;
+    ticketSymbolRef.current = symbol.symbol;
+    setTakeProfit("");
+    setStopLoss("");
+    onProjectionChange({});
+  }, [symbol.symbol]);
 
   useEffect(() => {
     const resetKey = `${symbol.symbol}:${resetEpoch}`;
@@ -968,7 +959,6 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
     if (resetEpoch <= 0) return;
     setTakeProfit("");
     setStopLoss("");
-    initializedLevelsRef.current = `${symbol.symbol}:${side}`;
     onProjectionChange({});
   }, [symbol.symbol, side, resetEpoch]);
 
