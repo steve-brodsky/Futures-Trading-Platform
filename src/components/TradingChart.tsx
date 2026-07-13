@@ -27,6 +27,7 @@ interface Props {
   orders: OrderUpdate[];
   positions: Position[];
   orderProjection?: OrderProjection;
+  onOrderProjectionChange: (field: keyof OrderProjection, price: number) => void;
   closingPositionIds: Set<string>;
   replacingOrderIds: Set<string>;
   onClosePosition: (position: Position) => void;
@@ -51,7 +52,7 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, orderProjection, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -78,6 +79,8 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
   const [tradeLineTops, setTradeLineTops] = useState<Record<string, number>>({});
   const [draggingOrder, setDraggingOrder] = useState<{ id: string; originalPrice: number; price: number } | null>(null);
   const draggingOrderRef = useRef<typeof draggingOrder>(null);
+  const [draggingProjection, setDraggingProjection] = useState<{ field: keyof OrderProjection; lineId: string; originalPrice: number; price: number } | null>(null);
+  const draggingProjectionRef = useRef<typeof draggingProjection>(null);
   const syncTradeLabelsRef = useRef<() => void>(() => undefined);
   const movingDrawingIdRef = useRef<string | null>(null);
   const latest = hovered ?? bars.at(-1) ?? null;
@@ -297,20 +300,26 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
   }, [orders, positions, tradeSymbol, orderProjection?.takeProfit, orderProjection?.stopLoss, chartGeneration]);
 
   useEffect(() => {
-    if (!draggingOrder?.id) return;
+    if (!draggingOrder?.id && !draggingProjection?.lineId) return;
     const cancel = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      const current = draggingOrderRef.current;
-      if (!current) return;
-      tradeLineRefs.current.get(`order:${current.id}`)?.applyOptions({ price: current.originalPrice });
+      const currentOrder = draggingOrderRef.current;
+      const currentProjection = draggingProjectionRef.current;
+      if (currentOrder) tradeLineRefs.current.get(`order:${currentOrder.id}`)?.applyOptions({ price: currentOrder.originalPrice });
+      if (currentProjection) {
+        tradeLineRefs.current.get(currentProjection.lineId)?.applyOptions({ price: currentProjection.originalPrice });
+        onOrderProjectionChange(currentProjection.field, currentProjection.originalPrice);
+      }
       requestAnimationFrame(() => syncTradeLabelsRef.current());
       draggingOrderRef.current = null;
       setDraggingOrder(null);
+      draggingProjectionRef.current = null;
+      setDraggingProjection(null);
       chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
     };
     window.addEventListener("keydown", cancel);
     return () => window.removeEventListener("keydown", cancel);
-  }, [draggingOrder?.id]);
+  }, [draggingOrder?.id, draggingProjection?.lineId, onOrderProjectionChange]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -428,6 +437,59 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   };
 
+  const startProjectionDrag = (event: ReactPointerEvent<HTMLDivElement>, field: keyof OrderProjection, lineId: string, price: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const drag = { field, lineId, originalPrice: price, price };
+    draggingProjectionRef.current = drag;
+    setDraggingProjection(drag);
+    chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: false, horzTouchDrag: false, vertTouchDrag: false } });
+  };
+
+  const moveProjectionDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = draggingProjectionRef.current;
+    const price = priceRef.current;
+    const bounds = host.current?.getBoundingClientRect();
+    if (!current || !price || !bounds) return;
+    event.preventDefault();
+    const rawPrice = price.coordinateToPrice(event.clientY - bounds.top);
+    if (rawPrice == null) return;
+    const snapped = snapTradeLinePrice(rawPrice, minMove);
+    if (snapped == null || snapped === current.price) return;
+    const next = { ...current, price: snapped };
+    draggingProjectionRef.current = next;
+    setDraggingProjection(next);
+    tradeLineRefs.current.get(current.lineId)?.applyOptions({ price: snapped });
+    onOrderProjectionChange(current.field, snapped);
+    syncTradeLabelsRef.current();
+  };
+
+  const finishProjectionDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = draggingProjectionRef.current;
+    if (!current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    onOrderProjectionChange(current.field, current.price);
+    draggingProjectionRef.current = null;
+    setDraggingProjection(null);
+    chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
+  };
+
+  const cancelProjectionDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const current = draggingProjectionRef.current;
+    if (!current) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    tradeLineRefs.current.get(current.lineId)?.applyOptions({ price: current.originalPrice });
+    onOrderProjectionChange(current.field, current.originalPrice);
+    draggingProjectionRef.current = null;
+    setDraggingProjection(null);
+    chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
+  };
+
   const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
 
   return (
@@ -441,9 +503,13 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
       {tradeLines.map((line) => {
         const top = tradeLineTops[line.id];
         if (top == null) return null;
+        const projectionField: keyof OrderProjection | undefined = line.kind === "projected-take-profit" ? "takeProfit"
+          : line.kind === "projected-stop-loss" ? "stopLoss" : undefined;
         const dragging = draggingOrder?.id === line.order?.id;
+        const projectionDragging = draggingProjection?.lineId === line.id;
         const pending = line.order && replacingOrderIds.has(line.order.id);
-        const displayPrice = dragging ? draggingOrder?.price ?? line.price : line.price;
+        const displayPrice = dragging ? draggingOrder?.price ?? line.price
+          : projectionDragging ? draggingProjection?.price ?? line.price : line.price;
         const contractPrefix = tradeSymbol && tradeSymbol !== symbol ? `${tradeSymbol} ` : "";
         const label = line.kind === "position" ? `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`
           : line.kind === "take-profit" ? `${contractPrefix}TP ${line.quantity}`
@@ -455,11 +521,12 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
           key={line.id}
           className={`trade-line-label ${line.kind} ${line.kind === "position" ? line.side.toLowerCase() : ""} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}
           style={{ top }}
-          onPointerDown={line.draggable && line.order ? (event) => startOrderDrag(event, line.order!, line.price) : undefined}
-          onPointerMove={line.draggable ? moveOrderDrag : undefined}
-          onPointerUp={line.draggable ? finishOrderDrag : undefined}
-          onPointerCancel={line.draggable ? cancelOrderDrag : undefined}
-          title={line.draggable ? "Drag to replace this protective order" : undefined}
+          onPointerDown={line.draggable && line.order ? (event) => startOrderDrag(event, line.order!, line.price)
+            : projectionField ? (event) => startProjectionDrag(event, projectionField, line.id, line.price) : undefined}
+          onPointerMove={line.order && line.draggable ? moveOrderDrag : projectionField ? moveProjectionDrag : undefined}
+          onPointerUp={line.order && line.draggable ? finishOrderDrag : projectionField ? finishProjectionDrag : undefined}
+          onPointerCancel={line.order && line.draggable ? cancelOrderDrag : projectionField ? cancelProjectionDrag : undefined}
+          title={line.order && line.draggable ? "Drag to replace this protective order" : projectionField ? "Drag to update the order ticket price" : undefined}
         >
           <span>{pending ? "UPDATING" : label}</span><strong>{displayPrice.toFixed(pricePrecision(minMove))}</strong>
           {line.position && <button type="button" aria-label={`Close ${line.position.symbol} position`} title="Close position" disabled={closingPositionIds.has(line.position.id)} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onClosePosition(line.position!); }}><X size={11} /></button>}

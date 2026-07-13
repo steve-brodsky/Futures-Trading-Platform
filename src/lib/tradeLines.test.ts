@@ -58,9 +58,9 @@ describe("chart trade lines", () => {
   });
 
   it("builds green and red projected exit lines from non-empty ticket prices", () => {
-    expect(buildProjectedTradeLines({ takeProfit: 6260, stopLoss: 6240 }).map((line) => [line.kind, line.price, line.color])).toEqual([
-      ["projected-take-profit", 6260, "#16c79a"],
-      ["projected-stop-loss", 6240, "#ef466f"],
+    expect(buildProjectedTradeLines({ takeProfit: 6260, stopLoss: 6240 }).map((line) => [line.kind, line.price, line.color, line.draggable])).toEqual([
+      ["projected-take-profit", 6260, "#16c79a", true],
+      ["projected-stop-loss", 6240, "#ef466f", true],
     ]);
     expect(buildProjectedTradeLines({ takeProfit: undefined, stopLoss: Number.NaN })).toEqual([]);
   });

@@ -82,10 +82,10 @@ export function buildProjectedTradeLines(projection?: OrderProjection): TradeLin
   if (!projection) return [];
   const lines: TradeLineModel[] = [];
   if (projection.takeProfit != null && Number.isFinite(projection.takeProfit) && projection.takeProfit > 0) {
-    lines.push({ id: "projection:take-profit", kind: "projected-take-profit", price: projection.takeProfit, color: "#16c79a", side: "", quantity: 0, draggable: false });
+    lines.push({ id: "projection:take-profit", kind: "projected-take-profit", price: projection.takeProfit, color: "#16c79a", side: "", quantity: 0, draggable: true });
   }
   if (projection.stopLoss != null && Number.isFinite(projection.stopLoss) && projection.stopLoss > 0) {
-    lines.push({ id: "projection:stop-loss", kind: "projected-stop-loss", price: projection.stopLoss, color: "#ef466f", side: "", quantity: 0, draggable: false });
+    lines.push({ id: "projection:stop-loss", kind: "projected-stop-loss", price: projection.stopLoss, color: "#ef466f", side: "", quantity: 0, draggable: true });
   }
   return lines;
 }
