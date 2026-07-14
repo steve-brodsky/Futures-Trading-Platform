@@ -1,5 +1,6 @@
 import type { ChartTabState, ChartWindowState, Drawing, EntryRuleNode, WorkspaceState } from "../types";
 import { normalizeEntryRules } from "./entryRules";
+import { cloneEma200Alert, normalizeEma200Alert, sameEma200Alert } from "./emaAlerts";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 
 export const MAX_CHART_TABS = 6;
@@ -25,7 +26,7 @@ export function tabInsertionIndex(pointerX: number, stripLeft: number, stripRigh
 type LegacyWorkspace = Partial<WorkspaceState> & Partial<Omit<ChartTabState, "id">> & { bottomTab?: string };
 
 export function cloneChartTab(tab: ChartTabState, id: string): ChartTabState {
-  return { ...tab, id, symbol: { ...tab.symbol }, indicators: tab.indicators.map((indicator) => ({ ...indicator })) };
+  return { ...tab, id, symbol: { ...tab.symbol }, indicators: tab.indicators.map((indicator) => ({ ...indicator })), ema200Alert: cloneEma200Alert(tab.ema200Alert) };
 }
 
 export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState): WorkspaceState {
@@ -39,6 +40,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       timeframe: value.timeframe ?? fallbackTab.timeframe,
       chartKind: value.chartKind ?? fallbackTab.chartKind,
       indicators: value.indicators ?? fallbackTab.indicators,
+      ema200Alert: normalizeEma200Alert(value.ema200Alert),
       chartTimezone: value.chartTimezone ?? fallbackTab.chartTimezone,
       magnetEnabled: normalizeMagnetEnabled(value.magnetEnabled),
     }];
@@ -54,6 +56,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       id,
       symbol: { ...(tab.symbol ?? fallbackTab.symbol) },
       indicators: normalizeIndicators(tab.indicators).map((indicator) => ({ ...indicator })),
+      ema200Alert: normalizeEma200Alert(tab.ema200Alert),
       chartTimezone: tab.chartTimezone ?? "exchange",
       magnetEnabled: normalizeMagnetEnabled(tab.magnetEnabled),
       tradeContract: typeof tab.tradeContract === "string" && tab.tradeContract.trim() && !tab.tradeContract.trim().startsWith("@")
@@ -151,12 +154,13 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     const indicators = sameArray(prior.indicators, tab.indicators, (a, b) => (
       a.id === b.id && a.kind === b.kind && a.period === b.period && a.color === b.color && a.visible === b.visible
     )) ? prior.indicators : tab.indicators;
-    return symbol === prior.symbol && indicators === prior.indicators
+    const ema200Alert = sameEma200Alert(prior.ema200Alert, tab.ema200Alert) ? prior.ema200Alert : tab.ema200Alert;
+    return symbol === prior.symbol && indicators === prior.indicators && ema200Alert === prior.ema200Alert
       && prior.timeframe === tab.timeframe && prior.chartKind === tab.chartKind
       && prior.chartTimezone === tab.chartTimezone && prior.magnetEnabled === tab.magnetEnabled
       && prior.tradeContract === tab.tradeContract
       ? prior
-      : { ...tab, symbol, indicators };
+      : { ...tab, symbol, indicators, ema200Alert };
   });
 
   const currentWindows = new Map(current.windows.map((window) => [window.id, window]));

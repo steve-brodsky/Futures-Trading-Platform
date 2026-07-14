@@ -1,6 +1,8 @@
 export type TradingEnvironment = "sim" | "live";
 export type ConnectionState = "demo" | "connecting" | "live" | "stale" | "disconnected" | "auth-required";
 export type Timeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "D" | "W" | "M";
+export type AlertSound = "chime" | "bell" | "pulse" | "siren";
+export type AlertDurationSeconds = 1 | 3 | 5 | 10;
 export type ChartKind = "candles" | "line" | "area";
 export type OrderType = "Market" | "Limit" | "StopMarket" | "StopLimit";
 export type ChartTimezone = "exchange" | "local" | "UTC" | "America/New_York" | "America/Chicago" | "America/Denver" | "America/Los_Angeles" | "Europe/London" | "Asia/Tokyo";
@@ -154,6 +156,14 @@ export interface IndicatorConfig {
   visible: boolean;
 }
 
+export interface TimeframeAlertConfig {
+  enabled: boolean;
+  sound: AlertSound;
+  durationSeconds: AlertDurationSeconds;
+}
+
+export type Ema200AlertConfig = Record<Timeframe, TimeframeAlertConfig>;
+
 export type EntryRuleSide = "long" | "short";
 
 export type EntryRuleOperand =
@@ -205,6 +215,7 @@ export interface ChartTabState {
   timeframe: Timeframe;
   chartKind: ChartKind;
   indicators: IndicatorConfig[];
+  ema200Alert: Ema200AlertConfig;
   chartTimezone: ChartTimezone;
   magnetEnabled: boolean;
   /** Concrete contract override for a continuous chart. Undefined means Auto. */

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChartTabState } from "../types";
+import { defaultEma200Alert } from "./emaAlerts";
 import { chunkVwapRange, expandedVwapRange, mergeEpochRanges, missingEpochRanges, nySessionVwapSymbols } from "./vwapData";
 
 const tab = (id: string, symbol: string, timeframe: ChartTabState["timeframe"], visible = true): ChartTabState => ({
@@ -8,6 +9,7 @@ const tab = (id: string, symbol: string, timeframe: ChartTabState["timeframe"], 
   timeframe,
   chartKind: "candles",
   indicators: [{ id: "vwap", kind: "VWAP", period: 1, color: "#a879ff", visible }],
+  ema200Alert: defaultEma200Alert(),
   chartTimezone: "exchange",
   magnetEnabled: false,
 });
