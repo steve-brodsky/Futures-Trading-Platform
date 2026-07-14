@@ -10,7 +10,7 @@ const fallback: WorkspaceState = {
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
-  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true } },
+  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 11 } },
 };
 
 describe("chart workspace", () => {
@@ -56,13 +56,19 @@ describe("chart workspace", () => {
 
   it("defaults legacy chart-label settings and preserves explicit preferences", () => {
     const legacy = normalizeChartWorkspace({ ...fallback, settings: undefined }, fallback);
-    expect(legacy.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: true });
+    expect(legacy.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: true, fontSize: 11 });
 
     const saved = normalizeChartWorkspace({
       ...fallback,
-      settings: { chartLabels: { showDollarAmount: false, showRMultiple: true } },
+      settings: { chartLabels: { showDollarAmount: false, showRMultiple: true, fontSize: 14 } },
     }, fallback);
-    expect(saved.settings.chartLabels).toEqual({ showDollarAmount: false, showRMultiple: true });
+    expect(saved.settings.chartLabels).toEqual({ showDollarAmount: false, showRMultiple: true, fontSize: 14 });
+
+    const clamped = normalizeChartWorkspace({
+      ...fallback,
+      settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 50 } },
+    }, fallback);
+    expect(clamped.settings.chartLabels.fontSize).toBe(16);
   });
 
   it("accepts changed global settings from a workspace broadcast", () => {
@@ -70,10 +76,10 @@ describe("chart workspace", () => {
     const broadcast = normalizeChartWorkspace({
       ...current,
       revision: 2,
-      settings: { chartLabels: { showDollarAmount: true, showRMultiple: false } },
+      settings: { chartLabels: { showDollarAmount: true, showRMultiple: false, fontSize: 13 } },
     }, fallback);
     const result = stabilizeChartWorkspace(current, broadcast);
-    expect(result.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: false });
+    expect(result.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: false, fontSize: 13 });
     expect(result.settings).not.toBe(current.settings);
   });
 

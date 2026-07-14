@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, X } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
@@ -538,7 +538,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
         return <div
           key={line.id}
           className={`trade-line-label ${line.kind} ${line.kind === "position" ? line.side.toLowerCase() : ""} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}
-          style={{ top }}
+          style={{ top, "--trade-label-font-size": `${chartLabelSettings.fontSize}px` } as CSSProperties}
           onPointerDown={line.draggable && line.order ? (event) => startOrderDrag(event, line.order!, line.price)
             : projectionField ? (event) => startProjectionDrag(event, projectionField, line.id, line.price) : undefined}
           onPointerMove={line.order && line.draggable ? moveOrderDrag : projectionField ? moveProjectionDrag : undefined}

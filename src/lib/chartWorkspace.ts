@@ -125,6 +125,9 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
         showRMultiple: typeof savedChartLabels?.showRMultiple === "boolean"
           ? savedChartLabels.showRMultiple
           : fallback.settings.chartLabels.showRMultiple,
+        fontSize: typeof savedChartLabels?.fontSize === "number" && Number.isFinite(savedChartLabels.fontSize)
+          ? Math.max(8, Math.min(16, Math.round(savedChartLabels.fontSize)))
+          : fallback.settings.chartLabels.fontSize,
       },
     },
   };
@@ -199,6 +202,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     : incoming.entryRules;
   const settings = current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
     && current.settings.chartLabels.showRMultiple === incoming.settings.chartLabels.showRMultiple
+    && current.settings.chartLabels.fontSize === incoming.settings.chartLabels.fontSize
     ? current.settings
     : incoming.settings;
 

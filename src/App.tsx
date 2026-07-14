@@ -40,7 +40,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
-  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true } },
+  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 11 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -89,6 +89,26 @@ function IconButton({ label, active, children, onClick }: { label: string; activ
 
 function Modal({ title, children, onClose, width = 440 }: { title: string; children: React.ReactNode; onClose: () => void; width?: number }) {
   return <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-label={title} style={{ width }}><header><h2>{title}</h2><IconButton label="Close" onClick={onClose}><X size={17} /></IconButton></header>{children}</section></div>;
+}
+
+function TradeStationCredentials({ clientId, secret, busy, native, showIntro = true, onClientIdChange, onSecretChange, onConnect }: {
+  clientId: string;
+  secret: string;
+  busy: boolean;
+  native: boolean;
+  showIntro?: boolean;
+  onClientIdChange: (value: string) => void;
+  onSecretChange: (value: string) => void;
+  onConnect: () => void;
+}) {
+  return <>
+    {showIntro && <div className="setup-intro"><LockKeyhole size={20} /><div><strong>Credentials stay on this device</strong><p>Your secret and refresh token are handled by the native process and stored in the operating system credential vault.</p></div></div>}
+    {!native && <div className="demo-warning">You are viewing the browser-safe demo. Launch with <code>npm run tauri dev</code> to connect.</div>}
+    <label className="field"><span>Auth0 API key / client ID</span><input value={clientId} onChange={(event) => onClientIdChange(event.target.value)} placeholder="Enter client ID" autoComplete="off" /></label>
+    <label className="field"><span>Client secret</span><input value={secret} onChange={(event) => onSecretChange(event.target.value)} type="password" placeholder="Enter client secret" autoComplete="new-password" /></label>
+    <div className="callback-note"><span>Callback URL</span><code>http://localhost:8080</code></div>
+    <button className="primary-button" disabled={busy || !native} onClick={onConnect}>{busy ? "Starting…" : "Save and connect"}</button>
+  </>;
 }
 
 export default function App() {
@@ -991,6 +1011,7 @@ export default function App() {
       await api.saveCredentials(clientId.trim(), secret);
       await api.beginLogin();
       setSetupOpen(false);
+      setSettingsOpen(false);
       showToast("Complete authorization in your browser.");
     } catch (error) { showToast(String(error)); }
     finally { setBusy(false); setSecret(""); }
@@ -1222,9 +1243,12 @@ export default function App() {
 
     {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateActiveTab({ symbol: result, tradeContract: undefined }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
 
-    {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><div className="setup-intro"><LockKeyhole size={20} /><div><strong>Credentials stay on this device</strong><p>Your secret and refresh token are handled by the native process and stored in the operating system credential vault.</p></div></div>{!api.isNative && <div className="demo-warning">You are viewing the browser-safe demo. Launch with <code>npm run tauri dev</code> to connect.</div>}<label className="field"><span>Auth0 API key / client ID</span><input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Enter client ID" autoComplete="off" /></label><label className="field"><span>Client secret</span><input value={secret} onChange={(e) => setSecret(e.target.value)} type="password" placeholder="Enter client secret" autoComplete="new-password" /></label><div className="callback-note"><span>Callback URL</span><code>http://localhost:8080</code></div><button className="primary-button" disabled={busy || !api.isNative} onClick={connect}>{busy ? "Starting…" : "Continue to TradeStation"}</button></Modal>}
+    {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} native={api.isNative} onClientIdChange={setClientId} onSecretChange={setSecret} onConnect={connect} /></Modal>}
 
-    {settingsOpen && <Modal title="Settings" onClose={() => setSettingsOpen(false)} width={480}><div className="settings-content"><section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Position labels</h3><p>Choose which performance values appear beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label></section></div></Modal>}
+    {settingsOpen && <Modal title="Settings" onClose={() => setSettingsOpen(false)} width={540}><div className="settings-content">
+      <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Position labels</h3><p>Choose which performance values appear beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
+      <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onConnect={connect} /></section>
+    </div></Modal>}
 
     {envConfirm && <Modal title={`Switch to ${envConfirm.toUpperCase()}?`} onClose={() => setEnvConfirm(null)}><div className={`environment-confirm ${envConfirm}`}><Zap size={22} /><div><strong>{envConfirm === "live" ? "Real orders and real money" : "Simulated execution"}</strong><p>{envConfirm === "live" ? "Changing to LIVE clears SIM account data and disables quick-submit for this session." : "SIM uses a separate account environment and simulated fills."}</p></div></div><div className="modal-actions"><button className="secondary-button" onClick={() => setEnvConfirm(null)}>Cancel</button><button className={envConfirm === "live" ? "danger-button" : "primary-button"} disabled={busy} onClick={confirmEnvironment}>Switch to {envConfirm.toUpperCase()}</button></div></Modal>}
 

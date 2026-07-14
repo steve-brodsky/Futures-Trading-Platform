@@ -133,7 +133,7 @@ export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: numbe
   return metrics;
 }
 
-export function formatTradeLineMetrics(metrics: TradeLineMetrics, settings: ChartLabelSettings): string | null {
+export function formatTradeLineMetrics(metrics: TradeLineMetrics, settings: Pick<ChartLabelSettings, "showDollarAmount" | "showRMultiple">): string | null {
   const parts: string[] = [];
   if (settings.showDollarAmount) {
     const amount = Math.abs(metrics.dollarAmount) < .005 ? 0 : metrics.dollarAmount;

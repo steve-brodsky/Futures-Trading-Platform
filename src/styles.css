@@ -104,7 +104,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 
 .chart-stage { position: relative; min-width: 0; min-height: 0; grid-column: 2; grid-row: 1; overflow: hidden; background: #0b0f17; }
 .chart-host { position: absolute; inset: 0; }
-.trade-line-label { position: absolute; z-index: 7; right: 74px; height: 21px; display: flex; align-items: center; transform: translateY(-50%); border: 1px solid currentColor; border-radius: 3px 0 0 3px; color: #f0b84b; background: rgba(28,24,16,.96); box-shadow: 0 2px 8px rgba(0,0,0,.34); font: 600 8px DM Mono, monospace; user-select: none; touch-action: none; }
+.trade-line-label { position: absolute; z-index: 7; right: 74px; height: calc(var(--trade-label-font-size, 11px) + 14px); display: flex; align-items: center; transform: translateY(-50%); border: 1px solid currentColor; border-radius: 3px 0 0 3px; color: #f0b84b; background: rgba(28,24,16,.96); box-shadow: 0 2px 8px rgba(0,0,0,.34); font: 600 var(--trade-label-font-size, 11px)/1 DM Mono, monospace; user-select: none; touch-action: none; }
 .trade-line-label > span { padding: 0 6px; letter-spacing: .05em; }
 .trade-line-label > strong { align-self: stretch; display: flex; align-items: center; padding: 0 6px; border-left: 1px solid currentColor; color: #eef3f8; font-weight: 600; background: rgba(5,8,12,.28); }
 .trade-line-label > em { align-self: stretch; display: flex; align-items: center; padding: 0 6px; border-left: 1px solid currentColor; color: #eef3f8; background: rgba(5,8,12,.18); font-style: normal; font-weight: 600; white-space: nowrap; }
@@ -117,7 +117,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .trade-line-label.draggable { cursor: ns-resize; }
 .trade-line-label.draggable:hover { filter: brightness(1.16); }
 .trade-line-label.pending { opacity: .66; cursor: wait; }
-.trade-line-label button { align-self: stretch; width: 21px; display: grid; place-items: center; padding: 0; border: 0; border-left: 1px solid currentColor; color: inherit; background: rgba(5,8,12,.34); cursor: pointer; }
+.trade-line-label button { align-self: stretch; width: calc(var(--trade-label-font-size, 11px) + 14px); display: grid; place-items: center; padding: 0; border: 0; border-left: 1px solid currentColor; color: inherit; background: rgba(5,8,12,.34); cursor: pointer; }
 .trade-line-label button:hover:not(:disabled) { color: #fff; background: rgba(239,70,111,.45); }
 .trade-line-label button:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
 .chart-heading { position: absolute; z-index: 5; top: 10px; left: 13px; display: flex; align-items: center; gap: 7px; font-size: 11px; pointer-events: none; }
@@ -353,9 +353,19 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .settings-section > header span { color: var(--cyan); font: 600 8px DM Mono, monospace; letter-spacing: .1em; text-transform: uppercase; }
 .settings-section > header h3 { margin: 5px 0 0; color: #e4e9ef; font-size: 11px; font-weight: 600; }
 .settings-section > header p { margin: 5px 0 0; max-width: 370px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.settings-section + .settings-section { margin-top: 10px; border-top: 1px solid #2b3542; }
 .settings-row { min-height: 57px; height: auto; border-bottom: 1px solid var(--line-soft); }
 .settings-row:last-child { border-bottom: 0; }
 .settings-row input { flex: 0 0 auto; cursor: pointer; }
+.settings-font-row { min-height: 67px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line-soft); cursor: pointer; }
+.settings-font-row > span { display: flex; flex-direction: column; gap: 3px; }
+.settings-font-row strong { font-size: 10px; font-weight: 500; }
+.settings-font-row small { color: var(--muted); font: 400 8px DM Mono, monospace; }
+.settings-font-row > div { min-width: 180px; display: grid; grid-template-columns: minmax(120px,1fr) 38px; align-items: center; gap: 10px; }
+.settings-font-row input { width: 100%; accent-color: var(--cyan); cursor: ew-resize; }
+.settings-font-row output { color: #dce3eb; font: 600 10px DM Mono, monospace; text-align: right; }
+.settings-api-section .demo-warning { margin-left: 0; margin-right: 0; }
+.settings-api-section .primary-button { width: 100%; margin-right: 0; margin-left: 0; }
 .entry-rules-builder { margin-top: 0; margin-bottom: 17px; }
 .entry-rules-intro { margin: 0; padding: 13px 0; border-bottom: 1px solid var(--line); color: #8793a3; font-size: 9px; line-height: 1.55; }
 .entry-rule-side { padding: 15px 0 17px; border-bottom: 1px solid var(--line); }

@@ -237,6 +237,7 @@ export interface ChartWindowState {
 export interface ChartLabelSettings {
   showDollarAmount: boolean;
   showRMultiple: boolean;
+  fontSize: number;
 }
 
 export interface WorkspaceSettings {
