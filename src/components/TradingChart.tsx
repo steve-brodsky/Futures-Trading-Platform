@@ -576,6 +576,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
         const projectionField: ProjectedExitField | undefined = line.kind === "projected-take-profit" ? "takeProfit"
           : line.kind === "projected-stop-loss" ? "stopLoss" : undefined;
         const pending = line.order && replacingOrderIds.has(line.order.id);
+        const closing = Boolean(line.position && closingPositionIds.has(line.position.id));
         const displayPrice = displayPrices.get(line.id) ?? line.price;
         const metricValues = tradeLineMetrics.get(line.id);
         const metricLabel = metricValues ? formatTradeLineMetrics(metricValues, chartLabelSettings) : null;
@@ -588,7 +589,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
                   : `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`;
         return <div
           key={line.id}
-          className={`trade-line-label ${line.kind} ${line.kind === "position" ? line.side.toLowerCase() : ""} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}
+          className={`trade-line-label ${line.kind} ${line.kind === "position" ? line.side.toLowerCase() : ""} ${line.draggable ? "draggable" : ""} ${pending || closing ? "pending" : ""}`}
           style={{ top, "--trade-label-font-size": `${chartLabelSettings.fontSize}px` } as CSSProperties}
           onPointerEnter={() => promoteTradeLine(line.id)}
           onFocus={() => promoteTradeLine(line.id)}
@@ -599,7 +600,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
           onPointerCancel={line.order && line.draggable ? cancelOrderDrag : projectionField ? cancelProjectionDrag : undefined}
           title={line.order && line.draggable ? "Drag to replace this protective order" : projectionField ? "Drag to update the order ticket price" : undefined}
         >
-          <span>{pending ? "UPDATING" : label}</span><strong>{displayPrice.toFixed(pricePrecision(minMove))}</strong>{metricLabel && <em>{metricLabel}</em>}
+          <span>{closing ? "CLOSING" : pending ? "UPDATING" : label}</span><strong>{displayPrice.toFixed(pricePrecision(minMove))}</strong>{metricLabel && <em>{metricLabel}</em>}
           {line.position && <button type="button" aria-label={`Close ${line.position.symbol} position`} title="Close position" disabled={closingPositionIds.has(line.position.id)} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onClosePosition(line.position!); }}><X size={11} /></button>}
         </div>;
       })}

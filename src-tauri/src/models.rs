@@ -240,8 +240,37 @@ pub struct StreamStateEvent {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BrokerageUpdateEvent {
+pub struct PositionsSnapshotEvent {
+    pub account_id: String,
+    pub positions: Vec<Position>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionUpdateEvent {
+    pub account_id: String,
+    pub position: Position,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrdersSnapshotEvent {
+    pub account_id: String,
+    pub orders: Vec<OrderUpdate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderStreamUpdateEvent {
+    pub account_id: String,
+    pub order: OrderUpdate,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrokerageStreamStateEvent {
     pub account_id: String,
     pub channel: String,
-    pub data: serde_json::Value,
+    pub state: String,
+    pub message: Option<String>,
 }

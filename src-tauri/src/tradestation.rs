@@ -1,13 +1,358 @@
 use crate::{models::*, storage, AppError};
 use chrono::{DateTime, Utc};
-use reqwest::{Method, StatusCode};
+use reqwest::{header::HeaderMap, Method, StatusCode};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, watch, Mutex};
+
+const HISTORY_CREDIT_CAPACITY: f64 = 200.0;
+const HISTORY_CREDITS_PER_SECOND: f64 = 200.0 / 60.0;
+const BACKGROUND_RESERVE_RATIO: f64 = 0.10;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequestPriority {
+    Background,
+    User,
+    Realtime,
+    Trading,
+}
+
+#[derive(Debug, Clone)]
+struct QuotaBucket {
+    capacity: f64,
+    available: f64,
+    refill_per_second: f64,
+    updated_at: Instant,
+    reset_at: Option<Instant>,
+}
+
+impl QuotaBucket {
+    fn new(capacity: u64, period_secs: u64) -> Self {
+        let capacity = capacity.max(1) as f64;
+        Self {
+            capacity,
+            available: capacity,
+            refill_per_second: capacity / period_secs.max(1) as f64,
+            updated_at: Instant::now(),
+            reset_at: None,
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.updated_at).as_secs_f64();
+        self.available = (self.available + elapsed * self.refill_per_second).min(self.capacity);
+        self.updated_at = now;
+        if self.reset_at.is_some_and(|reset| reset <= now) {
+            self.reset_at = None;
+        }
+    }
+
+    fn wait_for(&self, amount: f64) -> Duration {
+        if self.available >= amount {
+            return Duration::ZERO;
+        }
+        let token_wait = Duration::from_secs_f64(
+            ((amount - self.available) / self.refill_per_second.max(f64::EPSILON)).max(0.01),
+        );
+        self.reset_at
+            .map(|reset| reset.saturating_duration_since(Instant::now()))
+            .filter(|reset| !reset.is_zero())
+            .map_or(token_wait, |reset| token_wait.min(reset))
+    }
+}
+
+#[derive(Debug)]
+struct QuotaState {
+    buckets: HashMap<String, QuotaBucket>,
+    aliases: HashMap<String, String>,
+    history_available: f64,
+    history_updated_at: Instant,
+}
+
+impl Default for QuotaState {
+    fn default() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            aliases: HashMap::new(),
+            history_available: HISTORY_CREDIT_CAPACITY,
+            history_updated_at: Instant::now(),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct QuotaCoordinator {
+    state: Arc<Mutex<QuotaState>>,
+}
+
+impl QuotaCoordinator {
+    async fn acquire(
+        &self,
+        hint: &str,
+        priority: RequestPriority,
+        history_credits: f64,
+        max_wait: Option<Duration>,
+    ) -> Result<(), AppError> {
+        let started = Instant::now();
+        loop {
+            let (wait, resource) = {
+                let mut state = self.state.lock().await;
+                let now = Instant::now();
+                let elapsed = now
+                    .saturating_duration_since(state.history_updated_at)
+                    .as_secs_f64();
+                state.history_available = (state.history_available
+                    + elapsed * HISTORY_CREDITS_PER_SECOND)
+                    .min(HISTORY_CREDIT_CAPACITY);
+                state.history_updated_at = now;
+
+                let resource = state
+                    .aliases
+                    .get(hint)
+                    .cloned()
+                    .unwrap_or_else(|| hint.to_string());
+                let history_available = state.history_available;
+                let history_wait = if history_credits <= history_available {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs_f64(
+                        ((history_credits - history_available) / HISTORY_CREDITS_PER_SECOND)
+                            .max(0.01),
+                    )
+                };
+                let (capacity, period) = default_quota(hint);
+                let request_wait = {
+                    let bucket = state
+                        .buckets
+                        .entry(resource.clone())
+                        .or_insert_with(|| QuotaBucket::new(capacity, period));
+                    bucket.refill(now);
+                    let reserve_ratio = match priority {
+                        RequestPriority::Background => BACKGROUND_RESERVE_RATIO,
+                        RequestPriority::User => 0.05,
+                        RequestPriority::Realtime => 0.02,
+                        RequestPriority::Trading => 0.0,
+                    };
+                    let reserve = (bucket.capacity * reserve_ratio).ceil();
+                    bucket.wait_for(1.0 + reserve)
+                };
+                let wait = request_wait.max(history_wait);
+                if wait.is_zero() {
+                    if let Some(bucket) = state.buckets.get_mut(&resource) {
+                        bucket.available = (bucket.available - 1.0).max(0.0);
+                    }
+                    state.history_available = (state.history_available - history_credits).max(0.0);
+                }
+                (wait, resource)
+            };
+            if wait.is_zero() {
+                let queued = started.elapsed();
+                if queued >= Duration::from_millis(50) {
+                    tracing::debug!(resource = %resource, wait_ms = queued.as_millis(), "TradeStation request released from quota queue");
+                }
+                return Ok(());
+            }
+            if max_wait.is_some_and(|limit| started.elapsed().saturating_add(wait) > limit) {
+                return Err(AppError::RateLimited {
+                    resource,
+                    retry_after_secs: wait.as_secs().max(1),
+                    concurrent: false,
+                });
+            }
+            tokio::time::sleep(wait.max(Duration::from_millis(25))).await;
+        }
+    }
+
+    async fn observe(&self, hint: &str, headers: &HeaderMap) {
+        let Some(resource) = header_string(headers, "x-ratelimit-resource") else {
+            return;
+        };
+        let limit = header_u64(headers, "x-ratelimit-limit");
+        let period = header_u64(headers, "x-ratelimit-period");
+        let remaining = header_u64(headers, "x-ratelimit-remaining");
+        let reset = header_u64(headers, "x-ratelimit-reset");
+        let mut state = self.state.lock().await;
+        state.aliases.insert(hint.to_string(), resource.clone());
+        let defaults = default_quota(hint);
+        let bucket = state.buckets.entry(resource.clone()).or_insert_with(|| {
+            QuotaBucket::new(limit.unwrap_or(defaults.0), period.unwrap_or(defaults.1))
+        });
+        let now = Instant::now();
+        bucket.refill(now);
+        if let Some(limit) = limit {
+            bucket.capacity = limit.max(1) as f64;
+        }
+        if let Some(period) = period {
+            bucket.refill_per_second = bucket.capacity / period.max(1) as f64;
+        }
+        if let Some(remaining) = remaining {
+            bucket.available = (remaining as f64).min(bucket.capacity);
+        }
+        bucket.updated_at = now;
+        bucket.reset_at = reset.map(|seconds| now + Duration::from_secs(seconds));
+        tracing::debug!(
+            resource = %resource,
+            remaining = bucket.available,
+            capacity = bucket.capacity,
+            reset_seconds = reset,
+            "Observed TradeStation quota headers"
+        );
+    }
+}
+
+#[derive(Default)]
+struct ClientCache {
+    accounts: Option<(Instant, Vec<Account>)>,
+    symbols: HashMap<String, (Instant, SymbolMeta)>,
+}
+
+fn default_quota(resource: &str) -> (u64, u64) {
+    match resource {
+        "quote-stream" | "barcharts" | "quote-snapshot" => (500, 300),
+        "symbols" => (90, 60),
+        "accounts" | "order-details" | "balances" | "positions" => (320, 300),
+        // Unknown/custom categories are calibrated from the first response.
+        _ => (320, 300),
+    }
+}
+
+fn default_priority(path: &str) -> RequestPriority {
+    if path.contains("/positions") || path.contains("/orders") || path.contains("balances") {
+        RequestPriority::Background
+    } else {
+        RequestPriority::User
+    }
+}
+
+fn request_profile(path: &str) -> (&'static str, f64) {
+    if path.contains("/marketdata/stream/barcharts/") || path.contains("/marketdata/barcharts/") {
+        return ("barcharts", historical_credits(path));
+    }
+    if path.contains("/marketdata/stream/quotes/") {
+        return ("quote-stream", 0.0);
+    }
+    if path.contains("/marketdata/quotes/") {
+        return ("quote-snapshot", 0.0);
+    }
+    if path.contains("/brokerage/stream/") && path.contains("/positions") {
+        return ("positions-stream", 0.0);
+    }
+    if path.contains("/brokerage/stream/") && path.contains("/orders") {
+        return ("order-stream", 0.0);
+    }
+    if path.contains("/positions") {
+        return ("positions", 0.0);
+    }
+    if path.contains("/orderexecution/") {
+        return ("order-execution", 0.0);
+    }
+    if path.contains("historicalorders") || path.contains("/orders") {
+        return ("order-details", 0.0);
+    }
+    if path.contains("balances") {
+        return ("balances", 0.0);
+    }
+    if path.contains("/brokerage/accounts") {
+        return ("accounts", 0.0);
+    }
+    if path.contains("/symbols") || path.contains("/data/symbols") {
+        return ("symbols", 0.0);
+    }
+    ("other", 0.0)
+}
+
+fn query_value(path: &str, key: &str) -> Option<String> {
+    let url = url::Url::parse(&format!("https://quota.invalid{path}")).ok()?;
+    url.query_pairs()
+        .find_map(|(name, value)| (name.eq_ignore_ascii_case(key)).then(|| value.into_owned()))
+}
+
+fn truncate_hundredths(value: f64) -> f64 {
+    (value.max(0.0) * 100.0).floor() / 100.0
+}
+
+pub fn historical_credits(path: &str) -> f64 {
+    if !query_value(path, "unit").is_some_and(|unit| unit.eq_ignore_ascii_case("minute")) {
+        return 0.0;
+    }
+    let credits = if let Some(bars_back) =
+        query_value(path, "barsback").and_then(|value| value.parse::<f64>().ok())
+    {
+        let interval = query_value(path, "interval")
+            .and_then(|value| value.parse::<f64>().ok())
+            .unwrap_or(1.0);
+        truncate_hundredths(bars_back * interval / 100_000.0)
+    } else if let Some(first) =
+        query_value(path, "firstdate").and_then(|value| parse_query_date(&value))
+    {
+        let last = query_value(path, "lastdate")
+            .and_then(|value| parse_query_date(&value))
+            .unwrap_or_else(|| Utc::now().date_naive());
+        let inclusive_days = (last - first).num_days().max(0) + 1;
+        truncate_hundredths(inclusive_days as f64 / 365.0)
+    } else {
+        0.0
+    };
+    if credits <= 0.25 {
+        0.0
+    } else {
+        credits
+    }
+}
+
+fn parse_query_date(value: &str) -> Option<chrono::NaiveDate> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.date_naive())
+        .or_else(|| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+}
+
+fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers.get(name)?.to_str().ok().map(str::to_owned)
+}
+
+fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
+    header_string(headers, name)?.parse().ok()
+}
+
+fn rate_limit_error(headers: &HeaderMap, fallback_resource: &str) -> AppError {
+    let concurrency_remaining = header_u64(headers, "x-concurrency-remaining");
+    let rate_remaining = header_u64(headers, "x-ratelimit-remaining");
+    let concurrent = match (concurrency_remaining, rate_remaining) {
+        (Some(0), _) => true,
+        (_, Some(0)) => false,
+        (None, None) => header_string(headers, "x-concurrency-resource").is_some(),
+        _ => false,
+    };
+    let resource = if concurrent {
+        header_string(headers, "x-concurrency-resource")
+    } else {
+        header_string(headers, "x-ratelimit-resource")
+    }
+    .unwrap_or_else(|| fallback_resource.to_string());
+    let retry_after_secs = header_u64(headers, "x-ratelimit-reset")
+        .or_else(|| header_u64(headers, "retry-after"))
+        .unwrap_or(if concurrent { 30 } else { 60 })
+        .max(1);
+    AppError::RateLimited {
+        resource,
+        retry_after_secs,
+        concurrent,
+    }
+}
+
+pub fn rate_limit_delay(error: &AppError) -> Duration {
+    match error {
+        AppError::RateLimited {
+            retry_after_secs, ..
+        } => Duration::from_secs(*retry_after_secs),
+        _ => Duration::from_secs(2),
+    }
+}
 
 #[derive(Clone)]
 pub struct AccessToken {
@@ -25,6 +370,35 @@ pub struct Session {
 pub struct TradeStation {
     pub client: reqwest::Client,
     pub session: Arc<Mutex<Session>>,
+    quota: QuotaCoordinator,
+    cache: Arc<Mutex<ClientCache>>,
+    inflight_gets: Arc<Mutex<HashMap<String, Vec<oneshot::Sender<Result<Value, String>>>>>>,
+    brokerage_cache: Arc<Mutex<BrokerageCache>>,
+    brokerage_revision: watch::Sender<u64>,
+}
+
+#[derive(Default)]
+struct BrokerageCache {
+    revision: u64,
+    accounts: HashMap<String, BrokerageAccountCache>,
+}
+
+#[derive(Default)]
+struct BrokerageAccountCache {
+    positions: HashMap<String, Position>,
+    orders: HashMap<String, OrderUpdate>,
+    positions_snapshot_complete: bool,
+    orders_snapshot_complete: bool,
+    positions_streaming: bool,
+    orders_streaming: bool,
+}
+
+#[derive(Clone)]
+struct BrokerageSnapshot {
+    positions: Vec<Position>,
+    orders: Vec<OrderUpdate>,
+    positions_ready: bool,
+    orders_ready: bool,
 }
 
 impl TradeStation {
@@ -34,14 +408,22 @@ impl TradeStation {
             .connect_timeout(Duration::from_secs(12))
             .timeout(Duration::from_secs(30))
             .build()?;
+        let (brokerage_revision, _) = watch::channel(0);
         Ok(Self {
             client,
             session: Arc::new(Mutex::new(Session::default())),
+            quota: QuotaCoordinator::default(),
+            cache: Arc::new(Mutex::new(ClientCache::default())),
+            inflight_gets: Arc::new(Mutex::new(HashMap::new())),
+            brokerage_cache: Arc::new(Mutex::new(BrokerageCache::default())),
+            brokerage_revision,
         })
     }
 
     pub async fn set_environment(&self, environment: TradingEnvironment) {
         self.session.lock().await.environment = environment;
+        *self.cache.lock().await = ClientCache::default();
+        self.clear_brokerage_cache().await;
     }
 
     pub async fn set_token(&self, value: String, expires_in: u64) {
@@ -53,6 +435,155 @@ impl TradeStation {
 
     pub async fn clear_token(&self) {
         self.session.lock().await.token = None;
+        *self.cache.lock().await = ClientCache::default();
+        self.clear_brokerage_cache().await;
+    }
+
+    fn brokerage_key(environment: &TradingEnvironment, account_id: &str) -> String {
+        format!("{}\0{account_id}", environment.key())
+    }
+
+    fn publish_brokerage_revision(&self, cache: &mut BrokerageCache) {
+        cache.revision = cache.revision.wrapping_add(1);
+        self.brokerage_revision.send_replace(cache.revision);
+    }
+
+    pub(crate) async fn clear_brokerage_cache(&self) {
+        let mut cache = self.brokerage_cache.lock().await;
+        cache.accounts.clear();
+        self.publish_brokerage_revision(&mut cache);
+    }
+
+    pub(crate) async fn reset_brokerage_cache(
+        &self,
+        environment: &TradingEnvironment,
+        account_id: &str,
+    ) {
+        let mut cache = self.brokerage_cache.lock().await;
+        cache.accounts.insert(
+            Self::brokerage_key(environment, account_id),
+            BrokerageAccountCache::default(),
+        );
+        self.publish_brokerage_revision(&mut cache);
+    }
+
+    pub(crate) async fn set_brokerage_stream_state(
+        &self,
+        environment: &TradingEnvironment,
+        account_id: &str,
+        channel: &str,
+        state: &str,
+    ) {
+        let mut cache = self.brokerage_cache.lock().await;
+        let account = cache
+            .accounts
+            .entry(Self::brokerage_key(environment, account_id))
+            .or_default();
+        let streaming = state == "streaming";
+        if channel == "positions" {
+            account.positions_streaming = streaming;
+            if !streaming {
+                account.positions_snapshot_complete = false;
+            }
+        } else {
+            account.orders_streaming = streaming;
+            if !streaming {
+                account.orders_snapshot_complete = false;
+            }
+        }
+        self.publish_brokerage_revision(&mut cache);
+    }
+
+    pub(crate) async fn apply_positions_snapshot(
+        &self,
+        environment: &TradingEnvironment,
+        account_id: &str,
+        positions: &[Position],
+    ) {
+        let mut cache = self.brokerage_cache.lock().await;
+        let account = cache
+            .accounts
+            .entry(Self::brokerage_key(environment, account_id))
+            .or_default();
+        account.positions = positions
+            .iter()
+            .filter(|position| position.quantity != 0.0)
+            .map(|position| (position.id.clone(), position.clone()))
+            .collect();
+        account.positions_snapshot_complete = true;
+        self.publish_brokerage_revision(&mut cache);
+    }
+
+    pub(crate) async fn apply_position_update(
+        &self,
+        environment: &TradingEnvironment,
+        account_id: &str,
+        position: &Position,
+    ) {
+        let mut cache = self.brokerage_cache.lock().await;
+        let account = cache
+            .accounts
+            .entry(Self::brokerage_key(environment, account_id))
+            .or_default();
+        if position.quantity == 0.0 {
+            account.positions.remove(&position.id);
+        } else {
+            account
+                .positions
+                .insert(position.id.clone(), position.clone());
+        }
+        self.publish_brokerage_revision(&mut cache);
+    }
+
+    pub(crate) async fn apply_orders_snapshot(
+        &self,
+        environment: &TradingEnvironment,
+        account_id: &str,
+        orders: &[OrderUpdate],
+    ) {
+        let mut cache = self.brokerage_cache.lock().await;
+        let account = cache
+            .accounts
+            .entry(Self::brokerage_key(environment, account_id))
+            .or_default();
+        account.orders = orders
+            .iter()
+            .map(|order| (order.id.clone(), order.clone()))
+            .collect();
+        account.orders_snapshot_complete = true;
+        self.publish_brokerage_revision(&mut cache);
+    }
+
+    pub(crate) async fn apply_order_update(
+        &self,
+        environment: &TradingEnvironment,
+        account_id: &str,
+        order: &OrderUpdate,
+    ) {
+        let mut cache = self.brokerage_cache.lock().await;
+        let account = cache
+            .accounts
+            .entry(Self::brokerage_key(environment, account_id))
+            .or_default();
+        account.orders.insert(order.id.clone(), order.clone());
+        self.publish_brokerage_revision(&mut cache);
+    }
+
+    async fn brokerage_snapshot(
+        &self,
+        environment: &TradingEnvironment,
+        account_id: &str,
+    ) -> Option<BrokerageSnapshot> {
+        let cache = self.brokerage_cache.lock().await;
+        cache
+            .accounts
+            .get(&Self::brokerage_key(environment, account_id))
+            .map(|account| BrokerageSnapshot {
+                positions: account.positions.values().cloned().collect(),
+                orders: account.orders.values().cloned().collect(),
+                positions_ready: account.positions_streaming && account.positions_snapshot_complete,
+                orders_ready: account.orders_streaming && account.orders_snapshot_complete,
+            })
     }
 
     async fn refresh(&self) -> Result<String, AppError> {
@@ -111,13 +642,25 @@ impl TradeStation {
         self.session.lock().await.environment.clone()
     }
 
-    pub async fn open_stream(&self, path: &str) -> Result<reqwest::Response, AppError> {
+    pub async fn open_stream(
+        &self,
+        path: &str,
+        priority: RequestPriority,
+    ) -> Result<reqwest::Response, AppError> {
+        let (resource, history_credits) = request_profile(path);
+        self.quota
+            .acquire(resource, priority, history_credits, None)
+            .await?;
         let token = self.token().await?;
         let url = format!("{}{}", self.base().await, path);
         let response = self.client.get(url).bearer_auth(token).send().await?;
+        self.quota.observe(resource, response.headers()).await;
         if response.status() == StatusCode::UNAUTHORIZED {
             self.clear_token().await;
             return Err(AppError::AuthenticationRequired);
+        }
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return Err(rate_limit_error(response.headers(), resource));
         }
         if !response.status().is_success() {
             return Err(AppError::Api(format!(
@@ -134,58 +677,162 @@ impl TradeStation {
         path: &str,
         body: Option<Value>,
     ) -> Result<Value, AppError> {
-        let token = self.token().await?;
-        let url = format!("{}{}", self.base().await, path);
-        let mut request = self
-            .client
-            .request(method.clone(), &url)
-            .bearer_auth(&token)
-            .header("Accept", "application/json");
-        if let Some(value) = body.clone() {
-            request = request.json(&value);
+        let priority = if method == Method::GET {
+            default_priority(path)
+        } else {
+            RequestPriority::Trading
+        };
+        self.send_with_priority(method, path, body, priority).await
+    }
+
+    async fn send_with_priority(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        priority: RequestPriority,
+    ) -> Result<Value, AppError> {
+        if method != Method::GET {
+            return self.send_request(method, path, body, priority).await;
         }
-        let mut response = request.send().await?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.clear_token().await;
-            let token = self.refresh().await?;
-            let mut retry = self
+        let key = format!("{}{}", self.base().await, path);
+        let receiver = {
+            let mut inflight = self.inflight_gets.lock().await;
+            if let Some(waiters) = inflight.get_mut(&key) {
+                let (sender, receiver) = oneshot::channel();
+                waiters.push(sender);
+                Some(receiver)
+            } else {
+                inflight.insert(key.clone(), Vec::new());
+                None
+            }
+        };
+        if let Some(receiver) = receiver {
+            return receiver
+                .await
+                .map_err(|_| AppError::Api("A shared TradeStation request was cancelled".into()))?
+                .map_err(AppError::Api);
+        }
+        let result = self.send_request(method, path, body, priority).await;
+        let shared = result
+            .as_ref()
+            .map(Clone::clone)
+            .map_err(ToString::to_string);
+        if let Some(waiters) = self.inflight_gets.lock().await.remove(&key) {
+            for waiter in waiters {
+                let _ = waiter.send(shared.clone());
+            }
+        }
+        result
+    }
+
+    async fn send_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        priority: RequestPriority,
+    ) -> Result<Value, AppError> {
+        let (resource, history_credits) = request_profile(path);
+        let max_wait = (method != Method::GET || priority == RequestPriority::Trading)
+            .then_some(Duration::from_secs(2));
+        let retryable = method == Method::GET;
+        let url = format!("{}{}", self.base().await, path);
+        let mut rate_retries = 0u8;
+        let mut auth_retry = false;
+        loop {
+            self.quota
+                .acquire(resource, priority, history_credits, max_wait)
+                .await?;
+            let token = self.token().await?;
+            let mut request = self
                 .client
-                .request(method, &url)
+                .request(method.clone(), &url)
                 .bearer_auth(token)
                 .header("Accept", "application/json");
-            if let Some(value) = body {
-                retry = retry.json(&value);
+            if let Some(value) = body.as_ref() {
+                request = request.json(value);
             }
-            response = retry.send().await?;
+            let response = request.send().await?;
+            self.quota.observe(resource, response.headers()).await;
+            if response.status() == StatusCode::UNAUTHORIZED && !auth_retry {
+                auth_retry = true;
+                self.clear_token().await;
+                self.refresh().await?;
+                continue;
+            }
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                let error = rate_limit_error(response.headers(), resource);
+                if retryable && priority != RequestPriority::Trading && rate_retries < 2 {
+                    rate_retries += 1;
+                    let delay = rate_limit_delay(&error);
+                    tracing::debug!(
+                        resource,
+                        retry_seconds = delay.as_secs(),
+                        "Waiting for TradeStation rate-limit reset"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Err(error);
+            }
+            let status = response.status();
+            let text = response.text().await?;
+            if !status.is_success() {
+                let safe_message = serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("Message")
+                            .or_else(|| v.get("message"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| format!("TradeStation returned HTTP {status}"));
+                return Err(AppError::Api(safe_message));
+            }
+            return if text.trim().is_empty() {
+                Ok(json!({}))
+            } else {
+                Ok(serde_json::from_str(&text)?)
+            };
         }
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let reset = response
-                .headers()
-                .get("x-ratelimit-reset")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("unknown");
-            return Err(AppError::Api(format!(
-                "TradeStation rate limit reached; reset in {reset} seconds"
-            )));
-        }
-        let status = response.status();
-        let text = response.text().await?;
-        if !status.is_success() {
-            let safe_message = serde_json::from_str::<Value>(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("Message")
-                        .or_else(|| v.get("message"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| format!("TradeStation returned HTTP {status}"));
-            return Err(AppError::Api(safe_message));
-        }
-        if text.trim().is_empty() {
-            Ok(json!({}))
-        } else {
-            Ok(serde_json::from_str(&text)?)
+    }
+
+    async fn get_absolute(&self, url: &str, resource: &str) -> Result<Value, AppError> {
+        let mut retries = 0u8;
+        loop {
+            self.quota
+                .acquire(resource, RequestPriority::User, 0.0, None)
+                .await?;
+            let response = self
+                .client
+                .get(url)
+                .bearer_auth(self.token().await?)
+                .header("Accept", "application/json")
+                .send()
+                .await?;
+            self.quota.observe(resource, response.headers()).await;
+            if response.status() == StatusCode::UNAUTHORIZED {
+                self.clear_token().await;
+                return Err(AppError::AuthenticationRequired);
+            }
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                let error = rate_limit_error(response.headers(), resource);
+                if retries < 2 {
+                    retries += 1;
+                    tokio::time::sleep(rate_limit_delay(&error)).await;
+                    continue;
+                }
+                return Err(error);
+            }
+            let status = response.status();
+            let text = response.text().await?;
+            if !status.is_success() {
+                return Err(AppError::Api(format!(
+                    "TradeStation lookup returned HTTP {status}"
+                )));
+            }
+            return Ok(serde_json::from_str(&text)?);
         }
     }
 
@@ -226,8 +873,22 @@ impl TradeStation {
     }
 
     pub async fn accounts(&self) -> Result<Vec<Account>, AppError> {
-        let body = self.send(Method::GET, "/brokerage/accounts", None).await?;
-        Ok(body
+        self.accounts_with_priority(RequestPriority::User).await
+    }
+
+    async fn accounts_with_priority(
+        &self,
+        priority: RequestPriority,
+    ) -> Result<Vec<Account>, AppError> {
+        if let Some((cached_at, accounts)) = self.cache.lock().await.accounts.as_ref() {
+            if cached_at.elapsed() < Duration::from_secs(30) {
+                return Ok(accounts.clone());
+            }
+        }
+        let body = self
+            .send_with_priority(Method::GET, "/brokerage/accounts", None, priority)
+            .await?;
+        let accounts: Vec<_> = body
             .get("Accounts")
             .and_then(Value::as_array)
             .into_iter()
@@ -243,11 +904,12 @@ impl TradeStation {
                 }
             })
             .filter(|account| account.account_type.eq_ignore_ascii_case("Futures"))
-            .collect())
+            .collect();
+        self.cache.lock().await.accounts = Some((Instant::now(), accounts.clone()));
+        Ok(accounts)
     }
 
     pub async fn search_symbols(&self, query: &str) -> Result<Vec<SymbolMeta>, AppError> {
-        let token = self.token().await?;
         let live = matches!(
             self.session.lock().await.environment,
             TradingEnvironment::Live
@@ -261,14 +923,7 @@ impl TradeStation {
         let url = format!(
             "{host}/data/symbols/suggest/{encoded}?$top=20&$filter=Category%20eq%20%27Future%27"
         );
-        let response = self.client.get(url).bearer_auth(token).send().await?;
-        if !response.status().is_success() {
-            return Err(AppError::Api(format!(
-                "Symbol lookup returned HTTP {}",
-                response.status()
-            )));
-        }
-        let body: Value = response.json().await?;
+        let body = self.get_absolute(&url, "symbols").await?;
         Ok(body
             .as_array()
             .into_iter()
@@ -283,7 +938,6 @@ impl TradeStation {
         {
             return Err(AppError::Validation("Invalid futures root".into()));
         }
-        let token = self.token().await?;
         let live = matches!(
             self.session.lock().await.environment,
             TradingEnvironment::Live
@@ -295,14 +949,7 @@ impl TradeStation {
         };
         let criteria = format!("R={root}&C=Future&FT=Electronic&Exp=false");
         let url = format!("{host}/data/symbols/search/{criteria}");
-        let response = self.client.get(url).bearer_auth(token).send().await?;
-        if !response.status().is_success() {
-            return Err(AppError::Api(format!(
-                "Futures contract lookup returned HTTP {}",
-                response.status()
-            )));
-        }
-        let body: Value = response.json().await?;
+        let body = self.get_absolute(&url, "symbols").await?;
         Ok(filter_future_contracts(
             &root,
             body.as_array().into_iter().flatten(),
@@ -310,8 +957,26 @@ impl TradeStation {
     }
 
     pub async fn symbol_details(&self, symbol: &str) -> Result<SymbolMeta, AppError> {
+        self.symbol_details_with_priority(symbol, RequestPriority::User)
+            .await
+    }
+
+    async fn symbol_details_with_priority(
+        &self,
+        symbol: &str,
+        priority: RequestPriority,
+    ) -> Result<SymbolMeta, AppError> {
+        let environment = self.environment().await;
+        let cache_key = format!("{}:{symbol}", environment.key());
+        if let Some((cached_at, details)) = self.cache.lock().await.symbols.get(&cache_key) {
+            if cached_at.elapsed() < Duration::from_secs(15 * 60) {
+                return Ok(details.clone());
+            }
+        }
         let path = format!("/marketdata/symbols/{symbol}");
-        let body = self.send(Method::GET, &path, None).await?;
+        let body = self
+            .send_with_priority(Method::GET, &path, None, priority)
+            .await?;
         let item = body
             .get("Symbols")
             .and_then(Value::as_array)
@@ -323,15 +988,23 @@ impl TradeStation {
                 "TradeStation omitted point value for {symbol}"
             )));
         }
+        self.cache
+            .lock()
+            .await
+            .symbols
+            .insert(cache_key, (Instant::now(), details.clone()));
         Ok(details)
     }
 
     pub async fn bars(&self, symbol: &str, timeframe: &str) -> Result<Vec<Bar>, AppError> {
         let (interval, unit, bars_back) = history_spec(timeframe)?;
+        validate_bars_back(interval, unit, bars_back)?;
         let path = format!(
             "/marketdata/barcharts/{symbol}?interval={interval}&unit={unit}&barsback={bars_back}"
         );
-        let body = self.send(Method::GET, &path, None).await?;
+        let body = self
+            .send_with_priority(Method::GET, &path, None, RequestPriority::User)
+            .await?;
         let mut result: Vec<Bar> = body
             .get("Bars")
             .and_then(Value::as_array)
@@ -356,6 +1029,7 @@ impl TradeStation {
         } else {
             5_000
         });
+        validate_bars_back(interval, unit, chunk)?;
         // Minute bars arrive timestamped at their closing boundary. `before` is
         // stored as the candle-open time, so using it as lastdate asks for the
         // immediately preceding bar without skipping one interval.
@@ -406,7 +1080,18 @@ impl TradeStation {
     }
 
     pub fn bar_stream_path(symbol: &str, timeframe: &str) -> Result<String, AppError> {
-        let (interval, unit, bars_back) = history_spec(timeframe)?;
+        let (_, _, bars_back) = history_spec(timeframe)?;
+        Self::bar_stream_path_with_bars_back(symbol, timeframe, bars_back)
+    }
+
+    pub fn bar_stream_path_with_bars_back(
+        symbol: &str,
+        timeframe: &str,
+        bars_back: usize,
+    ) -> Result<String, AppError> {
+        let (interval, unit, configured) = history_spec(timeframe)?;
+        let bars_back = bars_back.clamp(1, configured);
+        validate_bars_back(interval, unit, bars_back)?;
         Ok(format!("/marketdata/stream/barcharts/{symbol}?interval={interval}&unit={unit}&barsback={bars_back}"))
     }
 
@@ -431,11 +1116,21 @@ impl TradeStation {
     }
 
     pub async fn positions(&self, account: &str) -> Result<Vec<Position>, AppError> {
+        self.positions_with_priority(account, RequestPriority::Background)
+            .await
+    }
+
+    async fn positions_with_priority(
+        &self,
+        account: &str,
+        priority: RequestPriority,
+    ) -> Result<Vec<Position>, AppError> {
         let body = self
-            .send(
+            .send_with_priority(
                 Method::GET,
                 &format!("/brokerage/accounts/{account}/positions"),
                 None,
+                priority,
             )
             .await?;
         Ok(body
@@ -448,11 +1143,21 @@ impl TradeStation {
     }
 
     pub async fn orders(&self, account: &str) -> Result<Vec<OrderUpdate>, AppError> {
+        self.orders_with_priority(account, RequestPriority::Background)
+            .await
+    }
+
+    async fn orders_with_priority(
+        &self,
+        account: &str,
+        priority: RequestPriority,
+    ) -> Result<Vec<OrderUpdate>, AppError> {
         let body = self
-            .send(
+            .send_with_priority(
                 Method::GET,
                 &format!("/brokerage/accounts/{account}/orders"),
                 None,
+                priority,
             )
             .await?;
         Ok(body
@@ -501,7 +1206,9 @@ impl TradeStation {
             path.push_str("&nextToken=");
             path.push_str(&encoded);
         }
-        let body = self.send(Method::GET, &path, None).await?;
+        let body = self
+            .send_with_priority(Method::GET, &path, None, RequestPriority::User)
+            .await?;
         Ok(HistoricalOrderPage {
             orders: body
                 .get("Orders")
@@ -541,6 +1248,10 @@ impl TradeStation {
 
     pub async fn place_order(&self, draft: &OrderDraft) -> Result<OrderUpdate, AppError> {
         self.validate_order(draft).await?;
+        self.submit_order(draft).await
+    }
+
+    async fn submit_order(&self, draft: &OrderDraft) -> Result<OrderUpdate, AppError> {
         let body = self
             .send(
                 Method::POST,
@@ -611,7 +1322,7 @@ impl TradeStation {
     ) -> Result<OrderUpdate, AppError> {
         validate_order_id(order_id)?;
         if !self
-            .accounts()
+            .accounts_with_priority(RequestPriority::Trading)
             .await?
             .iter()
             .any(|account| account.id == account_id)
@@ -621,7 +1332,7 @@ impl TradeStation {
             ));
         }
         let mut order = self
-            .orders(account_id)
+            .orders_with_priority(account_id, RequestPriority::Trading)
             .await?
             .into_iter()
             .find(|order| order.id == order_id)
@@ -631,7 +1342,9 @@ impl TradeStation {
                 "Only working orders can be repositioned".into(),
             ));
         }
-        let positions = self.positions(account_id).await?;
+        let positions = self
+            .positions_with_priority(account_id, RequestPriority::Trading)
+            .await?;
         let position = positions
             .iter()
             .find(|position| position.symbol == order.symbol);
@@ -645,7 +1358,9 @@ impl TradeStation {
                 "This order type cannot be repositioned on the chart".into(),
             ));
         }
-        let meta = self.symbol_details(&order.symbol).await?;
+        let meta = self
+            .symbol_details_with_priority(&order.symbol, RequestPriority::Trading)
+            .await?;
         if new_price <= 0.0 || !aligned(new_price, meta.min_move) {
             return Err(AppError::Validation(format!(
                 "Price {new_price} is not aligned to the {} tick",
@@ -674,23 +1389,31 @@ impl TradeStation {
         account_id: &str,
         position_id: &str,
     ) -> Result<ClosePositionResult, AppError> {
-        if !self
-            .accounts()
-            .await?
-            .iter()
-            .any(|account| account.id == account_id)
+        let started_at = Instant::now();
+        let environment = self.environment().await;
+        let cached = self.brokerage_snapshot(&environment, account_id).await;
+        let (positions, orders, used_stream_cache) = if let Some(snapshot) =
+            cached.filter(|snapshot| snapshot.positions_ready && snapshot.orders_ready)
         {
-            return Err(AppError::Validation(
-                "Selected futures account is unavailable".into(),
-            ));
-        }
-        let position = self
-            .positions(account_id)
-            .await?
+            (snapshot.positions, snapshot.orders, true)
+        } else {
+            let (positions, orders) = tokio::join!(
+                self.positions_with_priority(account_id, RequestPriority::Trading),
+                self.orders_with_priority(account_id, RequestPriority::Trading),
+            );
+            (positions?, orders?, false)
+        };
+        tracing::debug!(
+            account = %mask_account(account_id),
+            position_id,
+            used_stream_cache,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "Resolved close-position preflight"
+        );
+        let position = positions
             .into_iter()
             .find(|position| position.id == position_id)
             .ok_or_else(|| AppError::Validation("The position is no longer open".into()))?;
-        let orders = self.orders(account_id).await?;
         let relevant = closing_orders_for_position(&orders, account_id, &position);
         if relevant.iter().any(|order| order.status == "Indeterminate") {
             return Ok(aborted_close(
@@ -700,82 +1423,284 @@ impl TradeStation {
                 "A closing order has an indeterminate status; the position was not flattened",
             ));
         }
+
+        // The lowest-latency safe close is to convert one existing protective
+        // order to Market. Because it remains in the TradeStation OCO/BRK
+        // group, its sibling is cancelled by the broker when the converted
+        // order executes. Never follow a submitted replacement with an
+        // independent market order: an ambiguous replacement response could
+        // otherwise reverse the position.
+        if let Some(protective) = market_replace_candidate(&relevant, &position) {
+            let sibling_ids: Vec<String> = relevant
+                .iter()
+                .filter(|order| {
+                    order.id != protective.id
+                        && matches!(order.status.as_str(), "Working" | "Pending")
+                })
+                .map(|order| order.id.clone())
+                .collect();
+            let payload = match market_replacement_payload(protective, &position) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    return Ok(aborted_close(
+                        position_id,
+                        &position.symbol,
+                        vec![],
+                        error.to_string(),
+                    ))
+                }
+            };
+            let replacement_started = Instant::now();
+            match self
+                .send(
+                    Method::PUT,
+                    &format!("/orderexecution/orders/{}", protective.id),
+                    Some(payload),
+                )
+                .await
+            {
+                Ok(_) => {
+                    let converted = market_replacement_update(protective, &position);
+                    self.apply_order_update(&environment, account_id, &converted)
+                        .await;
+                    tracing::debug!(
+                        account = %mask_account(account_id),
+                        position_id,
+                        order_id = %protective.id,
+                        linked_exits = sibling_ids.len(),
+                        elapsed_ms = replacement_started.elapsed().as_millis(),
+                        total_elapsed_ms = started_at.elapsed().as_millis(),
+                        "Converted protective order to market for position close"
+                    );
+                    return Ok(ClosePositionResult {
+                        position_id: position_id.into(),
+                        symbol: position.symbol,
+                        cancelled_order_ids: sibling_ids,
+                        flatten_order: Some(converted),
+                        error: None,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        account = %mask_account(account_id),
+                        position_id,
+                        order_id = %protective.id,
+                        elapsed_ms = replacement_started.elapsed().as_millis(),
+                        error = %error,
+                        "Protective-order market conversion was not confirmed"
+                    );
+                    return Ok(aborted_close(
+                        position_id,
+                        &position.symbol,
+                        vec![],
+                        format!(
+                            "TradeStation did not confirm the protective-order market conversion: {error}. No second market order was submitted; verify the live position before trying again"
+                        ),
+                    ));
+                }
+            }
+        }
+
         let active_ids: Vec<String> = relevant
             .iter()
-            .filter(|order| order.status == "Working")
+            .filter(|order| matches!(order.status.as_str(), "Working" | "Pending"))
             .map(|order| order.id.clone())
             .collect();
-        let mut cancellation_requests: Vec<String> = relevant
+        let cancel_ids: Vec<String> = relevant
             .iter()
-            .filter(|order| order.raw_status.as_deref() == Some("UCN"))
+            .filter(|order| {
+                matches!(order.status.as_str(), "Working" | "Pending")
+                    && order.raw_status.as_deref() != Some("UCN")
+            })
             .map(|order| order.id.clone())
             .collect();
-        for order in relevant
-            .iter()
-            .filter(|order| order.status == "Working" && order.raw_status.as_deref() != Some("UCN"))
-        {
-            if let Err(error) = self.cancel_order(&order.id).await {
-                return Ok(aborted_close(
-                    position_id,
-                    &position.symbol,
-                    cancellation_requests,
-                    format!(
-                        "Cancellation failed for order {}: {error}. The position was not flattened",
-                        order.id
-                    ),
-                ));
-            }
-            cancellation_requests.push(order.id.clone());
-        }
+        let mut revision = self.brokerage_revision.subscribe();
+        let cancellation_started = Instant::now();
+        let cancel_results = futures_util::future::join_all(cancel_ids.iter().map(|order_id| {
+            let order_id = order_id.clone();
+            async move { (order_id.clone(), self.cancel_order(&order_id).await) }
+        }))
+        .await;
+        let cancellation_errors: Vec<String> = cancel_results
+            .into_iter()
+            .filter_map(|(order_id, result)| {
+                result
+                    .err()
+                    .map(|error| format!("order {order_id}: {error}"))
+            })
+            .collect();
+        tracing::debug!(
+            account = %mask_account(account_id),
+            position_id,
+            cancellations = cancel_ids.len(),
+            elapsed_ms = cancellation_started.elapsed().as_millis(),
+            "Submitted protective-order cancellations"
+        );
+
+        let mut exit_filled = false;
+        let mut refresh_position = false;
         if !active_ids.is_empty() {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-            loop {
-                let current = match self.orders(account_id).await {
-                    Ok(current) => current,
-                    Err(error) => {
-                        return Ok(aborted_close(
-                            position_id,
-                            &position.symbol,
-                            cancellation_requests,
-                            format!(
-                                "Could not verify exit cancellations: {error}. The position was not flattened"
-                            ),
-                        ))
+            let confirmation_started = Instant::now();
+            let fallback_offsets = [250u64, 750, 1_750];
+            let mut fallback_index = 0usize;
+            'confirmation: loop {
+                if let Some(snapshot) = self.brokerage_snapshot(&environment, account_id).await {
+                    if snapshot.orders_ready {
+                        match cancellation_resolution(&active_ids, &snapshot.orders, false) {
+                            Ok(resolution) if resolution.complete => {
+                                exit_filled |= resolution.exit_filled;
+                                refresh_position |= resolution.position_refresh_required;
+                                break;
+                            }
+                            Ok(resolution) => {
+                                exit_filled |= resolution.exit_filled;
+                                refresh_position |= resolution.position_refresh_required
+                            }
+                            Err(error) => {
+                                return Ok(aborted_close(
+                                    position_id,
+                                    &position.symbol,
+                                    active_ids,
+                                    error.to_string(),
+                                ));
+                            }
+                        }
                     }
-                };
-                let complete = match cancellation_poll_complete(
-                    &active_ids,
-                    &current,
-                    tokio::time::Instant::now() >= deadline,
-                ) {
-                    Ok(complete) => complete,
-                    Err(error) => {
-                        return Ok(aborted_close(
-                            position_id,
-                            &position.symbol,
-                            cancellation_requests,
-                            error.to_string(),
-                        ))
-                    }
-                };
-                if complete {
-                    break;
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                let elapsed = confirmation_started.elapsed();
+                if elapsed >= Duration::from_secs(3) {
+                    let detail = cancellation_errors
+                        .first()
+                        .map(|error| format!(" ({error})"))
+                        .unwrap_or_default();
+                    return Ok(aborted_close(
+                        position_id,
+                        &position.symbol,
+                        active_ids,
+                        format!(
+                            "Protective orders were not confirmed inactive within 3 seconds{detail}; the position was not flattened"
+                        ),
+                    ));
+                }
+
+                let fallback_at = fallback_offsets
+                    .get(fallback_index)
+                    .map(|offset| Duration::from_millis(*offset))
+                    .unwrap_or(Duration::from_secs(3));
+                let wait = fallback_at.saturating_sub(elapsed);
+                tokio::select! {
+                    changed = revision.changed() => {
+                        if changed.is_err() {
+                            tokio::time::sleep(wait).await;
+                        }
+                    }
+                    _ = tokio::time::sleep(wait) => {
+                        if fallback_index >= fallback_offsets.len() {
+                            continue;
+                        }
+                        fallback_index += 1;
+                        let rest_request = self.orders_with_priority(account_id, RequestPriority::Trading);
+                        tokio::pin!(rest_request);
+                        let current = loop {
+                            tokio::select! {
+                                changed = revision.changed() => {
+                                    if changed.is_err() {
+                                        break rest_request.await;
+                                    }
+                                    if let Some(snapshot) = self.brokerage_snapshot(&environment, account_id).await {
+                                        if snapshot.orders_ready {
+                                            match cancellation_resolution(&active_ids, &snapshot.orders, false) {
+                                                Ok(resolution) if resolution.complete => {
+                                                    exit_filled |= resolution.exit_filled;
+                                                    refresh_position |= resolution.position_refresh_required;
+                                                    break 'confirmation;
+                                                }
+                                                Ok(resolution) => {
+                                                    exit_filled |= resolution.exit_filled;
+                                                    refresh_position |= resolution.position_refresh_required;
+                                                }
+                                                Err(error) => {
+                                                    return Ok(aborted_close(
+                                                        position_id,
+                                                        &position.symbol,
+                                                        active_ids,
+                                                        error.to_string(),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                result = &mut rest_request => break result,
+                            }
+                        };
+                        match current {
+                            Ok(current) => match cancellation_resolution(&active_ids, &current, false) {
+                                Ok(resolution) if resolution.complete => {
+                                    exit_filled |= resolution.exit_filled;
+                                    refresh_position |= resolution.position_refresh_required;
+                                    break;
+                                }
+                                Ok(resolution) => {
+                                    exit_filled |= resolution.exit_filled;
+                                    refresh_position |= resolution.position_refresh_required;
+                                }
+                                Err(error) => {
+                                    return Ok(aborted_close(
+                                        position_id,
+                                        &position.symbol,
+                                        active_ids,
+                                        error.to_string(),
+                                    ));
+                                }
+                            },
+                            Err(error) if fallback_index >= fallback_offsets.len() => {
+                                tracing::debug!(
+                                    account = %mask_account(account_id),
+                                    position_id,
+                                    error = %error,
+                                    "Final cancellation fallback request failed"
+                                );
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
             }
+            tracing::debug!(
+                account = %mask_account(account_id),
+                position_id,
+                exit_filled,
+                refresh_position,
+                elapsed_ms = confirmation_started.elapsed().as_millis(),
+                "Confirmed protective orders inactive"
+            );
         }
         let cancelled_order_ids = active_ids;
-        let current_positions = match self.positions(account_id).await {
-            Ok(positions) => positions,
-            Err(error) => {
-                return Ok(aborted_close(
-                    position_id,
-                    &position.symbol,
-                    cancelled_order_ids,
-                    format!(
-                        "Could not re-fetch the position after cancelling exits: {error}. No flatten order was submitted"
-                    ),
-                ))
+        let cached_after = self.brokerage_snapshot(&environment, account_id).await;
+        let current_positions = if !refresh_position
+            && cached_after
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.positions_ready)
+        {
+            cached_after.unwrap().positions
+        } else {
+            match self
+                .positions_with_priority(account_id, RequestPriority::Trading)
+                .await
+            {
+                Ok(positions) => positions,
+                Err(error) => {
+                    return Ok(aborted_close(
+                        position_id,
+                        &position.symbol,
+                        cancelled_order_ids,
+                        format!(
+                            "Could not verify the remaining position after cancelling exits: {error}. No flatten order was submitted"
+                        ),
+                    ))
+                }
             }
         };
         let Some(current_position) = current_positions
@@ -801,7 +1726,8 @@ impl TradeStation {
                 ))
             }
         };
-        let flatten_order = match self.place_order(&draft).await {
+        let flatten_started = Instant::now();
+        let flatten_order = match self.submit_order(&draft).await {
             Ok(order) => order,
             Err(error) => {
                 return Ok(aborted_close(
@@ -812,6 +1738,13 @@ impl TradeStation {
                 ))
             }
         };
+        tracing::debug!(
+            account = %mask_account(account_id),
+            position_id,
+            elapsed_ms = flatten_started.elapsed().as_millis(),
+            total_elapsed_ms = started_at.elapsed().as_millis(),
+            "Submitted position-flatten market order"
+        );
         Ok(ClosePositionResult {
             position_id: position_id.into(),
             symbol: current_position.symbol,
@@ -835,13 +1768,17 @@ impl TradeStation {
         ) {
             return Err(AppError::Validation("Unsupported order type".into()));
         }
-        let accounts = self.accounts().await?;
+        let accounts = self
+            .accounts_with_priority(RequestPriority::Trading)
+            .await?;
         if !accounts.iter().any(|a| a.id == draft.account_id) {
             return Err(AppError::Validation(
                 "Selected futures account is unavailable".into(),
             ));
         }
-        let meta = self.symbol_details(&draft.symbol).await?;
+        let meta = self
+            .symbol_details_with_priority(&draft.symbol, RequestPriority::Trading)
+            .await?;
         for price in [
             draft.limit_price,
             draft.stop_price,
@@ -897,7 +1834,7 @@ fn order_payload(draft: &OrderDraft) -> Value {
     payload
 }
 
-fn order_from_value(item: &Value) -> OrderUpdate {
+pub(crate) fn order_from_value(item: &Value) -> OrderUpdate {
     let leg = item
         .get("Legs")
         .and_then(Value::as_array)
@@ -1014,7 +1951,10 @@ fn closing_orders_for_position<'a>(
                 .is_none_or(|value| value == account_id)
                 && order.symbol == position.symbol
                 && (is_close_order(order) || is_opposite_position_side(order, position))
-                && matches!(order.status.as_str(), "Working" | "Indeterminate")
+                && matches!(
+                    order.status.as_str(),
+                    "Working" | "Pending" | "Indeterminate"
+                )
         })
         .collect()
 }
@@ -1046,7 +1986,110 @@ fn flatten_draft(account_id: &str, position: &Position) -> Result<OrderDraft, Ap
     })
 }
 
-fn position_from_value(item: &Value) -> Position {
+fn remaining_futures_quantity(order: &OrderUpdate) -> Option<u32> {
+    let quantity = order.remaining_quantity.unwrap_or(order.quantity as f64);
+    let rounded = quantity.round();
+    (quantity > 0.0 && (quantity - rounded).abs() <= 1e-8 && rounded <= u32::MAX as f64)
+        .then_some(rounded as u32)
+}
+
+fn oco_relationship(value: &str) -> bool {
+    matches!(
+        value.to_ascii_uppercase().as_str(),
+        "OCO" | "BRK" | "BRACKET"
+    )
+}
+
+fn explicitly_linked_oco(left: &OrderUpdate, right: &OrderUpdate) -> bool {
+    let linked = |source: &OrderUpdate, target: &OrderUpdate| {
+        source
+            .related_orders
+            .iter()
+            .any(|related| related.order_id == target.id && oco_relationship(&related.relationship))
+    };
+    if linked(left, right) || linked(right, left) {
+        return true;
+    }
+    left.group_name
+        .as_deref()
+        .zip(right.group_name.as_deref())
+        .is_some_and(|(left_group, right_group)| {
+            left_group.eq_ignore_ascii_case(right_group) && {
+                let group = left_group.to_ascii_uppercase();
+                group.starts_with("OCO") || group.starts_with("BRK")
+            }
+        })
+}
+
+fn market_replace_candidate<'a>(
+    relevant: &[&'a OrderUpdate],
+    position: &Position,
+) -> Option<&'a OrderUpdate> {
+    let active: Vec<&OrderUpdate> = relevant
+        .iter()
+        .copied()
+        .filter(|order| matches!(order.status.as_str(), "Working" | "Pending"))
+        .collect();
+    if active.is_empty()
+        || active
+            .iter()
+            .any(|order| order.status != "Working" || order.raw_status.as_deref() == Some("UCN"))
+    {
+        return None;
+    }
+    let position_quantity = position.quantity.abs().round() as u32;
+    let mut eligible: Vec<&OrderUpdate> = active
+        .iter()
+        .copied()
+        .filter(|order| {
+            matches!(order.order_type.as_str(), "Limit" | "StopMarket")
+                && is_protective_order(order, Some(position))
+                && remaining_futures_quantity(order) == Some(position_quantity)
+        })
+        .collect();
+    // Prefer converting the take-profit leg so the stop remains protective
+    // until TradeStation accepts the cancel/replace request.
+    eligible.sort_by_key(|order| (order.order_type != "Limit", order.id.as_str()));
+    eligible.into_iter().find(|candidate| {
+        active.len() == 1
+            || active
+                .iter()
+                .all(|other| other.id == candidate.id || explicitly_linked_oco(candidate, other))
+    })
+}
+
+fn market_replacement_payload(order: &OrderUpdate, position: &Position) -> Result<Value, AppError> {
+    let quantity = remaining_futures_quantity(order).ok_or_else(|| {
+        AppError::Validation("The protective order has no replaceable quantity".into())
+    })?;
+    if (quantity as f64 - position.quantity.abs()).abs() > 1e-8 {
+        return Err(AppError::Validation(
+            "The protective order does not cover the complete remaining position".into(),
+        ));
+    }
+    Ok(json!({
+        "OrderType": "Market",
+        "Quantity": quantity.to_string()
+    }))
+}
+
+fn market_replacement_update(order: &OrderUpdate, position: &Position) -> OrderUpdate {
+    let mut converted = order.clone();
+    let quantity = position.quantity.abs().round() as u32;
+    converted.order_type = "Market".into();
+    converted.quantity = quantity;
+    converted.price = None;
+    converted.stop_price = None;
+    converted.status = "Pending".into();
+    converted.timestamp = Utc::now().to_rfc3339();
+    converted.filled_quantity = Some(0.0);
+    converted.remaining_quantity = Some(quantity as f64);
+    converted.raw_status = Some("ReplacePending".into());
+    converted.status_description = Some("Protective exit conversion sent".into());
+    converted
+}
+
+pub(crate) fn position_from_value(item: &Value) -> Position {
     Position {
         id: string(item, "PositionID"),
         symbol: string(item, "Symbol"),
@@ -1088,11 +2131,18 @@ fn replacement_payload(order: &OrderUpdate, new_price: f64) -> Result<Value, App
     Ok(payload)
 }
 
-fn cancellation_poll_complete(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CancellationResolution {
+    complete: bool,
+    exit_filled: bool,
+    position_refresh_required: bool,
+}
+
+fn cancellation_resolution(
     active_ids: &[String],
     current: &[OrderUpdate],
     timed_out: bool,
-) -> Result<bool, AppError> {
+) -> Result<CancellationResolution, AppError> {
     if active_ids.iter().any(|id| {
         current
             .iter()
@@ -1105,7 +2155,7 @@ fn cancellation_poll_complete(
     let unresolved = active_ids.iter().any(|id| {
         current
             .iter()
-            .any(|order| order.id == *id && order.status == "Working")
+            .any(|order| order.id == *id && matches!(order.status.as_str(), "Working" | "Pending"))
     });
     if unresolved && timed_out {
         return Err(AppError::Api(
@@ -1113,7 +2163,28 @@ fn cancellation_poll_complete(
                 .into(),
         ));
     }
-    Ok(!unresolved)
+    let exit_filled = active_ids.iter().any(|id| {
+        current
+            .iter()
+            .any(|order| order.id == *id && order.status == "Filled")
+    });
+    let missing_order = active_ids
+        .iter()
+        .any(|id| !current.iter().any(|order| order.id == *id));
+    Ok(CancellationResolution {
+        complete: !unresolved,
+        exit_filled,
+        position_refresh_required: exit_filled || missing_order,
+    })
+}
+
+#[cfg(test)]
+fn cancellation_poll_complete(
+    active_ids: &[String],
+    current: &[OrderUpdate],
+    timed_out: bool,
+) -> Result<bool, AppError> {
+    Ok(cancellation_resolution(active_ids, current, timed_out)?.complete)
 }
 
 fn aborted_close(
@@ -1174,6 +2245,20 @@ pub fn history_spec(timeframe: &str) -> Result<(usize, &'static str, usize), App
         "M" => Ok((1, "Monthly", 1_000)),
         _ => Err(AppError::Validation("Unsupported timeframe".into())),
     }
+}
+
+fn validate_bars_back(interval: usize, unit: &str, bars_back: usize) -> Result<(), AppError> {
+    if bars_back > 57_600 {
+        return Err(AppError::Validation(
+            "Historical bar requests cannot exceed 57,600 bars".into(),
+        ));
+    }
+    if unit.eq_ignore_ascii_case("minute") && bars_back.saturating_mul(interval) > 500_000 {
+        return Err(AppError::Validation(
+            "Historical bars-back requests cannot exceed 500,000 minutes".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn bar_range_path(
@@ -1437,6 +2522,142 @@ fn mask_account(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn historical_credit_calculation_matches_tradestation_rules() {
+        assert_eq!(
+            historical_credits("/marketdata/barcharts/MES?unit=Minute&interval=1&barsback=25000"),
+            0.0
+        );
+        assert_eq!(
+            historical_credits("/marketdata/barcharts/MES?unit=Minute&interval=1&barsback=26000"),
+            0.26
+        );
+        assert_eq!(
+            historical_credits(
+                "/marketdata/stream/barcharts/MES?unit=Minute&interval=60&barsback=2000"
+            ),
+            1.2
+        );
+        assert_eq!(
+            historical_credits("/marketdata/barcharts/MES?unit=Minute&interval=30&firstdate=2023-01-01&lastdate=2024-06-30"),
+            1.49
+        );
+        assert_eq!(
+            historical_credits("/marketdata/barcharts/MES?unit=Daily&interval=1&barsback=5000"),
+            0.0
+        );
+    }
+
+    #[test]
+    fn configured_bar_history_respects_per_request_limits() {
+        for timeframe in ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"] {
+            let (interval, unit, bars_back) = history_spec(timeframe).unwrap();
+            validate_bars_back(interval, unit, bars_back).unwrap();
+            assert!(bars_back <= 57_600);
+            if unit == "Minute" {
+                assert!(bars_back * interval <= 500_000);
+            }
+        }
+    }
+
+    #[test]
+    fn quota_bucket_replenishes_continuously_without_exceeding_capacity() {
+        let mut bucket = QuotaBucket::new(10, 10);
+        bucket.available = 0.0;
+        bucket.updated_at = Instant::now() - Duration::from_secs(5);
+        bucket.refill(Instant::now());
+        assert!((bucket.available - 5.0).abs() < 0.05);
+        bucket.updated_at = Instant::now() - Duration::from_secs(20);
+        bucket.refill(Instant::now());
+        assert_eq!(bucket.available, 10.0);
+    }
+
+    #[tokio::test]
+    async fn response_headers_reconcile_the_resource_bucket() {
+        let coordinator = QuotaCoordinator::default();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-resource", "custom-positions".parse().unwrap());
+        headers.insert("x-ratelimit-limit", "42".parse().unwrap());
+        headers.insert("x-ratelimit-period", "60".parse().unwrap());
+        headers.insert("x-ratelimit-remaining", "17".parse().unwrap());
+        headers.insert("x-ratelimit-reset", "30".parse().unwrap());
+        coordinator.observe("positions", &headers).await;
+        let state = coordinator.state.lock().await;
+        assert_eq!(state.aliases["positions"], "custom-positions");
+        let bucket = &state.buckets["custom-positions"];
+        assert_eq!(bucket.capacity, 42.0);
+        assert_eq!(bucket.available, 17.0);
+    }
+
+    #[test]
+    fn rate_limit_errors_distinguish_request_and_concurrency_exhaustion() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-concurrency-resource",
+            "streaming-positions".parse().unwrap(),
+        );
+        headers.insert("x-concurrency-remaining", "5".parse().unwrap());
+        headers.insert(
+            "x-ratelimit-resource",
+            "streaming-positions".parse().unwrap(),
+        );
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        assert!(matches!(
+            rate_limit_error(&headers, "positions-stream"),
+            AppError::RateLimited {
+                concurrent: false,
+                ..
+            }
+        ));
+        headers.insert("x-concurrency-remaining", "0".parse().unwrap());
+        headers.insert("x-ratelimit-remaining", "25".parse().unwrap());
+        assert!(matches!(
+            rate_limit_error(&headers, "positions-stream"),
+            AppError::RateLimited {
+                concurrent: true,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn background_work_cannot_consume_the_trading_reserve() {
+        let coordinator = QuotaCoordinator::default();
+        {
+            let mut state = coordinator.state.lock().await;
+            state.buckets.insert(
+                "positions".into(),
+                QuotaBucket {
+                    capacity: 100.0,
+                    available: 10.0,
+                    refill_per_second: 0.01,
+                    updated_at: Instant::now(),
+                    reset_at: None,
+                },
+            );
+        }
+        assert!(matches!(
+            coordinator
+                .acquire(
+                    "positions",
+                    RequestPriority::Background,
+                    0.0,
+                    Some(Duration::ZERO)
+                )
+                .await,
+            Err(AppError::RateLimited { .. })
+        ));
+        coordinator
+            .acquire(
+                "positions",
+                RequestPriority::Trading,
+                0.0,
+                Some(Duration::ZERO),
+            )
+            .await
+            .unwrap();
+    }
+
     fn sample_order(id: &str) -> OrderUpdate {
         OrderUpdate {
             id: id.into(),
@@ -1617,6 +2838,76 @@ mod tests {
     }
 
     #[test]
+    fn market_close_converts_one_complete_oco_leg() {
+        let position = sample_position("Long", 2.0);
+        let take_profit = sample_order("1");
+        let mut stop_loss = sample_order("2");
+        stop_loss.order_type = "StopMarket".into();
+        stop_loss.price = None;
+        stop_loss.stop_price = Some(6240.0);
+        let orders = vec![take_profit, stop_loss];
+        let relevant = closing_orders_for_position(&orders, "account-1", &position);
+
+        let selected = market_replace_candidate(&relevant, &position).unwrap();
+        assert_eq!(selected.id, "1", "the limit leg should be preferred");
+        assert_eq!(
+            market_replacement_payload(selected, &position).unwrap(),
+            json!({ "OrderType": "Market", "Quantity": "2" })
+        );
+
+        let update = market_replacement_update(selected, &position);
+        assert_eq!(update.id, selected.id);
+        assert_eq!(update.order_type, "Market");
+        assert_eq!(update.status, "Pending");
+        assert_eq!(update.raw_status.as_deref(), Some("ReplacePending"));
+        assert_eq!(update.remaining_quantity, Some(2.0));
+        assert_eq!(update.price, None);
+    }
+
+    #[test]
+    fn market_close_allows_one_standalone_protective_exit() {
+        let position = sample_position("Long", 2.0);
+        let mut exit = sample_order("1");
+        exit.group_name = None;
+        exit.related_orders.clear();
+        let orders = vec![exit];
+        let relevant = closing_orders_for_position(&orders, "account-1", &position);
+        assert_eq!(
+            market_replace_candidate(&relevant, &position).map(|order| order.id.as_str()),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn market_close_rejects_quantity_mismatch_unlinked_exits_and_pending_state() {
+        let position = sample_position("Long", 2.0);
+        let mut partial = sample_order("1");
+        partial.remaining_quantity = Some(1.0);
+        let partial_orders = vec![partial];
+        let relevant = closing_orders_for_position(&partial_orders, "account-1", &position);
+        assert!(market_replace_candidate(&relevant, &position).is_none());
+
+        let first = sample_order("1");
+        let mut unrelated = sample_order("2");
+        unrelated.group_name = Some("OCO 999".into());
+        let unrelated_orders = vec![first, unrelated];
+        let relevant = closing_orders_for_position(&unrelated_orders, "account-1", &position);
+        assert!(market_replace_candidate(&relevant, &position).is_none());
+
+        let mut pending = sample_order("1");
+        pending.status = "Pending".into();
+        let pending_orders = vec![pending];
+        let relevant = closing_orders_for_position(&pending_orders, "account-1", &position);
+        assert!(market_replace_candidate(&relevant, &position).is_none());
+
+        let mut cancel_pending = sample_order("1");
+        cancel_pending.raw_status = Some("UCN".into());
+        let cancel_pending_orders = vec![cancel_pending];
+        let relevant = closing_orders_for_position(&cancel_pending_orders, "account-1", &position);
+        assert!(market_replace_candidate(&relevant, &position).is_none());
+    }
+
+    #[test]
     fn position_parser_normalizes_signed_futures_quantities() {
         let position = position_from_value(&json!({
             "PositionID": "p1", "Symbol": "MESU26", "LongShort": "Short",
@@ -1659,6 +2950,64 @@ mod tests {
         let mut cancelled = sample_order("1");
         cancelled.status = "Cancelled".into();
         assert!(cancellation_poll_complete(&ids, &[cancelled], false).unwrap());
+    }
+
+    #[test]
+    fn cancellation_resolution_detects_fills_and_ambiguous_missing_orders() {
+        let ids = vec!["1".into(), "2".into()];
+        let mut cancelled = sample_order("1");
+        cancelled.status = "Cancelled".into();
+        let mut filled = sample_order("2");
+        filled.status = "Filled".into();
+        let resolution =
+            cancellation_resolution(&ids, &[cancelled.clone(), filled], false).unwrap();
+        assert!(resolution.complete);
+        assert!(resolution.exit_filled);
+        assert!(resolution.position_refresh_required);
+
+        let missing = cancellation_resolution(&ids, &[cancelled], false).unwrap();
+        assert!(missing.complete);
+        assert!(!missing.exit_filled);
+        assert!(missing.position_refresh_required);
+    }
+
+    #[tokio::test]
+    async fn brokerage_cache_wakes_waiters_immediately_and_tracks_complete_snapshots() {
+        let api = TradeStation::new().unwrap();
+        let environment = TradingEnvironment::Sim;
+        api.reset_brokerage_cache(&environment, "account-1").await;
+        api.set_brokerage_stream_state(&environment, "account-1", "positions", "streaming")
+            .await;
+        api.set_brokerage_stream_state(&environment, "account-1", "orders", "streaming")
+            .await;
+        api.apply_positions_snapshot(&environment, "account-1", &[sample_position("Long", 1.0)])
+            .await;
+        api.apply_orders_snapshot(&environment, "account-1", &[sample_order("1")])
+            .await;
+        let snapshot = api
+            .brokerage_snapshot(&environment, "account-1")
+            .await
+            .unwrap();
+        assert!(snapshot.positions_ready && snapshot.orders_ready);
+        assert_eq!(snapshot.positions.len(), 1);
+        assert_eq!(snapshot.orders.len(), 1);
+
+        let mut revision = api.brokerage_revision.subscribe();
+        let mut cancelled = sample_order("1");
+        cancelled.status = "Cancelled".into();
+        let started = Instant::now();
+        api.apply_order_update(&environment, "account-1", &cancelled)
+            .await;
+        tokio::time::timeout(Duration::from_millis(100), revision.changed())
+            .await
+            .expect("stream cache revision should wake without a polling interval")
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let snapshot = api
+            .brokerage_snapshot(&environment, "account-1")
+            .await
+            .unwrap();
+        assert_eq!(snapshot.orders[0].status, "Cancelled");
     }
 
     #[test]

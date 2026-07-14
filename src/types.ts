@@ -7,6 +7,7 @@ export type ChartKind = "candles" | "line" | "area";
 export type OrderType = "Market" | "Limit" | "StopMarket" | "StopLimit";
 export type ChartTimezone = "exchange" | "local" | "UTC" | "America/New_York" | "America/Chicago" | "America/Denver" | "America/Los_Angeles" | "Europe/London" | "Asia/Tokyo";
 export type StreamConnectionState = "connecting" | "streaming" | "stale" | "reconnecting" | "disconnected" | "rate-limited";
+export type BarStreamConsumer = "chart" | "ema-alert" | "vwap";
 
 export interface Bar {
   time: number;
@@ -286,3 +287,8 @@ export interface BarSnapshotEvent {
 export interface BarUpdateEvent extends Omit<BarSnapshotEvent, "bars"> { bar: Bar; }
 export interface QuoteUpdateEvent { subscriptionId: string; environment: TradingEnvironment; quote: Quote; }
 export interface StreamStateEvent { subscriptionId: string; environment: TradingEnvironment; channel: "bars" | "quotes"; state: StreamConnectionState; message?: string; }
+export interface PositionsSnapshotEvent { accountId: string; positions: Position[]; }
+export interface PositionUpdateEvent { accountId: string; position: Position; }
+export interface OrdersSnapshotEvent { accountId: string; orders: OrderUpdate[]; }
+export interface OrderStreamUpdateEvent { accountId: string; order: OrderUpdate; }
+export interface BrokerageStreamStateEvent { accountId: string; channel: "positions" | "orders"; state: StreamConnectionState; message?: string; }

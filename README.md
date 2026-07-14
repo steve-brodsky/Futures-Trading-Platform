@@ -11,8 +11,9 @@ Northstar Trader is a private futures charting and order-entry desktop client fo
 
 - Candlestick, line, and area charts powered by TradingView Lightweight Charts.
 - `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, daily, weekly, and monthly timeframes.
-- Streaming bars for every open chart and a deduplicated quote stream for charts, contracts, and the watchlist.
+- Shared streaming bars across matching charts, EMA alerts, and VWAP consumers, plus a deduplicated quote stream for charts, contracts, and the watchlist.
 - SQLite-backed candle caching, initial history, and lazy backfill when the chart approaches its oldest loaded bar.
+- Quota-aware TradeStation request scheduling with response-header reconciliation, historical-credit pacing, trading reserves, and reset-aware reconnects.
 - New York regular-session shading, an exchange-aware chart timezone selector, current-price label, and candle countdown.
 - EMA 20, EMA 200, SMA 50, and New York session VWAP overlays with visibility and color controls.
 - EMA 200 cross alerts configured independently by chart and timeframe, including sound and duration choices.

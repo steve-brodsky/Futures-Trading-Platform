@@ -14,19 +14,21 @@ import { TradingChart } from "./components/TradingChart";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { api } from "./lib/bridge";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
+import { mergeBars } from "./lib/barData";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type EmaCrossSide } from "./lib/emaAlerts";
 import { calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { previousSessionClose, quoteDayChangePercent } from "./lib/quotes";
+import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
 import { calculateSwingStop } from "./lib/swingStop";
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderTicketSettings, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const newYorkClock = new Intl.DateTimeFormat("en-US", {
@@ -63,10 +65,13 @@ type ReviewState =
   | { kind: "entry"; draft: OrderDraft; preview: OrderPreview; sourceTabId: string; chartSymbol: string }
   | { kind: "close-position"; draft: OrderDraft; preview: OrderPreview; positionId: string };
 
-function mergeBars(current: Bar[], incoming: Bar[]): Bar[] {
-  const byTime = new Map(current.map((bar) => [bar.time, bar]));
-  incoming.forEach((bar) => byTime.set(bar.time, bar));
-  return [...byTime.values()].sort((a, b) => a.time - b.time);
+function activeProtectionIds(expirations: Map<string, number>, now = Date.now()): Set<string> {
+  const active = new Set<string>();
+  expirations.forEach((expiresAt, id) => {
+    if (expiresAt > now) active.add(id);
+    else expirations.delete(id);
+  });
+  return active;
 }
 
 function formatPrice(value?: number): string {
@@ -148,6 +153,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoricalOrderPage>({ orders: [] });
   const [brokerageLoading, setBrokerageLoading] = useState(false);
   const [brokerageError, setBrokerageError] = useState<string>();
+  const [brokerageStreamStates, setBrokerageStreamStates] = useState<Record<"positions" | "orders", StreamConnectionState>>({ positions: api.isNative ? "disconnected" : "streaming", orders: api.isNative ? "disconnected" : "streaming" });
   const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [orderProjection, setOrderProjection] = useState<(OrderProjection & { tradeSymbol?: string }) | null>(null);
@@ -177,8 +183,14 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
   const brokerageRefreshRef = useRef<(settle?: boolean) => void>(() => undefined);
+  const brokerageBalanceRefreshRef = useRef<() => void>(() => undefined);
+  const brokerageFillReconcileTimerRef = useRef<number | undefined>(undefined);
+  const selectedAccountIdRef = useRef<string | undefined>(undefined);
+  const recentOrderIdsRef = useRef(new Map<string, number>());
+  const recentPositionIdsRef = useRef(new Map<string, number>());
   const [busy, setBusy] = useState(false);
   const [closingPositionIds, setClosingPositionIds] = useState<Set<string>>(() => new Set());
+  const closingPositionTimersRef = useRef(new Map<string, number>());
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
   const [currentTime, setCurrentTime] = useState(() => Date.now());
   const subscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; timeframe: Timeframe; epoch: string }>());
@@ -325,13 +337,13 @@ export default function App() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
-        if (workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) {
-          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: payload.bars } }));
+        if (payload.environment === environmentRef.current && workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) {
+          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], payload.bars) } }));
         }
         if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], payload.bars) } }));
         }
-        if (payload.environment === environmentRef.current) primeAlertMarket(payload.symbol, payload.timeframe, payload.bars);
+        if (payload.environment === environmentRef.current) primeAlertMarket(payload.symbol, payload.timeframe, payload.bars, false);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
         if (workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) {
@@ -350,8 +362,55 @@ export default function App() {
         if (!workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId) || payload.channel !== "bars") return;
         setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: payload.state } }));
       }).then((unlisten) => cleanups.push(unlisten));
-      listen<{ accountId: string }>("brokerage-update", () => brokerageRefreshRef.current()).then((unlisten) => cleanups.push(unlisten));
-      listen<string>("brokerage-stream-error", ({ payload }) => setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Brokerage stream reconnecting", text: payload, level: "warning" as const }, ...current].slice(0, 250))).then((unlisten) => cleanups.push(unlisten));
+      listen<PositionsSnapshotEvent>("positions-snapshot", ({ payload }) => {
+        if (payload.accountId !== selectedAccountIdRef.current) return;
+        const protectedIds = activeProtectionIds(recentPositionIdsRef.current);
+        setPositions((current) => reconcilePositionSnapshot(current, payload.positions, protectedIds));
+        setBrokerageError(undefined);
+        brokerageBalanceRefreshRef.current();
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<PositionUpdateEvent>("position-update", ({ payload }) => {
+        if (payload.accountId !== selectedAccountIdRef.current) return;
+        setPositions((current) => {
+          const isNew = isNewOpenPosition(current, payload.position);
+          if (isNew) recentPositionIdsRef.current.set(payload.position.id, Date.now() + 10_000);
+          if (payload.position.quantity === 0) recentPositionIdsRef.current.delete(payload.position.id);
+          return upsertStreamPosition(current, payload.position);
+        });
+        brokerageBalanceRefreshRef.current();
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<OrdersSnapshotEvent>("orders-snapshot", ({ payload }) => {
+        if (payload.accountId !== selectedAccountIdRef.current) return;
+        const protectedIds = activeProtectionIds(recentOrderIdsRef.current);
+        setOrders((current) => reconcileOrderSnapshot(current, payload.orders, protectedIds));
+        setBrokerageError(undefined);
+        brokerageBalanceRefreshRef.current();
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<OrderStreamUpdateEvent>("order-stream-update", ({ payload }) => {
+        if (payload.accountId !== selectedAccountIdRef.current) return;
+        recentOrderIdsRef.current.set(payload.order.id, Date.now() + 15_000);
+        setOrders((current) => upsertStreamOrder(current, payload.order));
+        if (isCompletedCloseFill(payload.order)) {
+          setPositions((current) => current.filter((position) => {
+            if (position.symbol !== payload.order.symbol) return true;
+            recentPositionIdsRef.current.delete(position.id);
+            return false;
+          }));
+        }
+        brokerageBalanceRefreshRef.current();
+        if (orderFillNeedsPositionReconciliation(payload.order) && brokerageFillReconcileTimerRef.current == null) {
+          // Allow TradeStation's position view a moment to settle, then perform
+          // one authoritative reconciliation for the whole burst of fill events.
+          brokerageFillReconcileTimerRef.current = window.setTimeout(() => {
+            brokerageFillReconcileTimerRef.current = undefined;
+            brokerageRefreshRef.current();
+          }, 350);
+        }
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<BrokerageStreamStateEvent>("brokerage-stream-state", ({ payload }) => {
+        if (payload.accountId !== selectedAccountIdRef.current) return;
+        setBrokerageStreamStates((current) => ({ ...current, [payload.channel]: payload.state }));
+      }).then((unlisten) => cleanups.push(unlisten));
     }
     listen<WorkspaceState>("workspace-sync", ({ payload }) => {
       if (payload.revision <= workspaceRef.current.revision) return;
@@ -372,7 +431,11 @@ export default function App() {
     }).then((unlisten) => cleanups.push(unlisten));
     listen<StripBounds>("chart-strip-bounds", ({ payload }) => stripBoundsRef.current.set(payload.windowId, payload)).then((unlisten) => cleanups.push(unlisten));
     listen<{ tabId: string; range: { from: number; to: number } }>("chart-viewport", ({ payload }) => viewRangesRef.current.set(payload.tabId, payload.range)).then((unlisten) => cleanups.push(unlisten));
-    return () => cleanups.forEach((unlisten) => unlisten());
+    return () => {
+      if (brokerageFillReconcileTimerRef.current != null) window.clearTimeout(brokerageFillReconcileTimerRef.current);
+      brokerageFillReconcileTimerRef.current = undefined;
+      cleanups.forEach((unlisten) => unlisten());
+    };
   }, []);
 
   useEffect(() => {
@@ -380,6 +443,8 @@ export default function App() {
   }, [workspaceLoaded]);
 
   const selectedAccount = accounts.find((account) => account.id === workspace.selectedAccountId) ?? accounts[0];
+  selectedAccountIdRef.current = selectedAccount?.id;
+  const brokerageStreamsHealthy = areBrokerageStreamsHealthy(brokerageStreamStates);
 
   useEffect(() => {
     if (currentWindowId !== MAIN_WINDOW_ID || !selectedAccount) return;
@@ -387,31 +452,42 @@ export default function App() {
     let active = true;
     let balanceRefreshTimer: number | undefined;
     let balanceRefreshInFlight = false;
-    let balanceRefreshQueued = false;
+    let lastBalanceRefreshAt = 0;
     let tradingRefreshInFlight = false;
     let tradingRefreshQueued = false;
-    const settlementTimers = new Set<number>();
-    const refreshTradingState = async () => {
+    let tradingRefreshForceQueued = false;
+    let settlementTimer: number | undefined;
+    const refreshTradingState = async (force = false) => {
       if (!active) return;
       if (tradingRefreshInFlight) {
         tradingRefreshQueued = true;
+        tradingRefreshForceQueued ||= force;
         return;
       }
       tradingRefreshInFlight = true;
       try {
         do {
           tradingRefreshQueued = false;
+          const refreshAllResources = force || tradingRefreshForceQueued;
+          tradingRefreshForceQueued = false;
           try {
             const [nextPositions, nextOrders] = await Promise.all([
-              api.positions(selectedAccount.id), api.orders(selectedAccount.id),
+              refreshAllResources || brokerageStreamStates.positions !== "streaming" ? api.positions(selectedAccount.id) : Promise.resolve(undefined),
+              refreshAllResources || brokerageStreamStates.orders !== "streaming" ? api.orders(selectedAccount.id) : Promise.resolve(undefined),
             ]);
             if (active) {
-              setPositions(nextPositions);
-              setOrders(nextOrders);
+              if (nextPositions) {
+                const protectedIds = activeProtectionIds(recentPositionIdsRef.current);
+                setPositions((current) => reconcilePositionSnapshot(current, nextPositions, protectedIds));
+              }
+              if (nextOrders) {
+                const protectedIds = activeProtectionIds(recentOrderIdsRef.current);
+                setOrders((current) => reconcileOrderSnapshot(current, nextOrders, protectedIds));
+              }
               setBrokerageError(undefined);
             }
           } catch (error) {
-            if (active) setBrokerageError(String(error));
+            if (active && !isManagedThrottle(error)) setBrokerageError(String(error));
           }
         } while (active && tradingRefreshQueued);
       } finally {
@@ -419,80 +495,76 @@ export default function App() {
       }
     };
     const refreshBalances = async () => {
-      if (balanceRefreshInFlight) {
-        balanceRefreshQueued = true;
-        return;
-      }
+      if (balanceRefreshInFlight) return;
       balanceRefreshInFlight = true;
-      do {
-        balanceRefreshQueued = false;
-        try {
-          const nextBalances = await api.balances(selectedAccount.id);
-          if (active) setBalances(nextBalances);
-        } catch (error) {
-          if (active) setBrokerageError(String(error));
-        }
-      } while (active && balanceRefreshQueued);
-      balanceRefreshInFlight = false;
+      try {
+        const nextBalances = await api.balances(selectedAccount.id);
+        if (active) { setBalances(nextBalances); lastBalanceRefreshAt = Date.now(); }
+      } catch (error) {
+        if (active && !isManagedThrottle(error)) setBrokerageError(String(error));
+      } finally {
+        balanceRefreshInFlight = false;
+      }
     };
     const requestBalanceRefresh = () => {
       if (!active || balanceRefreshTimer != null) return;
+      const delay = Math.max(0, 10_000 - (Date.now() - lastBalanceRefreshAt));
       balanceRefreshTimer = window.setTimeout(() => {
         balanceRefreshTimer = undefined;
         void refreshBalances();
-      }, 2_000);
-    };
-    const refreshBodBalances = async () => {
-      try {
-        const nextBod = await api.bodBalances(selectedAccount.id);
-        if (active) setBodBalances(nextBod);
-      } catch (error) {
-        if (active) setBrokerageError(String(error));
-      }
+      }, delay);
     };
     const scheduleSettlementRefreshes = () => {
-      settlementTimers.forEach((timer) => window.clearTimeout(timer));
-      settlementTimers.clear();
-      [350, 1_000, 2_500].forEach((delay) => {
-        const timer = window.setTimeout(() => {
-          settlementTimers.delete(timer);
-          void refreshTradingState();
-        }, delay);
-        settlementTimers.add(timer);
-      });
+      if (settlementTimer != null) window.clearTimeout(settlementTimer);
+      settlementTimer = window.setTimeout(() => {
+        settlementTimer = undefined;
+        void Promise.all([refreshTradingState(true), refreshBalances()]);
+      }, 2_500);
     };
     const requestBrokerageRefresh = (settle = false) => {
       if (!active) return;
-      void refreshTradingState();
-      requestBalanceRefresh();
       if (settle) scheduleSettlementRefreshes();
+      else { void refreshTradingState(true); requestBalanceRefresh(); }
     };
     brokerageRefreshRef.current = requestBrokerageRefresh;
+    brokerageBalanceRefreshRef.current = requestBalanceRefresh;
     const refreshAll = async () => {
       setBrokerageLoading(true); setBrokerageError(undefined);
-      await Promise.all([refreshTradingState(), refreshBalances(), refreshBodBalances()]);
+      await Promise.all([refreshTradingState(true), refreshBalances()]);
       if (active) setBrokerageLoading(false);
     };
     void refreshAll();
-    const tradingTimer = window.setInterval(() => void refreshTradingState(), 5_000);
-    const accountTimer = window.setInterval(() => {
-      void refreshBalances();
-      void refreshBodBalances();
-    }, 30_000);
+    const tradingTimer = window.setInterval(
+      () => void refreshTradingState(brokerageStreamsHealthy),
+      brokeragePollInterval(brokerageStreamStates),
+    );
+    const accountTimer = window.setInterval(() => void refreshBalances(), 30_000);
     return () => {
       active = false;
       clearInterval(tradingTimer);
       clearInterval(accountTimer);
       if (balanceRefreshTimer != null) clearTimeout(balanceRefreshTimer);
-      settlementTimers.forEach((timer) => window.clearTimeout(timer));
+      if (settlementTimer != null) window.clearTimeout(settlementTimer);
       if (brokerageRefreshRef.current === requestBrokerageRefresh) brokerageRefreshRef.current = () => undefined;
+      if (brokerageBalanceRefreshRef.current === requestBalanceRefresh) brokerageBalanceRefreshRef.current = () => undefined;
     };
-  }, [selectedAccount?.id, authEpoch, environment]);
+  }, [selectedAccount?.id, authEpoch, environment, brokerageStreamsHealthy]);
+
+  const brokerageDayKey = new Date(currentTime).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  useEffect(() => {
+    if (currentWindowId !== MAIN_WINDOW_ID || !selectedAccount) return;
+    let active = true;
+    api.bodBalances(selectedAccount.id)
+      .then((next) => { if (active) setBodBalances(next); })
+      .catch((error) => { if (active && !isManagedThrottle(error)) setBrokerageError(String(error)); });
+    return () => { active = false; };
+  }, [selectedAccount?.id, authEpoch, environment, brokerageDayKey]);
 
   useEffect(() => {
     if (currentWindowId !== MAIN_WINDOW_ID || !selectedAccount || !api.isNative || !authenticated) return;
+    setBrokerageStreamStates({ positions: "connecting", orders: "connecting" });
     api.startBrokerageStream(selectedAccount.id).catch((error) => setBrokerageError(String(error)));
-    return () => { api.stopBrokerageStream(); };
+    return () => { setBrokerageStreamStates({ positions: "disconnected", orders: "disconnected" }); api.stopBrokerageStream(); };
   }, [selectedAccount?.id, authenticated, environment]);
 
   useEffect(() => {
@@ -515,7 +587,7 @@ export default function App() {
         api.bars(tab.symbol.symbol, tab.timeframe).then((nextBars) => setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "streaming" }), bars: nextBars } }))).catch((error) => showToast(String(error)));
       } else if (authenticated) {
         api.cachedBars(tab.symbol.symbol, tab.timeframe).then((cached) => setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(cached, current[tab.id]?.bars ?? []) } }))).catch(() => undefined);
-        api.startBarStream(subscriptionId, tab.symbol.symbol, tab.timeframe).catch((error) => {
+        api.startBarStream(subscriptionId, tab.symbol.symbol, tab.timeframe, "chart").catch((error) => {
           setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: "disconnected" } }));
           showToast(String(error));
         });
@@ -571,7 +643,7 @@ export default function App() {
       if (alertSubscriptionsRef.current.has(market.key) || !api.isNative || !authenticated) return;
       const subscriptionId = `ema-alert:${encodeURIComponent(market.symbol)}:${market.timeframe}`;
       alertSubscriptionsRef.current.set(market.key, { subscriptionId, symbol: market.symbol, timeframe: market.timeframe, epoch });
-      api.startBarStream(subscriptionId, market.symbol, market.timeframe).catch((error) => {
+      api.startBarStream(subscriptionId, market.symbol, market.timeframe, "ema-alert").catch((error) => {
         if (alertSubscriptionsRef.current.get(market.key)?.epoch !== epoch) return;
         alertSubscriptionsRef.current.delete(market.key);
         const message = `EMA alert data unavailable for ${market.symbol} ${market.timeframe}: ${String(error)}`;
@@ -615,7 +687,7 @@ export default function App() {
         api.bars(symbol, "1m").then(mergeSource).catch(() => undefined);
       } else if (authenticated) {
         api.cachedBars(symbol, "1m").then(mergeSource).catch(() => undefined);
-        api.startBarStream(subscriptionId, symbol, "1m").catch((error) => {
+        api.startBarStream(subscriptionId, symbol, "1m", "vwap").catch((error) => {
           if (vwapSubscriptionsRef.current.get(symbol)?.epoch !== epoch) return;
           vwapSubscriptionsRef.current.delete(symbol);
           setVwapMarkets((current) => ({
@@ -700,6 +772,22 @@ export default function App() {
           ...current,
           [symbol]: { ...(current[symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[symbol]?.bars ?? [], cached) },
         }));
+        const edgeTolerance = 4 * 24 * 60 * 60;
+        const cacheCoversPastRange = range.last < Math.floor(Date.now() / 1000) - 300
+          && cached[0].time <= range.first + edgeTolerance
+          && cached[cached.length - 1].time >= range.last - edgeTolerance;
+        if (cacheCoversPastRange) {
+          setVwapMarkets((current) => ({
+            ...current,
+            [symbol]: {
+              ...(current[symbol] ?? { bars: [], pendingRanges: [] }),
+              loadedRanges: mergeEpochRanges([...(current[symbol]?.loadedRanges ?? []), range]),
+              pendingRanges: (current[symbol]?.pendingRanges ?? []).filter((item) => item.first !== range.first || item.last !== range.last),
+              error: undefined,
+            },
+          }));
+          return;
+        }
       }
       const loaded = await api.barRange(symbol, "1m", range.first, range.last);
       if (epoch !== vwapDataEpochRef.current) return;
@@ -800,8 +888,11 @@ export default function App() {
 
   useEffect(() => {
     if (!searchOpen) return;
-    const timer = window.setTimeout(() => api.symbolSearch(search).then(setSearchResults).catch(() => setSearchResults([])), 180);
-    return () => clearTimeout(timer);
+    let active = true;
+    const timer = window.setTimeout(() => api.symbolSearch(search)
+      .then((results) => { if (active) setSearchResults(results); })
+      .catch(() => { if (active) setSearchResults([]); }), 300);
+    return () => { active = false; clearTimeout(timer); };
   }, [search, searchOpen]);
 
   useEffect(() => {
@@ -1256,7 +1347,8 @@ export default function App() {
     setBusy(true);
     try {
       const update = await api.placeOrder(draft);
-      setOrders((current) => [update, ...current]);
+      recentOrderIdsRef.current.set(update.id, Date.now() + 15_000);
+      setOrders((current) => upsertStreamOrder(current, update));
       brokerageRefreshRef.current(true);
       if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(draft.symbol);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
@@ -1278,7 +1370,14 @@ export default function App() {
 
   async function executeClosePosition(positionId: string) {
     if (!selectedAccount || closingPositionIds.has(positionId)) return;
+    // The post-close snapshot must be allowed to remove this position. Ordinary
+    // P&L ticks must not extend the new-position reconciliation grace period.
+    recentPositionIdsRef.current.delete(positionId);
+    const previousTimer = closingPositionTimersRef.current.get(positionId);
+    if (previousTimer != null) window.clearTimeout(previousTimer);
+    closingPositionTimersRef.current.delete(positionId);
     setClosingPositionIds((current) => new Set(current).add(positionId));
+    let waitForFill = false;
     try {
       const result = await api.closePosition(selectedAccount.id, positionId);
       brokerageRefreshRef.current(true);
@@ -1287,21 +1386,61 @@ export default function App() {
         showToast(result.error);
         return;
       }
-      if (result.flattenOrder) setOrders((current) => [result.flattenOrder!, ...current]);
+      if (!result.flattenOrder) setPositions((current) => current.filter((position) => position.id !== positionId));
+      if (result.flattenOrder) {
+        waitForFill = true;
+        recentOrderIdsRef.current.set(result.flattenOrder.id, Date.now() + 15_000);
+        setOrders((current) => upsertStreamOrder(current, result.flattenOrder!));
+        const timer = window.setTimeout(() => {
+          closingPositionTimersRef.current.delete(positionId);
+          setClosingPositionIds((current) => { const next = new Set(current); next.delete(positionId); return next; });
+        }, 5_000);
+        closingPositionTimersRef.current.set(positionId, timer);
+      }
+      const convertedProtectiveOrder = result.flattenOrder?.rawStatus === "ReplacePending";
       setNotifications((current) => [{
         id: crypto.randomUUID(), time: new Date().toISOString(), symbol: result.symbol,
         title: result.flattenOrder ? "Position close sent" : "Position already closed",
         text: result.flattenOrder
-          ? `${result.flattenOrder.side} ${result.flattenOrder.quantity} ${result.symbol} at market after cancelling ${result.cancelledOrderIds.length} exit order${result.cancelledOrderIds.length === 1 ? "" : "s"}.`
+          ? convertedProtectiveOrder
+            ? `${result.flattenOrder.side} ${result.flattenOrder.quantity} ${result.symbol} at market by converting the protective exit; TradeStation will cancel ${result.cancelledOrderIds.length} linked exit order${result.cancelledOrderIds.length === 1 ? "" : "s"} through the bracket.`
+            : `${result.flattenOrder.side} ${result.flattenOrder.quantity} ${result.symbol} at market after cancelling ${result.cancelledOrderIds.length} exit order${result.cancelledOrderIds.length === 1 ? "" : "s"}.`
           : `${result.symbol} closed before another flatten order was needed.`,
         level: "warning" as const,
       }, ...current].slice(0, 250));
       showToast(result.flattenOrder ? `Close order sent for ${result.symbol}.` : `${result.symbol} is already closed.`);
-    } catch (error) { showToast(String(error)); }
+    } catch (error) {
+      const message = String(error);
+      if (message.toLowerCase().includes("position is no longer open")) {
+        setPositions((current) => current.filter((position) => position.id !== positionId));
+      }
+      showToast(message);
+    }
     finally {
-      setClosingPositionIds((current) => { const next = new Set(current); next.delete(positionId); return next; });
+      if (!waitForFill) {
+        const timer = closingPositionTimersRef.current.get(positionId);
+        if (timer != null) window.clearTimeout(timer);
+        closingPositionTimersRef.current.delete(positionId);
+        setClosingPositionIds((current) => { const next = new Set(current); next.delete(positionId); return next; });
+      }
     }
   }
+
+  useEffect(() => {
+    const openPositionIds = new Set(positions.map((position) => position.id));
+    setClosingPositionIds((current) => {
+      const completed = [...current].filter((positionId) => !openPositionIds.has(positionId));
+      if (!completed.length) return current;
+      const next = new Set(current);
+      completed.forEach((positionId) => {
+        next.delete(positionId);
+        const timer = closingPositionTimersRef.current.get(positionId);
+        if (timer != null) window.clearTimeout(timer);
+        closingPositionTimersRef.current.delete(positionId);
+      });
+      return next;
+    });
+  }, [positions]);
 
   async function replaceChartOrder(order: OrderUpdate, newPrice: number) {
     if (!selectedAccount || replacingOrderIds.has(order.id)) return;
@@ -1343,7 +1482,8 @@ export default function App() {
     setBusy(true);
     try {
       const update = await api.placeOrder(review.draft);
-      setOrders((current) => [update, ...current]);
+      recentOrderIdsRef.current.set(update.id, Date.now() + 15_000);
+      setOrders((current) => upsertStreamOrder(current, update));
       brokerageRefreshRef.current(true);
       if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(review.draft.symbol);
       setReview(null);
@@ -1352,7 +1492,8 @@ export default function App() {
     finally { setBusy(false); }
   }
 
-  const connectionLabel = api.isNative ? (authenticated ? market.streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
+  const connectionLabel = api.isNative ? (authenticated ? market.streamState === "rate-limited" ? "PAUSED" : market.streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
+  const brokerageConnectionState = brokerageDisplayState(brokerageStreamStates);
   const marketTime = newYorkClock.format(new Date(currentTime));
   const reviewEntryEligibility = review?.kind === "entry"
     ? eligibilityForEntry(review.sourceTabId, review.chartSymbol, review.draft.symbol)[review.draft.side === "Buy" ? "long" : "short"]
@@ -1387,7 +1528,7 @@ export default function App() {
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
       {!isDetached && <button className={`environment-badge ${environment}`} onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
-      <button className="connection-chip" onClick={() => setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
+      <button className={`connection-chip ${market.streamState}`} onClick={() => setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
     <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} totalTabs={workspace.tabs.length} windowId={currentWindowId} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); emit("chart-strip-bounds", bounds); }} />
@@ -1449,7 +1590,7 @@ export default function App() {
         </div>}
       </aside>}
 
-      {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
+      {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
     </section>
 
     {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateActiveTab({ symbol: result, tradeContract: undefined }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
@@ -1728,8 +1869,8 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
   </div>;
 }
 
-function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange, accounts, account, positions, orders, balances, bodBalances, history, setHistory, loading, error, notifications, closingPositionIds, onClosePosition, onNotify, onCancel }: {
-  workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; maximized: boolean; onMaximizedChange: (maximized: boolean) => void; accounts: Account[]; account?: Account; positions: Position[]; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; notifications: ActivityNotification[]; closingPositionIds: Set<string>; onClosePosition: (position: Position) => void; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
+function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange, accounts, account, positions, orders, balances, bodBalances, history, setHistory, loading, error, streamState, notifications, closingPositionIds, onClosePosition, onNotify, onCancel }: {
+  workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; maximized: boolean; onMaximizedChange: (maximized: boolean) => void; accounts: Account[]; account?: Account; positions: Position[]; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; streamState: StreamConnectionState; notifications: ActivityNotification[]; closingPositionIds: Set<string>; onClosePosition: (position: Position) => void; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
 }) {
   const tabs: Array<[WorkspaceState["bottomTab"], string]> = [["positions", "Positions"], ["orders", "Orders"], ["history", "Order history"], ["summary", "Account summary"], ["notifications", "Notifications log"]];
   const [orderFilter, setOrderFilter] = useState("All");
@@ -1738,6 +1879,10 @@ function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange,
   const [until, setUntil] = useState(today);
   const [historyFilter, setHistoryFilter] = useState("All");
   const [historyLoading, setHistoryLoading] = useState(false);
+  const localDay = (value: string) => {
+    const date = new Date(value); const offset = date.getTimezoneOffset() * 60_000;
+    return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+  };
   const startResize = (event: React.PointerEvent) => {
     event.preventDefault();
     const panel = event.currentTarget.parentElement;
@@ -1774,27 +1919,24 @@ function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange,
   const loadHistory = async (append = false) => {
     if (!account) return; setHistoryLoading(true);
     try {
-      const localDay = (value: string) => {
-        const date = new Date(value); const offset = date.getTimezoneOffset() * 60_000;
-        return new Date(date.getTime() - offset).toISOString().slice(0, 10);
-      };
-      const currentRows = orders.filter((order) => { const day = localDay(order.timestamp); return day >= since && day <= until; });
       if (since >= today) {
-        setHistory({ orders: currentRows.sort((a, b) => b.timestamp.localeCompare(a.timestamp)) });
+        setHistory({ orders: [] });
         return;
       }
       const page = await api.historicalOrders(account.id, since, append ? history.nextToken : undefined);
       const historicalRows = page.orders.filter((order) => { const day = localDay(order.timestamp); return day >= since && day <= until; });
-      const combined = append ? [...history.orders, ...historicalRows] : [...historicalRows, ...currentRows];
+      const combined = append ? [...history.orders, ...historicalRows] : historicalRows;
       const unique = [...new Map(combined.map((order) => [order.id, order])).values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
       setHistory({ orders: unique, nextToken: page.nextToken });
     } catch (cause) { onNotify({ id: crypto.randomUUID(), time: new Date().toISOString(), title: "History refresh failed", text: String(cause), level: "error" }); }
     finally { setHistoryLoading(false); }
   };
-  useEffect(() => { if (workspace.bottomPanelOpen && workspace.bottomTab === "history" && account) loadHistory(); }, [workspace.bottomPanelOpen, workspace.bottomTab, account?.id, since, until, orders]);
+  useEffect(() => { if (workspace.bottomPanelOpen && workspace.bottomTab === "history" && account) loadHistory(); }, [workspace.bottomPanelOpen, workspace.bottomTab, account?.id, since, until]);
   const statusMatches = (status: string, filter: string) => filter === "All" || status.toLowerCase() === filter.toLowerCase() || filter === "Inactive" && ["Pending", "Indeterminate"].includes(status);
   const visibleOrders = orders.filter((order) => statusMatches(order.status, orderFilter));
-  const visibleHistory = history.orders.filter((order) => statusMatches(order.status, historyFilter));
+  const currentHistoryRows = orders.filter((order) => { const day = localDay(order.timestamp); return day >= since && day <= until; });
+  const mergedHistoryRows = [...new Map([...history.orders, ...currentHistoryRows].map((order) => [order.id, order])).values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const visibleHistory = mergedHistoryRows.filter((order) => statusMatches(order.status, historyFilter));
   const money = (value?: number) => value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const time = (value?: string) => value ? new Date(value).toLocaleString() : "—";
   const balance = balances[0]; const bod = bodBalances[0];
@@ -1815,7 +1957,7 @@ function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange,
   const OrderTable = ({ rows }: { rows: OrderUpdate[] }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong>{o.symbol}</strong></td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
   return <section className={`bottom-panel ${workspace.bottomPanelOpen ? "open" : "collapsed"} ${maximized ? "maximized" : ""}`}>
     {workspace.bottomPanelOpen && <div className="resize-handle" onPointerDown={startResize} />}
-    <header className="bottom-provider"><strong>TradeStation</strong><span className="bottom-status"><span className={`status-dot ${error ? "error" : ""}`} />{error ? "Data unavailable" : loading ? "Refreshing…" : "Brokerage data active"}</span><button className="drawer-toggle" type="button" aria-label={workspace.bottomPanelOpen ? "Collapse bottom drawer" : "Open bottom drawer"} aria-expanded={workspace.bottomPanelOpen} title={workspace.bottomPanelOpen ? "Collapse drawer" : "Open drawer"} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}>{workspace.bottomPanelOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}</button>{workspace.bottomPanelOpen && <button type="button" title={maximized ? "Restore" : "Maximize"} onClick={() => onMaximizedChange(!maximized)}><Maximize2 size={15} /></button>}</header>
+    <header className="bottom-provider"><strong>TradeStation</strong><span className="bottom-status"><span className={`status-dot ${error ? "error" : streamState === "streaming" ? "" : "paused"}`} />{error ? "Data unavailable" : streamState === "rate-limited" ? "Brokerage data paused" : streamState === "connecting" || streamState === "reconnecting" ? "Brokerage stream reconnecting" : streamState === "disconnected" ? "Brokerage snapshot polling" : loading ? "Refreshing…" : "Brokerage data active"}</span><button className="drawer-toggle" type="button" aria-label={workspace.bottomPanelOpen ? "Collapse bottom drawer" : "Open bottom drawer"} aria-expanded={workspace.bottomPanelOpen} title={workspace.bottomPanelOpen ? "Collapse drawer" : "Open drawer"} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}>{workspace.bottomPanelOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}</button>{workspace.bottomPanelOpen && <button type="button" title={maximized ? "Restore" : "Maximize"} onClick={() => onMaximizedChange(!maximized)}><Maximize2 size={15} /></button>}</header>
     {workspace.bottomPanelOpen && <><div className="account-summary"><select value={account?.id ?? ""} onChange={(event) => updateWorkspace({ selectedAccountId: event.target.value })}>{accounts.map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Today’s profit</dt><dd>{money(balance?.realizedProfitLoss)}</dd></div><div><dt>Unrealized PnL</dt><dd>{money(balance?.unrealizedProfitLoss ?? positions.reduce((sum, item) => sum + item.unrealizedPnl, 0))}</dd></div></dl></div>
     <nav className="bottom-tabs">{tabs.map(([tab, label]) => <button key={tab} className={workspace.bottomTab === tab ? "active" : ""} onClick={() => updateWorkspace({ bottomTab: tab })}>{label}</button>)}<button className="export-button" title="Export active tab to CSV" onClick={exportRows}><Download size={16} /></button></nav>
     <div className="table-wrap">{error && <div className="panel-error">{error}</div>}

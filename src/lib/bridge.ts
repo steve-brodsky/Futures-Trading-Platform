@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, ClosePositionResult, HistoricalOrderPage, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, HistoricalOrderPage, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
 import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, futures, makeDemoBars, quoteFor } from "./demo";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -68,8 +68,8 @@ export const api = {
     if (isTauri) return native("get_bar_range", { symbol, timeframe, first, last });
     return (await this.bars(symbol, timeframe)).filter((bar) => bar.time >= first && bar.time < last);
   },
-  async startBarStream(subscriptionId: string, symbol: string, timeframe: Timeframe): Promise<void> {
-    if (isTauri) await native("start_bar_stream", { subscriptionId, symbol, timeframe });
+  async startBarStream(subscriptionId: string, symbol: string, timeframe: Timeframe, consumer: BarStreamConsumer): Promise<void> {
+    if (isTauri) await native("start_bar_stream", { subscriptionId, symbol, timeframe, consumer });
   },
   async stopBarStream(subscriptionId: string): Promise<void> {
     if (isTauri) await native("stop_bar_stream", { subscriptionId });
