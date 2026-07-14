@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Bar } from "../types";
-import { ema, estimateOrderRisk, nySessionVwap, roundToTick, sma, validateTick } from "./indicators";
+import { calculateTakeProfitAtR, ema, estimateOrderRisk, nySessionVwap, roundToTick, sma, validateTick } from "./indicators";
 
 const sessionBar = (iso: string, high: number, low: number, close: number, volume: number): Bar => ({
   time: Date.parse(iso) / 1000, open: close, high, low, close, volume,
@@ -18,6 +18,32 @@ describe("indicator math", () => {
     expect(estimateOrderRisk(6250, 6247, "Buy", 2, 0.25, 1.25)).toBe(30);
     expect(estimateOrderRisk(6250, 6253, "Sell", 2, 0.25, 1.25)).toBe(30);
     expect(estimateOrderRisk(6250, 6251, "Buy", 1, 0.25, 1.25)).toBeNull();
+  });
+
+  it.each([
+    ["Buy", 1, 104],
+    ["Buy", 1.5, 106],
+    ["Buy", 2, 108],
+    ["Sell", 1, 96],
+    ["Sell", 1.5, 94],
+    ["Sell", 2, 92],
+  ] as const)("calculates %s take profit at %sR", (side, rMultiple, expected) => {
+    const stop = side === "Buy" ? 96 : 104;
+    expect(calculateTakeProfitAtR(100, stop, side, rMultiple, 0.25)).toBe(expected);
+  });
+
+  it("rounds R targets to the nearest valid tick", () => {
+    expect(calculateTakeProfitAtR(100, 99.25, "Buy", 1.5, 0.25)).toBe(101.25);
+    expect(calculateTakeProfitAtR(100, 100.75, "Sell", 1.5, 0.25)).toBe(99);
+  });
+
+  it("rejects invalid R target inputs and stops on the wrong side", () => {
+    expect(calculateTakeProfitAtR(100, 101, "Buy", 1, 0.25)).toBeNull();
+    expect(calculateTakeProfitAtR(100, 99, "Sell", 1, 0.25)).toBeNull();
+    expect(calculateTakeProfitAtR(100, 99.1, "Buy", 1, 0.25)).toBeNull();
+    expect(calculateTakeProfitAtR(Number.NaN, 99, "Buy", 1, 0.25)).toBeNull();
+    expect(calculateTakeProfitAtR(100, 99, "Buy", 0, 0.25)).toBeNull();
+    expect(calculateTakeProfitAtR(100, 99, "Buy", 1, 0)).toBeNull();
   });
 
   it("calculates HLC3 VWAP only during the New York regular session", () => {

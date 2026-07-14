@@ -56,6 +56,17 @@ export function roundToTick(price: number, minMove: number): number {
   return Number((Math.round(price / minMove) * minMove).toFixed(10));
 }
 
+export function calculateTakeProfitAtR(entryPrice: number, stopPrice: number, side: "Buy" | "Sell", rMultiple: number, minMove: number): number | null {
+  if (![entryPrice, stopPrice, rMultiple, minMove].every(Number.isFinite)
+    || entryPrice <= 0 || stopPrice <= 0 || rMultiple <= 0 || minMove <= 0) return null;
+  if (!validateTick(stopPrice, minMove)) return null;
+  const direction = side === "Buy" ? 1 : -1;
+  const priceRisk = direction * (entryPrice - stopPrice);
+  if (priceRisk <= 0) return null;
+  const target = roundToTick(entryPrice + direction * priceRisk * rMultiple, minMove);
+  return target > 0 && direction * (target - entryPrice) > 0 ? target : null;
+}
+
 export function estimateOrderRisk(entryPrice: number, stopPrice: number, side: "Buy" | "Sell", quantity: number, minMove: number, tickValue: number): number | null {
   if (![entryPrice, stopPrice, quantity, minMove, tickValue].every(Number.isFinite) || entryPrice <= 0 || stopPrice <= 0 || quantity < 1 || minMove <= 0 || tickValue <= 0) return null;
   const priceRisk = side === "Buy" ? entryPrice - stopPrice : stopPrice - entryPrice;

@@ -189,6 +189,17 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .field input, .order-ticket select { width: 100%; height: 36px; border: 1px solid #2a3442; border-radius: 5px; color: #dce2ea; background: #11161d; padding: 0 10px; font: 500 11px DM Mono, monospace; }
 .field input.invalid { border-color: var(--red); }
 .field.compact { margin: 11px 0; }
+.take-profit-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
+.r-selector { position: relative; min-width: 0; }
+.r-selector-button { width: 100%; height: 36px; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 5px; color: #8d98a8; background: #151b23; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
+.r-selector-button:not(:disabled):hover, .r-selector-button.active { color: var(--cyan); border-color: rgba(55,213,232,.52); background: rgba(55,213,232,.08); }
+.r-selector-button svg { transition: transform .15s; }
+.r-selector-button[aria-expanded="true"] svg { transform: rotate(180deg); }
+.r-multiple-menu { position: absolute; z-index: 12; top: calc(100% + 4px); right: 0; width: 88px; padding: 4px; border: 1px solid #303b4a; border-radius: 5px; background: #151c25; box-shadow: 0 12px 30px rgba(0,0,0,.5); animation: pop-in .12s ease-out; }
+.r-multiple-menu button { width: 100%; height: 29px; display: flex; align-items: center; justify-content: space-between; padding: 0 7px; border: 0; border-radius: 3px; color: #aeb8c5; background: transparent; font: 600 9px DM Mono, monospace; cursor: pointer; }
+.r-multiple-menu button:hover, .r-multiple-menu button:focus-visible { color: #edf3f8; background: #202a36; outline: none; }
+.r-multiple-menu button.selected { color: var(--cyan); background: rgba(55,213,232,.08); }
+.r-multiple-menu button.selected::after { content: "\2713"; font-size: 9px; }
 .stepper { display: grid; grid-template-columns: 34px 1fr 34px; height: 36px; border: 1px solid #2a3442; border-radius: 5px; overflow: hidden; }
 .stepper button { border: 0; background: #171d26; color: var(--muted); display: grid; place-items: center; cursor: pointer; }
 .stepper input { height: 34px; text-align: center; border: solid var(--line); border-width: 0 1px; border-radius: 0; }

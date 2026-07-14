@@ -15,7 +15,7 @@ import { api } from "./lib/bridge";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type EmaCrossSide } from "./lib/emaAlerts";
-import { estimateOrderRisk, validateTick } from "./lib/indicators";
+import { calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { previousSessionClose, quoteDayChangePercent } from "./lib/quotes";
@@ -26,6 +26,8 @@ import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRange
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
+const rMultiples = [1, 1.5, 2] as const;
+type RMultiple = typeof rMultiples[number];
 const newYorkClock = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
   hour: "2-digit",
@@ -1463,8 +1465,13 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
   const [duration, setDuration] = useState<"DAY" | "GTC">("DAY");
   const [takeProfit, setTakeProfit] = useState("");
   const [stopLoss, setStopLoss] = useState("");
+  const [selectedR, setSelectedR] = useState<RMultiple>();
+  const [rMenuOpen, setRMenuOpen] = useState(false);
   const ticketSymbolRef = useRef(symbol.symbol);
   const handledResetRef = useRef(`${symbol.symbol}:${resetEpoch}`);
+  const rSelectorRef = useRef<HTMLDivElement>(null);
+  const rMenuRef = useRef<HTMLDivElement>(null);
+  const rButtonRef = useRef<HTMLButtonElement>(null);
 
   const projectionPrice = (value: string) => {
     if (!value.trim()) return undefined;
@@ -1483,6 +1490,8 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
     ticketSymbolRef.current = symbol.symbol;
     setTakeProfit("");
     setStopLoss("");
+    setSelectedR(undefined);
+    setRMenuOpen(false);
     onProjectionChange({});
   }, [symbol.symbol]);
 
@@ -1493,12 +1502,16 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
     if (resetEpoch <= 0) return;
     setTakeProfit("");
     setStopLoss("");
+    setSelectedR(undefined);
+    setRMenuOpen(false);
     onProjectionChange({});
   }, [symbol.symbol, side, resetEpoch]);
 
   useEffect(() => {
     if (orderProjection?.takeProfit != null && orderProjection.takeProfit !== projectionPrice(takeProfit)) {
       setTakeProfit(String(orderProjection.takeProfit));
+      setSelectedR(undefined);
+      setRMenuOpen(false);
     }
     if (orderProjection?.stopLoss != null && orderProjection.stopLoss !== projectionPrice(stopLoss)) {
       setStopLoss(String(orderProjection.stopLoss));
@@ -1512,6 +1525,70 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
     && (side === "Buy" ? takeProfitPrice > entryPrice : takeProfitPrice < entryPrice);
   const stopLossValid = stopLoss.trim() !== "" && stopLossPrice > 0 && validateTick(stopLossPrice, symbol.minMove)
     && (side === "Buy" ? stopLossPrice < entryPrice : stopLossPrice > entryPrice);
+  const rSelectorEnabled = stopLossValid && Number.isFinite(entryPrice) && entryPrice > 0;
+
+  useEffect(() => {
+    if (!rMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rSelectorRef.current?.contains(event.target as Node)) setRMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setRMenuOpen(false);
+      rButtonRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [rMenuOpen]);
+
+  useEffect(() => {
+    if (!rMenuOpen) return;
+    const frame = requestAnimationFrame(() => {
+      const selected = rMenuRef.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]');
+      (selected ?? rMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"]'))?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [rMenuOpen]);
+
+  useEffect(() => {
+    if (rSelectorEnabled) return;
+    setRMenuOpen(false);
+  }, [rSelectorEnabled]);
+
+  useEffect(() => {
+    if (selectedR == null || !rSelectorEnabled) return;
+    const target = calculateTakeProfitAtR(entryPrice, stopLossPrice, side, selectedR, symbol.minMove);
+    if (target == null || projectionPrice(takeProfit) === target) return;
+    const nextTakeProfit = String(target);
+    setTakeProfit(nextTakeProfit);
+    publishProjection(nextTakeProfit, stopLoss);
+  }, [selectedR, entryPrice, stopLossPrice, rSelectorEnabled, side, symbol.minMove]);
+
+  const selectRMultiple = (rMultiple: RMultiple) => {
+    const target = calculateTakeProfitAtR(entryPrice, stopLossPrice, side, rMultiple, symbol.minMove);
+    if (target == null) return;
+    const nextTakeProfit = String(target);
+    setSelectedR(rMultiple);
+    setRMenuOpen(false);
+    setTakeProfit(nextTakeProfit);
+    publishProjection(nextTakeProfit, stopLoss);
+  };
+
+  const handleRMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+    if (!items.length) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
+    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+      : event.key === "ArrowDown" ? (currentIndex + 1 + items.length) % items.length
+        : (currentIndex - 1 + items.length) % items.length;
+    items[nextIndex].focus();
+  };
 
   function draft(): OrderDraft {
     return { accountId: account?.id ?? "", symbol: tradeSymbol?.symbol ?? "", side, type: "Market", quantity, duration, takeProfit: takeProfitPrice, stopLoss: stopLossPrice };
@@ -1532,8 +1609,8 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
     <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => { setSide("Sell"); publishProjection(takeProfit, stopLoss, "Sell"); }}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => { setSide("Buy"); publishProjection(takeProfit, stopLoss, "Buy"); }}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
     <label className="field compact"><span>Contracts</span><div className="stepper"><button onClick={() => { const next = Math.max(1, quantity - 1); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Minus size={14} /></button><input type="number" min="1" value={quantity} onChange={(event) => { const next = Math.max(1, Number(event.target.value)); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }} /><button onClick={() => { const next = quantity + 1; setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Plus size={14} /></button></div></label>
     <div className="section-label"><span>Exits</span><small>Server-side bracket</small></div>
-    <label className="field compact"><span>Take profit price</span><input className={takeProfitValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={takeProfit} onChange={(event) => { const value = event.target.value; setTakeProfit(value); publishProjection(value, stopLoss); }} /></label>
-    <label className="field compact"><span>Stop loss price</span><input className={stopLossValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={stopLoss} onChange={(event) => { const value = event.target.value; setStopLoss(value); publishProjection(takeProfit, value); }} /></label>
+    <div className="field compact"><span>Take profit price</span><div className="take-profit-control"><input aria-label="Take profit price" className={takeProfitValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={takeProfit} onChange={(event) => { const value = event.target.value; setSelectedR(undefined); setRMenuOpen(false); setTakeProfit(value); publishProjection(value, stopLoss); }} /><div ref={rSelectorRef} className="r-selector" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setRMenuOpen(false); }}><button ref={rButtonRef} type="button" className={selectedR == null ? "r-selector-button" : "r-selector-button active"} aria-label="Set take profit by risk multiple" aria-haspopup="menu" aria-expanded={rMenuOpen} aria-controls="r-multiple-menu" disabled={!rSelectorEnabled} onClick={() => setRMenuOpen((open) => !open)} onKeyDown={(event) => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setRMenuOpen(true); } }}>{selectedR == null ? "R" : `${selectedR}R`}<ChevronDown size={11} /></button>{rMenuOpen && <div ref={rMenuRef} id="r-multiple-menu" className="r-multiple-menu" role="menu" aria-label="Take profit risk multiple" onKeyDown={handleRMenuKeyDown}>{rMultiples.map((rMultiple) => <button key={rMultiple} type="button" role="menuitemradio" aria-checked={selectedR === rMultiple} className={selectedR === rMultiple ? "selected" : ""} onClick={() => selectRMultiple(rMultiple)}>{rMultiple}R</button>)}</div>}</div></div></div>
+    <label className="field compact"><span>Stop loss price</span><input className={stopLossValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={stopLoss} onChange={(event) => { const value = event.target.value; setStopLoss(value); const nextStopLoss = Number(value); const target = selectedR == null ? null : calculateTakeProfitAtR(entryPrice, nextStopLoss, side, selectedR, symbol.minMove); if (target == null) { publishProjection(takeProfit, value); return; } const nextTakeProfit = String(target); setTakeProfit(nextTakeProfit); publishProjection(nextTakeProfit, value); }} /></label>
     <div className="section-label"><span>Time in force</span></div>
     <select value={duration} onChange={(e) => setDuration(e.target.value as "DAY" | "GTC")}><option value="DAY">DAY</option><option value="GTC">GTC</option></select>
     <dl className="ticket-info"><div><dt>Tick value</dt><dd>{tickValue.toFixed(2)} USD</dd></div><div><dt>Data</dt><dd className={quote.delayed ? "negative" : "positive"}>{quote.delayed ? "Delayed" : "Real-time"}</dd></div><div><dt>Estimated risk</dt><dd className={estimatedRisk == null ? "" : "negative"}>{estimatedRisk == null ? "—" : `${estimatedRisk.toFixed(2)} USD`}</dd></div></dl>
