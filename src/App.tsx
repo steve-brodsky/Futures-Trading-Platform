@@ -5,9 +5,9 @@ import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } fr
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, Download,
   LineChart, ListChecks, LockKeyhole, Maximize2, Minus,
-  Magnet, MousePointer2, PanelBottom, PanelRight, Plus, RotateCcw,
+  Magnet, MousePointer2, PanelBottom, PanelRight, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
-  Undo2, Wifi, X, Zap,
+  Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart } from "./components/TradingChart";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
@@ -1146,8 +1146,6 @@ export default function App() {
         })}</div></div>}
       </div>}
       <div className="divider" />
-      <IconButton label="Undo"><Undo2 size={17} /></IconButton>
-      <IconButton label="Reset chart"><RotateCcw size={17} /></IconButton>
       <span className="toolbar-spacer" />
       {!isDetached && <><IconButton label="Toggle bottom panel" active={workspace.bottomPanelOpen} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}><PanelBottom size={17} /></IconButton><IconButton label="Toggle right panel" active={workspace.rightPanelOpen} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}><PanelRight size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton></>}
       <IconButton label="Fullscreen"><Maximize2 size={17} /></IconButton>
