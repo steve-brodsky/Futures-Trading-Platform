@@ -1626,6 +1626,21 @@ mod tests {
     }
 
     #[test]
+    fn balance_parser_reads_todays_profit_loss_numeric_strings() {
+        let negative = balance_from_value(&json!({
+            "AccountID": "123456781", "AccountType": "Futures",
+            "TodaysProfitLoss": "-549.999999"
+        }));
+        let positive = balance_from_value(&json!({
+            "AccountID": "123456782", "AccountType": "Margin",
+            "TodaysProfitLoss": "982.8001"
+        }));
+
+        assert_eq!(negative.todays_profit_loss, Some(-549.999999));
+        assert_eq!(positive.todays_profit_loss, Some(982.8001));
+    }
+
+    #[test]
     fn cancellation_poll_blocks_indeterminate_and_timed_out_orders() {
         let ids = vec!["1".into()];
         let working = vec![sample_order("1")];
