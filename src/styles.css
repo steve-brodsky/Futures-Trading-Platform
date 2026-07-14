@@ -90,7 +90,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .workspace.empty-chart-workspace > * { display: none; }
 .workspace.empty-chart-workspace::after { content: "Drag a chart tab into this window or use + to create one"; color: #596678; font: 500 11px DM Mono, monospace; }
 .workspace.with-right { grid-template-columns: 44px minmax(0, 1fr) 314px; }
-.workspace.with-bottom { grid-template-rows: minmax(0, 1fr) var(--bottom-height, 360px); }
+.workspace.with-bottom { grid-template-rows: minmax(0, 1fr) var(--bottom-height, 360px); transition: grid-template-rows .18s ease-out; }
 .drawing-rail { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; align-items: center; padding: 6px; gap: 2px; background: #0d1117; border-right: 1px solid var(--line); z-index: 4; }
 .drawing-tool-anchor { position: relative; }
 .drawing-flyout-backdrop { position: fixed; inset: 0; z-index: 39; border: 0; background: transparent; }
@@ -100,12 +100,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .drawing-flyout button > span { display: flex; flex-direction: column; gap: 3px; }
 .drawing-flyout strong { font-size: 10px; font-weight: 600; }
 .drawing-flyout small { color: var(--muted); font-size: 8px; }
-.rail-spacer { flex: 1; }
-.rail-bottom-toggle { width: 28px; height: 28px; flex: 0 0 auto; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 5px; color: #748194; background: transparent; cursor: pointer; transition: color .15s, border-color .15s, background .15s, transform .15s; }
-.rail-bottom-toggle:hover { color: #edf2f7; border-color: #283443; background: #18212b; }
-.rail-bottom-toggle:active { transform: scale(.94); }
-.rail-bottom-toggle.active { color: var(--cyan); border-color: rgba(55,213,232,.2); background: rgba(55,213,232,.09); }
-.rail-bottom-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 
 .chart-stage { position: relative; min-width: 0; min-height: 0; grid-column: 2; grid-row: 1; overflow: hidden; background: #0b0f17; }
 .chart-host { position: absolute; inset: 0; }
@@ -258,12 +252,16 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .watchlist b, .watchlist em { text-align: right; font-style: normal; }
 .watchlist em { font: 500 9px DM Mono, monospace; }
 
-.bottom-panel { position: relative; grid-column: 1 / 3; grid-row: 2; display: grid; grid-template-rows: 42px 72px 44px minmax(0,1fr); background: #0d0d0e; border-top: 1px solid #2b2b2d; min-width: 0; min-height: 0; z-index: 4; animation: panel-in .18s ease-out; }
+.bottom-panel { position: relative; grid-column: 1 / 3; grid-row: 2; display: grid; grid-template-rows: 42px 72px 44px minmax(0,1fr); overflow: hidden; background: #0d0d0e; border-top: 1px solid #2b2b2d; min-width: 0; min-height: 0; z-index: 4; animation: panel-in .18s ease-out; }
+.bottom-panel.collapsed { grid-template-rows: 42px; }
 .resize-handle { position: absolute; z-index: 8; top: -4px; left: 0; right: 0; height: 8px; cursor: ns-resize; }
 .bottom-provider { display: flex; align-items: center; gap: 8px; padding: 0 10px 0 14px; background: #202021; border-bottom: 1px solid #29292b; color: #d5d5d7; }
 .bottom-provider strong { font-size: 12px; }
 .bottom-provider button, .bottom-tabs button, .table-filters button, .history-controls button { border: 0; color: #aaa; background: transparent; cursor: pointer; }
 .bottom-provider > button { width: 28px; height: 28px; display: grid; place-items: center; }
+.bottom-provider > button.drawer-toggle { color: #c3c9d1; border-radius: 4px; }
+.bottom-provider > button.drawer-toggle:hover { color: var(--cyan); background: rgba(55,213,232,.08); }
+.bottom-provider > button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
 .bottom-provider .bottom-status { margin-left: auto; }
 .account-summary { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; }
 .account-summary select { height: 30px; min-width: 150px; border: 1px solid #39393c; border-radius: 5px; color: #d7d7d9; background: #121213; padding: 0 9px; }

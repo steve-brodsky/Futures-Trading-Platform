@@ -1,0 +1,154 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e10]: NORTHSTAR
+      - generic [ref=e11]: TRADER
+    - generic [ref=e12]:
+      - strong [ref=e13]: "@MES"
+      - generic [ref=e14]: 6,260.00
+      - generic [ref=e15]: +0.07%
+    - generic "New York market time 11:55:53 EDT" [ref=e163]:
+      - generic [ref=e18]: NY
+      - time [ref=e19]: 11:55:53 EDT
+    - button "SIM" [ref=e20] [cursor=pointer]
+    - button "DEMO FEED" [ref=e24] [cursor=pointer]
+  - tablist "Chart tabs" [ref=e30]:
+    - tab [selected] [ref=e32]:
+      - button "@MES · 1m" [ref=e33] [cursor=pointer]:
+        - strong [ref=e34]: "@MES"
+        - generic [ref=e35]: ·
+        - generic [ref=e36]: 1m
+      - button "Close @MES 1m chart" [disabled] [ref=e37]
+    - button "Add chart tab" [ref=e41] [cursor=pointer]
+  - navigation "Chart toolbar" [ref=e43]:
+    - button "@MES CME" [ref=e44] [cursor=pointer]:
+      - strong [ref=e48]: "@MES"
+      - generic [ref=e49]: CME
+    - generic [ref=e53]:
+      - button "1m" [ref=e54] [cursor=pointer]
+      - button "5m" [ref=e55] [cursor=pointer]
+      - button "15m" [ref=e56] [cursor=pointer]
+      - button "30m" [ref=e57] [cursor=pointer]
+      - button "1h" [ref=e58] [cursor=pointer]
+      - button "4h" [ref=e59] [cursor=pointer]
+      - button "D" [ref=e60] [cursor=pointer]
+      - button "W" [ref=e61] [cursor=pointer]
+      - button "M" [ref=e62] [cursor=pointer]
+    - generic [ref=e64]:
+      - button "Candlestick chart" [pressed] [ref=e65] [cursor=pointer]
+      - button "Line chart" [ref=e68] [cursor=pointer]
+      - button "Area chart" [ref=e72] [cursor=pointer]
+    - button "Indicators" [ref=e76] [cursor=pointer]
+    - button "Alert" [ref=e79] [cursor=pointer]
+    - button "Toggle right panel" [ref=e85] [cursor=pointer]
+    - button "Entry rules" [ref=e88] [cursor=pointer]
+    - button "Settings" [ref=e92] [cursor=pointer]
+    - button "Enter fullscreen" [ref=e96] [cursor=pointer]
+  - generic [ref=e102]:
+    - complementary "Drawing tools" [ref=e103]:
+      - button "Cursor" [pressed] [ref=e104] [cursor=pointer]
+      - 'button "Magnet: snap crosshair to candle high or low" [ref=e107] [cursor=pointer]'
+      - button "Horizontal drawing tools" [ref=e113] [cursor=pointer]
+    - region "@MES chart" [ref=e115]:
+      - generic:
+        - generic: CME
+        - strong: Micro E-mini S&P 500 Continuous
+        - generic: ·
+        - generic: "@MES"
+        - generic:
+          - generic: O 6255.29
+          - generic: H 6255.67
+          - generic: L 6253.58
+          - generic: C 6254.77
+      - table [ref=e118]:
+        - row [ref=e119]:
+          - cell
+          - cell [ref=e120]:
+            - link "Charting by TradingView" [ref=e124] [cursor=pointer]:
+              - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+          - cell [ref=e129]
+        - row [ref=e133]:
+          - cell
+          - cell [ref=e134]
+          - cell [ref=e138]
+      - generic "Current price 6254.77; candle closes in 00:00":
+        - strong: "6254.77"
+        - generic: 00:00
+      - generic [ref=e151]:
+        - generic [ref=e152]: MESU26 LONG 2
+        - strong [ref=e153]: "6253.25"
+        - emphasis [ref=e154]: +$72.50 · +1.9R
+        - button "Close MESU26 position" [ref=e155] [cursor=pointer]
+      - generic "Drag to replace this protective order" [ref=e159]:
+        - generic [ref=e160]: MESU26 SL 2
+        - strong [ref=e161]: "6249.50"
+        - emphasis [ref=e162]: "-$37.50 · -1R"
+      - generic: "@MES"
+      - combobox "Chart timezone" [ref=e141] [cursor=pointer]:
+        - option "EXCH · CDT" [selected]
+        - option "Computer local"
+        - option "UTC"
+        - option "New York"
+        - option "Chicago"
+        - option "Denver"
+        - option "Los Angeles"
+        - option "London"
+        - option "Tokyo"
+    - generic [ref=e142]:
+      - generic [ref=e143]:
+        - strong [ref=e144]: TradeStation
+        - generic [ref=e145]: Brokerage data active
+        - button "Collapse bottom drawer" [expanded] [active] [ref=e165] [cursor=pointer]
+        - button "Maximize" [ref=e168] [cursor=pointer]
+      - generic [ref=e174]:
+        - combobox [ref=e175]
+        - generic [ref=e176]:
+          - generic [ref=e177]:
+            - term [ref=e178]: Net worth
+            - definition [ref=e179]: —
+          - generic [ref=e180]:
+            - term [ref=e181]: Today’s profit
+            - definition [ref=e182]: —
+          - generic [ref=e183]:
+            - term [ref=e184]: Unrealized PnL
+            - definition [ref=e185]: "67.50"
+      - navigation [ref=e186]:
+        - button "Positions" [ref=e187] [cursor=pointer]
+        - button "Orders" [ref=e188] [cursor=pointer]
+        - button "Order history" [ref=e189] [cursor=pointer]
+        - button "Account summary" [ref=e190] [cursor=pointer]
+        - button "Notifications log" [ref=e191] [cursor=pointer]
+        - button "Export active tab to CSV" [ref=e192] [cursor=pointer]
+      - table [ref=e197]:
+        - rowgroup [ref=e198]:
+          - row [ref=e199]:
+            - columnheader "Symbol" [ref=e200]
+            - columnheader "Side" [ref=e201]
+            - columnheader "Quantity" [ref=e202]
+            - columnheader "Avg price" [ref=e203]
+            - columnheader "Stop loss" [ref=e204]
+            - columnheader "Take profit" [ref=e205]
+            - columnheader "Last price" [ref=e206]
+            - columnheader "Bid price" [ref=e207]
+            - columnheader "Ask price" [ref=e208]
+            - columnheader "Unrealized PnL" [ref=e209]
+            - columnheader "PnL quantity" [ref=e210]
+            - columnheader "PnL percent" [ref=e211]
+            - columnheader [ref=e212]
+        - rowgroup [ref=e213]:
+          - row [ref=e214]:
+            - cell [ref=e215]:
+              - strong [ref=e216]: MESU26
+            - cell "Long" [ref=e217]
+            - cell "2" [ref=e218]
+            - cell "6,253.25" [ref=e219]
+            - cell "—" [ref=e220]
+            - cell "—" [ref=e221]
+            - cell "6,260.00" [ref=e222]
+            - cell "6,259.75" [ref=e223]
+            - cell "6,260.00" [ref=e224]
+            - cell "67.50" [ref=e225]
+            - cell "33.75" [ref=e226]
+            - cell "0.54%" [ref=e227]
+            - cell [ref=e228]:
+              - button "Close Position" [ref=e229] [cursor=pointer]
