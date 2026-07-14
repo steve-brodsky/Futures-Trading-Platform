@@ -124,17 +124,36 @@ describe("chart trade lines", () => {
     expect(metrics.get("order:far")?.rMultiple).toBe(-2);
   });
 
-  it("keeps dollars without an R baseline and ignores projected lines", () => {
+  it("keeps position dollars without an R baseline and calculates projected exits from the current price", () => {
     const tradePosition = { ...position, averagePrice: 100, unrealizedPnl: 25 };
     const lines = [
       ...buildTradeLines("MES", [tradePosition], [{ ...baseOrder, price: 110 }]),
-      ...buildProjectedTradeLines({ takeProfit: 112, stopLoss: 94 }),
+      ...buildProjectedTradeLines({ takeProfit: 112, stopLoss: 94, side: "Buy", quantity: 3 }),
     ];
-    const metrics = buildTradeLineMetrics(lines, 5);
-    expect(metrics.get("position:p1")).toEqual({ dollarAmount: 25, rMultiple: null });
+    const metrics = buildTradeLineMetrics(lines, 5, 100);
+    expect(metrics.get("position:p1")).toEqual({ dollarAmount: 0, rMultiple: null });
     expect(metrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: null });
-    expect(metrics.has("projection:take-profit")).toBe(false);
-    expect(metrics.has("projection:stop-loss")).toBe(false);
+    expect(metrics.get("projection:take-profit")).toEqual({ dollarAmount: 180, rMultiple: 2 });
+    expect(metrics.get("projection:stop-loss")).toEqual({ dollarAmount: -90, rMultiple: -1 });
+  });
+
+  it("calculates short projected exits and updates them with the current price", () => {
+    const lines = buildProjectedTradeLines({ takeProfit: 90, stopLoss: 105, side: "Sell", quantity: 2 });
+    const initial = buildTradeLineMetrics(lines, 5, 100);
+    expect(initial.get("projection:take-profit")).toEqual({ dollarAmount: 100, rMultiple: 2 });
+    expect(initial.get("projection:stop-loss")).toEqual({ dollarAmount: -50, rMultiple: -1 });
+
+    const nextTick = buildTradeLineMetrics(lines, 5, 101);
+    expect(nextTick.get("projection:take-profit")).toEqual({ dollarAmount: 110, rMultiple: 2.75 });
+    expect(nextTick.get("projection:stop-loss")).toEqual({ dollarAmount: -40, rMultiple: -1 });
+  });
+
+  it("shows projected dollars with a missing R baseline until a valid stop exists", () => {
+    const lines = buildProjectedTradeLines({ takeProfit: 110, side: "Buy", quantity: 2 });
+    expect(buildTradeLineMetrics(lines, 5, 100).get("projection:take-profit")).toEqual({
+      dollarAmount: 100,
+      rMultiple: null,
+    });
   });
 
   it("formats every visibility mode and missing risk without negative zero", () => {

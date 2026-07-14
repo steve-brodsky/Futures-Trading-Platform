@@ -1367,9 +1367,11 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
     const price = Number(value);
     return Number.isFinite(price) && price > 0 ? price : undefined;
   };
-  const publishProjection = (nextTakeProfit: string, nextStopLoss: string) => onProjectionChange({
+  const publishProjection = (nextTakeProfit: string, nextStopLoss: string, nextSide = side, nextQuantity = quantity) => onProjectionChange({
     takeProfit: projectionPrice(nextTakeProfit),
     stopLoss: projectionPrice(nextStopLoss),
+    side: nextSide,
+    quantity: nextQuantity,
   });
 
   useEffect(() => {
@@ -1423,8 +1425,8 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, contracts, tradeContract
   return <div className="order-ticket">
     <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
     {continuous && <label className="trade-contract-field"><span><strong>Trade contract</strong><small>Chart {chartSymbol.symbol}</small></span><select aria-label="Trade contract" value={tradeContract ?? "__auto__"} onChange={(event) => onTradeContractChange(event.target.value === "__auto__" ? undefined : event.target.value)}><option value="__auto__">Auto · {chartSymbol.underlying ?? "Unavailable"}</option>{manualMissing && <option value={tradeContract}>{tradeContract} · Saved selection</option>}{contracts.map((contract) => <option key={contract.symbol} value={contract.symbol}>{contract.symbol} · {formatContractExpiration(contract.expiration)}</option>)}</select>{contractStatus && <small className="negative">{contractStatus}</small>}{!contractStatus && contractLookupError && <small className="negative">Contract list unavailable; the current selection is unchanged.</small>}</label>}
-    <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => setSide("Sell")}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => setSide("Buy")}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
-    <label className="field compact"><span>Contracts</span><div className="stepper"><button onClick={() => setQuantity(Math.max(1, quantity - 1))}><Minus size={14} /></button><input type="number" min="1" value={quantity} onChange={(e) => setQuantity(Math.max(1, Number(e.target.value)))} /><button onClick={() => setQuantity(quantity + 1)}><Plus size={14} /></button></div></label>
+    <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => { setSide("Sell"); publishProjection(takeProfit, stopLoss, "Sell"); }}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => { setSide("Buy"); publishProjection(takeProfit, stopLoss, "Buy"); }}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
+    <label className="field compact"><span>Contracts</span><div className="stepper"><button onClick={() => { const next = Math.max(1, quantity - 1); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Minus size={14} /></button><input type="number" min="1" value={quantity} onChange={(event) => { const next = Math.max(1, Number(event.target.value)); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }} /><button onClick={() => { const next = quantity + 1; setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Plus size={14} /></button></div></label>
     <div className="section-label"><span>Exits</span><small>Server-side bracket</small></div>
     <label className="field compact"><span>Take profit price</span><input className={takeProfitValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={takeProfit} onChange={(event) => { const value = event.target.value; setTakeProfit(value); publishProjection(value, stopLoss); }} /></label>
     <label className="field compact"><span>Stop loss price</span><input className={stopLossValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={stopLoss} onChange={(event) => { const value = event.target.value; setStopLoss(value); publishProjection(takeProfit, value); }} /></label>

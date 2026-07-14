@@ -6,6 +6,8 @@ export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "projecte
 export interface OrderProjection {
   takeProfit?: number;
   stopLoss?: number;
+  side?: "Buy" | "Sell";
+  quantity?: number;
 }
 
 export interface TradeLineModel {
@@ -91,11 +93,15 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
 export function buildProjectedTradeLines(projection?: OrderProjection): TradeLineModel[] {
   if (!projection) return [];
   const lines: TradeLineModel[] = [];
+  const side = projection.side ?? "Buy";
+  const quantity = projection.quantity != null && Number.isFinite(projection.quantity) && projection.quantity > 0
+    ? Math.abs(projection.quantity)
+    : 1;
   if (projection.takeProfit != null && Number.isFinite(projection.takeProfit) && projection.takeProfit > 0) {
-    lines.push({ id: "projection:take-profit", kind: "projected-take-profit", price: projection.takeProfit, color: "#16c79a", side: "", quantity: 0, draggable: true });
+    lines.push({ id: "projection:take-profit", kind: "projected-take-profit", price: projection.takeProfit, color: "#16c79a", side, quantity, draggable: true });
   }
   if (projection.stopLoss != null && Number.isFinite(projection.stopLoss) && projection.stopLoss > 0) {
-    lines.push({ id: "projection:stop-loss", kind: "projected-stop-loss", price: projection.stopLoss, color: "#ef466f", side: "", quantity: 0, draggable: true });
+    lines.push({ id: "projection:stop-loss", kind: "projected-stop-loss", price: projection.stopLoss, color: "#ef466f", side, quantity, draggable: true });
   }
   return lines;
 }
@@ -133,6 +139,31 @@ export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: numbe
       metrics.set(line.id, withRisk(dollarAmount));
     });
   });
+
+  if (currentPrice != null && Number.isFinite(currentPrice) && currentPrice > 0) {
+    const projectedLines = lines.filter((line) => line.kind === "projected-take-profit" || line.kind === "projected-stop-loss");
+    const referenceLine = projectedLines[0];
+    const quantity = referenceLine?.quantity ?? 0;
+    if (referenceLine && Number.isFinite(quantity) && quantity > 0) {
+      const direction = referenceLine.side === "Sell" ? -1 : 1;
+      const nearestStop = projectedLines
+        .filter((line) => line.kind === "projected-stop-loss" && direction * (line.price - currentPrice) < 0)
+        .reduce<TradeLineModel | undefined>((nearest, line) => (
+          !nearest || Math.abs(line.price - currentPrice) < Math.abs(nearest.price - currentPrice) ? line : nearest
+        ), undefined);
+      const riskAmount = nearestStop
+        ? Math.abs(nearestStop.price - currentPrice) * pointValue * quantity
+        : null;
+
+      projectedLines.forEach((line) => {
+        const dollarAmount = direction * (line.price - currentPrice) * pointValue * quantity;
+        metrics.set(line.id, {
+          dollarAmount,
+          rMultiple: riskAmount != null && riskAmount > 0 ? dollarAmount / riskAmount : null,
+        });
+      });
+    }
+  }
   return metrics;
 }
 
