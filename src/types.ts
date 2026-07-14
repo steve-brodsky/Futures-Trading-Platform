@@ -265,7 +265,6 @@ export interface WorkspaceState {
   windows: ChartWindowState[];
   watchlist: string[];
   drawings: Record<string, Drawing[]>;
-  rightTab: "order" | "watchlist";
   rightPanelOpen: boolean;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
   bottomPanelOpen: boolean;

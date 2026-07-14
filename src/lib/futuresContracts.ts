@@ -1,4 +1,5 @@
 import type { ChartTabState, SymbolMeta, WorkspaceState } from "../types";
+import { MAX_STREAMED_QUOTE_SYMBOLS } from "./watchlist";
 
 export function isContinuousFuture(symbol: SymbolMeta): boolean {
   return symbol.symbol.startsWith("@") && symbol.assetType.toUpperCase().includes("FUTURE");
@@ -22,6 +23,12 @@ export function quoteSubscriptionSymbols(workspace: Pick<WorkspaceState, "tabs" 
     if (tradeSymbol) symbols.add(tradeSymbol);
   });
   return [...symbols].sort();
+}
+
+export function canAddWatchlistSymbol(workspace: Pick<WorkspaceState, "tabs" | "watchlist">, value: string): boolean {
+  const symbol = value.trim().toUpperCase();
+  if (!symbol || workspace.watchlist.includes(symbol)) return true;
+  return quoteSubscriptionSymbols({ ...workspace, watchlist: [...workspace.watchlist, symbol] }).length <= MAX_STREAMED_QUOTE_SYMBOLS;
 }
 
 export function sameSymbolMeta(left: SymbolMeta, right: SymbolMeta): boolean {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChartTabState, SymbolMeta } from "../types";
 import { defaultEma200Alert } from "./emaAlerts";
-import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol } from "./futuresContracts";
+import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol } from "./futuresContracts";
 
 const continuous: SymbolMeta = { symbol: "@MES", root: "MES", underlying: "MESU26", description: "Continuous MES", exchange: "CME", assetType: "FUTURE", minMove: .25, pointValue: 5 };
 const tab = (symbol: SymbolMeta, tradeContract?: string): ChartTabState => ({ id: symbol.symbol, symbol, tradeContract, timeframe: "1m", chartKind: "candles", indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false });
@@ -29,6 +29,15 @@ describe("futures trade-contract resolution", () => {
       watchlist: ["MESU26", "MNQU26"],
       tabs: [tab(continuous), tab({ ...continuous, symbol: "MNQU26", root: "MNQ", underlying: undefined })],
     })).toEqual(["@MES", "MESU26", "MNQU26"]);
+  });
+
+  it("allows watchlist additions only while the shared quote stream has capacity", () => {
+    const fullWatchlist = Array.from({ length: 98 }, (_, index) => `Q${index}`);
+    const workspace = { watchlist: fullWatchlist, tabs: [tab(continuous)] };
+    expect(quoteSubscriptionSymbols(workspace)).toHaveLength(100);
+    expect(canAddWatchlistSymbol(workspace, "NEW")).toBe(false);
+    expect(canAddWatchlistSymbol(workspace, "Q0")).toBe(true);
+    expect(canAddWatchlistSymbol({ ...workspace, watchlist: fullWatchlist.slice(0, -1) }, "NEW")).toBe(true);
   });
 
   it("formats TradeStation Microsoft JSON and ISO expiration dates", () => {

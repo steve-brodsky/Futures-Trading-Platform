@@ -10,7 +10,7 @@ const fallback: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
-  watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
+  watchlist: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
   settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
 };
 
@@ -76,6 +76,11 @@ describe("chart workspace", () => {
       settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 50 } },
     }, fallback);
     expect(clamped.settings.chartLabels.fontSize).toBe(16);
+  });
+
+  it("normalizes saved watchlist symbols without changing their order", () => {
+    const result = normalizeChartWorkspace({ ...fallback, watchlist: [" mnqu26 ", "MESU26", "MNQU26", "", 42] }, fallback);
+    expect(result.watchlist).toEqual(["MNQU26", "MESU26"]);
   });
 
   it("defaults, preserves, and clamps swing-stop settings", () => {

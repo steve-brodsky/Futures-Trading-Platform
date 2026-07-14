@@ -5,7 +5,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
-  LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
+  GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
   Magnet, MousePointer2, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
   Wifi, X, Zap,
@@ -19,13 +19,14 @@ import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type EmaCrossSide } from "./lib/emaAlerts";
 import { calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
-import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
-import { previousSessionClose, quoteDayChangePercent } from "./lib/quotes";
+import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
+import { quoteDayChangePercent } from "./lib/quotes";
 import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
 import { calculateSwingStop } from "./lib/swingStop";
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
+import { reorderWatchlist } from "./lib/watchlist";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
@@ -46,7 +47,7 @@ const defaultWorkspace: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
-  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
+  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
   settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
 };
 
@@ -225,7 +226,6 @@ export default function App() {
   const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
     ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
     : quoteFor(activeTab.symbol.symbol));
-  const activeChangePct = quoteDayChangePercent(activeQuote, previousSessionClose(bars, activeTab.timeframe));
   const activeEntryEligibility = useMemo(
     () => evaluateEntryRules(workspace.entryRules, bars, activeQuote),
     [workspace.entryRules, bars, activeQuote],
@@ -251,14 +251,14 @@ export default function App() {
   const activeOrderMinMove = activeTradeMeta?.minMove ?? activeTab.symbol.minMove;
 
   useEffect(() => {
-    if (isDetached || !workspace.rightPanelOpen || workspace.rightTab !== "order") return;
+    if (isDetached || !workspace.rightPanelOpen) return;
     setOrderProjection((current) => {
       if (!current || current.tradeSymbol !== activeTradeSymbol || current.rMultiple == null) return current;
       const entryPrice = (current.side ?? "Buy") === "Buy" ? activeTradeQuote.ask : activeTradeQuote.bid;
       const next = recalculateOrderProjectionAtR(current, entryPrice, activeOrderMinMove);
       return next === current ? current : { ...next, tradeSymbol: current.tradeSymbol };
     });
-  }, [isDetached, workspace.rightPanelOpen, workspace.rightTab, activeTradeSymbol, activeTradeQuote.ask, activeTradeQuote.bid, activeOrderMinMove]);
+  }, [isDetached, workspace.rightPanelOpen, activeTradeSymbol, activeTradeQuote.ask, activeTradeQuote.bid, activeOrderMinMove]);
 
   function alertOwnerKey(tab: ChartTabState, timeframe: Timeframe): string {
     return `${tab.id}\u0000${tab.symbol.symbol}\u0000${timeframe}`;
@@ -1018,6 +1018,16 @@ export default function App() {
     commitWorkspace((current) => ({ ...current, tabs: current.tabs.map((tab) => tab.id === activeTab.id ? { ...tab, ...patch } : tab) }));
   }
 
+  async function selectWatchlistSymbol(value: string) {
+    const symbol = value.trim().toUpperCase();
+    try {
+      const meta = futures.find((item) => item.symbol === symbol) ?? await api.symbolDetails(symbol);
+      updateActiveTab({ symbol: meta, tradeContract: undefined });
+    } catch {
+      showToast(`Unable to load ${symbol}. The current chart was not changed.`);
+    }
+  }
+
   function updateSymbolDrawings(symbol: string, update: (drawings: Drawing[]) => Drawing[]) {
     commitWorkspace((current) => ({ ...current, drawings: { ...current.drawings, [symbol]: update(current.drawings[symbol] ?? []) } }));
   }
@@ -1506,7 +1516,7 @@ export default function App() {
     : !activeTradeMeta ? `Loading contract details for ${activeTradeSymbol}…`
     : undefined;
 
-  const activeOrderProjection = !isDetached && workspace.rightPanelOpen && workspace.rightTab === "order"
+  const activeOrderProjection = !isDetached && workspace.rightPanelOpen
     && orderProjection && orderProjection.tradeSymbol === activeTradeSymbol ? orderProjection : undefined;
   const activeOrderTicketResetEpoch = activeTradeSymbol ? orderTicketResetEpochs[activeTradeSymbol] ?? 0 : 0;
   const projectedEntryPrice = (projection: OrderProjection) => (projection.side ?? "Buy") === "Buy" ? activeTradeQuote.ask : activeTradeQuote.bid;
@@ -1524,7 +1534,7 @@ export default function App() {
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
       <div className="brand"><div className="brand-glyph"><TrendingUp size={16} strokeWidth={2.4} /></div><span>NORTHSTAR</span><small>TRADER</small></div>
-      {hasWindowTabs && <div className="instrument-summary"><strong>{activeTab.symbol.symbol}</strong><span>{activeQuote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span className={activeChangePct >= 0 ? "positive" : "negative"}>{activeChangePct >= 0 ? "+" : ""}{activeChangePct.toFixed(2)}%</span></div>}
+      {hasWindowTabs && <TopbarWatchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={selectWatchlistSymbol} />}
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
       {!isDetached && <button className={`environment-badge ${environment}`} onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
@@ -1585,8 +1595,7 @@ export default function App() {
       {!isDetached && <aside className={`right-panel ${workspace.rightPanelOpen ? "open" : "collapsed"}`} aria-labelledby="order-panel-title">
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>
         {workspace.rightPanelOpen && <div id="order-panel-content" className="right-panel-content">
-          <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
-          {workspace.rightTab === "order" ? <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta, tradeContract: undefined }); }} />}
+          <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />
         </div>}
       </aside>}
 
@@ -1598,6 +1607,7 @@ export default function App() {
     {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></Modal>}
 
     {settingsOpen && <Modal title="Settings" onClose={() => setSettingsOpen(false)} width={540}><div className="settings-content">
+      <WatchlistSettings workspace={workspace} onChange={(watchlist) => updateWorkspace({ watchlist })} onNotify={showToast} />
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Position labels</h3><p>Choose which performance values appear beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure how the order ticket finds and offsets projected swing stops.</p></header><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
@@ -1685,8 +1695,108 @@ function ChartTabStrip({ tabs, activeTabId, totalTabs, windowId, onSelect, onAdd
   </nav>;
 }
 
-function Watchlist({ symbols, quotes, active, onSelect }: { symbols: string[]; quotes: Record<string, Quote>; active: string; onSelect: (symbol: string) => void }) {
-  return <div className="watchlist"><header><span>Symbol</span><span>Last</span><span>Chg%</span></header>{symbols.map((symbol) => { const quote = quotes[symbol] ?? quoteFor(symbol); return <button key={symbol} className={active === symbol ? "active" : ""} onClick={() => onSelect(symbol)}><span><strong>{symbol}</strong><small>{futures.find((f) => f.symbol === symbol)?.exchange}</small></span><b>{quote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</b><em className={quote.changePct >= 0 ? "positive" : "negative"}>{quote.changePct >= 0 ? "+" : ""}{quote.changePct.toFixed(2)}%</em></button>; })}</div>;
+function TopbarWatchlist({ symbols, quotes, active, onSelect }: { symbols: string[]; quotes: Record<string, Quote>; active: string; onSelect: (symbol: string) => void | Promise<void> }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const strip = scrollRef.current;
+    if (!strip || strip.scrollWidth <= strip.clientWidth || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+    event.preventDefault();
+    strip.scrollLeft += event.deltaY;
+  };
+
+  if (!symbols.length) return <div className="topbar-watchlist empty" aria-label="Watchlist is empty"><span>Watchlist empty</span></div>;
+
+  return <div ref={scrollRef} className="topbar-watchlist" role="navigation" aria-label="Watchlist" onWheel={handleWheel}>
+    <div className="topbar-watchlist-track">
+      {symbols.map((symbol) => {
+        const quote = quotes[symbol] ?? (api.isNative ? undefined : quoteFor(symbol));
+        const changePct = quote ? quoteDayChangePercent(quote) : undefined;
+        const price = quote ? quote.last.toLocaleString(undefined, { minimumFractionDigits: 2 }) : "—";
+        const change = changePct == null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+        return <button key={symbol} type="button" className={active === symbol ? "active" : ""} aria-current={active === symbol ? "true" : undefined} aria-label={`${symbol}, ${price}, ${change}`} onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })} onClick={() => void onSelect(symbol)}><strong>{symbol}</strong><span>{price}</span><span className={changePct == null ? "muted" : changePct >= 0 ? "positive" : "negative"}>{change}</span></button>;
+      })}
+    </div>
+  </div>;
+}
+
+function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: WorkspaceState; onChange: (symbols: string[]) => void; onNotify: (message: string) => void }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<SymbolMeta[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string>();
+  const [draggedSymbol, setDraggedSymbol] = useState<string>();
+  const [dropSymbol, setDropSymbol] = useState<string>();
+
+  useEffect(() => {
+    const value = query.trim();
+    if (!value) {
+      setResults([]);
+      setLoading(false);
+      setError(undefined);
+      return;
+    }
+    let active = true;
+    setLoading(true);
+    setError(undefined);
+    const timer = window.setTimeout(() => api.symbolSearch(value).then((items) => {
+      if (active) setResults(items);
+    }).catch(() => {
+      if (active) {
+        setResults([]);
+        setError("Symbol search is unavailable. Try again in a moment.");
+      }
+    }).finally(() => {
+      if (active) setLoading(false);
+    }), 300);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [query]);
+
+  const move = (fromIndex: number, toIndex: number) => {
+    const next = reorderWatchlist(workspace.watchlist, fromIndex, toIndex);
+    if (next !== workspace.watchlist) onChange(next);
+  };
+
+  const add = (result: SymbolMeta) => {
+    const symbol = result.symbol.trim().toUpperCase();
+    if (workspace.watchlist.includes(symbol)) return;
+    if (!canAddWatchlistSymbol(workspace, symbol)) {
+      onNotify("The watchlist cannot exceed TradeStation's 100-symbol quote stream limit.");
+      return;
+    }
+    onChange([...workspace.watchlist, symbol]);
+  };
+
+  const knownSymbols = new Map([...futures, ...results].map((item) => [item.symbol, item]));
+
+  return <section className="settings-section watchlist-settings" aria-labelledby="watchlist-settings-title">
+    <header><span>Market data</span><h3 id="watchlist-settings-title">Top bar watchlist</h3><p>Search futures, remove symbols, and drag them into the order shown beside the Northstar logo.</p></header>
+    <div className="watchlist-search-box"><Search size={15} /><input aria-label="Search futures for watchlist" placeholder="Search symbol or contract name" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+    {query.trim() && <div className="watchlist-search-results" aria-live="polite">
+      {loading && <div className="watchlist-search-state">Searching…</div>}
+      {!loading && error && <div className="watchlist-search-state negative">{error}</div>}
+      {!loading && !error && results.map((result) => {
+        const added = workspace.watchlist.includes(result.symbol.trim().toUpperCase());
+        const available = canAddWatchlistSymbol(workspace, result.symbol);
+        return <div className="watchlist-search-result" key={result.symbol}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{formatContractExpiration(result.expiration)}</small></span><button type="button" disabled={added || !available} title={!available && !added ? "100-symbol quote stream limit reached" : undefined} onClick={() => add(result)}>{added ? "Added" : !available ? "Limit" : "Add"}</button></div>;
+      })}
+      {!loading && !error && !results.length && <div className="watchlist-search-state">No futures contracts matched “{query}”.</div>}
+    </div>}
+    <div className="watchlist-editor" aria-label="Saved watchlist">
+      {workspace.watchlist.map((symbol, index) => {
+        const meta = knownSymbols.get(symbol);
+        return <div key={symbol} className={`watchlist-editor-row ${dropSymbol === symbol ? "drop-target" : ""}`} onDragOver={(event) => { if (!draggedSymbol || draggedSymbol === symbol) return; event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropSymbol(symbol); }} onDrop={(event) => { event.preventDefault(); if (draggedSymbol) move(workspace.watchlist.indexOf(draggedSymbol), index); setDraggedSymbol(undefined); setDropSymbol(undefined); }}>
+          <button type="button" className="watchlist-drag-handle" draggable aria-label={`Reorder ${symbol}`} title="Drag or use the up and down arrow keys" onDragStart={(event) => { setDraggedSymbol(symbol); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", symbol); }} onDragEnd={() => { setDraggedSymbol(undefined); setDropSymbol(undefined); }} onKeyDown={(event) => { const offset = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0; if (!offset) return; event.preventDefault(); move(index, index + offset); }}><GripVertical size={15} /></button>
+          <span><strong>{symbol}</strong><small>{meta ? `${meta.exchange} · ${meta.description}` : "Futures symbol"}</small></span>
+          <button type="button" className="watchlist-remove" aria-label={`Remove ${symbol} from watchlist`} onClick={() => onChange(workspace.watchlist.filter((item) => item !== symbol))}><X size={14} /></button>
+        </div>;
+      })}
+      {!workspace.watchlist.length && <div className="watchlist-editor-empty"><strong>No symbols saved</strong><span>Use the search above to build your top bar watchlist.</span></div>}
+    </div>
+  </section>;
 }
 
 function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, settings, contracts, tradeContract, contractStatus, contractLookupError, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, resetEpoch, onTradeContractChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; bars: Bar[]; timeframe: Timeframe; settings: OrderTicketSettings; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; resetEpoch: number; onTradeContractChange: (symbol?: string) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {

@@ -1,6 +1,8 @@
 import type { ChartTabState, ChartWindowState, Drawing, EntryRuleNode, WorkspaceState } from "../types";
 import { normalizeEntryRules } from "./entryRules";
 import { cloneEma200Alert, normalizeEma200Alert, sameEma200Alert } from "./emaAlerts";
+import { quoteSubscriptionSymbols } from "./futuresContracts";
+import { normalizeWatchlist } from "./watchlist";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 
 export const MAX_CHART_TABS = 6;
@@ -127,14 +129,17 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   }));
   const savedChartLabels = value.settings?.chartLabels;
   const savedOrderTicket = value.settings?.orderTicket;
+  const watchlist = normalizeWatchlist(
+    Array.isArray(value.watchlist) ? value.watchlist : fallback.watchlist,
+    quoteSubscriptionSymbols({ tabs, watchlist: [] }),
+  );
   return {
     revision: typeof value.revision === "number" ? value.revision : 0,
     environment: value.environment === "live" || value.environment === "sim" ? value.environment : fallback.environment,
     tabs,
     windows,
-    watchlist: Array.isArray(value.watchlist) ? value.watchlist : fallback.watchlist,
+    watchlist,
     drawings,
-    rightTab: value.rightTab ?? fallback.rightTab,
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
     bottomTab: (legacyBottomTab ?? fallback.bottomTab) as WorkspaceState["bottomTab"],
     bottomPanelOpen: value.bottomPanelOpen ?? fallback.bottomPanelOpen,
