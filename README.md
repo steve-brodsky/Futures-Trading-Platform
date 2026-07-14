@@ -91,6 +91,35 @@ On a Windows machine where the Visual Studio developer environment does not incl
 npm run desktop:windows
 ```
 
+### Build for macOS
+
+Create an optimized macOS application bundle and installer disk image:
+
+```bash
+npm run tauri build
+```
+
+On an Apple Silicon Mac, the build produces these files:
+
+- `src-tauri/target/release/bundle/macos/Northstar Trader.app`
+- `src-tauri/target/release/bundle/dmg/Northstar Trader_<version>_aarch64.dmg`
+
+To build only the native executable, without an `.app` bundle or DMG installer:
+
+```bash
+npm run tauri build -- --no-bundle
+```
+
+The executable is written to `src-tauri/target/release/northstar-trader`. Run it from Terminal with:
+
+```bash
+./src-tauri/target/release/northstar-trader
+```
+
+The produced binary targets the architecture of the build Mac. To distribute an app to other Macs, sign it with an Apple Developer ID certificate and notarize it.
+
+### Build for Windows
+
 Build a single Windows executable without generating MSI or NSIS installer bundles:
 
 ```powershell
@@ -136,8 +165,8 @@ Order confirmation is enabled in a new workspace, but it can currently be disabl
 | `npm run typecheck` | Run TypeScript without emitting files |
 | `npm run test:unit` | Run the frontend unit suite |
 | `npm run tauri dev` | Start the native app in development |
-| `npm run tauri build` | Build native desktop bundles |
-| `npm run tauri build -- --no-bundle` | Build one Windows `.exe` without installer bundles |
+| `npm run tauri build` | Build native desktop bundles (`.app` and DMG on macOS) |
+| `npm run tauri build -- --no-bundle` | Build one native executable without installer bundles |
 | `npm run desktop:windows` | Start Tauri with auto-detected Windows SDK paths |
 
 Run all current automated checks:
