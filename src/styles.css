@@ -104,6 +104,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 
 .chart-stage { position: relative; min-width: 0; min-height: 0; grid-column: 2; grid-row: 1; overflow: hidden; background: #0b0f17; }
 .chart-host { position: absolute; inset: 0; }
+.current-price-label { position: absolute; z-index: 7; right: 0; width: 72px; height: 32px; display: grid; grid-template-rows: 18px 14px; transform: translateY(-9px); color: #071116; background: #34d6e9; font-family: DM Mono, monospace; pointer-events: none; }
+.current-price-label strong, .current-price-label span { display: grid; place-items: center; }
+.current-price-label strong { font-size: 11px; line-height: 1; font-weight: 700; }
+.current-price-label span { border-top: 1px solid rgba(7,17,22,.18); font-size: 10px; line-height: 1; font-weight: 700; letter-spacing: .02em; opacity: .95; }
+.current-price-label.area { background: #37d5e8; }
+.current-price-label.up { color: #fff; background: var(--green); }
+.current-price-label.down { color: #fff; background: var(--red); }
+.current-price-label.up span, .current-price-label.down span { border-top-color: rgba(255,255,255,.18); }
 .trade-line-label { position: absolute; z-index: 7; right: 74px; height: calc(var(--trade-label-font-size, 11px) + 14px); display: flex; align-items: center; transform: translateY(-50%); border: 1px solid currentColor; border-radius: 3px 0 0 3px; color: #f0b84b; background: rgba(28,24,16,.96); box-shadow: 0 2px 8px rgba(0,0,0,.34); font: 600 var(--trade-label-font-size, 11px)/1 DM Mono, monospace; user-select: none; touch-action: none; }
 .trade-line-label > span { padding: 0 6px; letter-spacing: .05em; }
 .trade-line-label > strong { align-self: stretch; display: flex; align-items: center; padding: 0 6px; border-left: 1px solid currentColor; color: #eef3f8; font-weight: 600; background: rgba(5,8,12,.28); }

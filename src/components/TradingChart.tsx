@@ -6,6 +6,7 @@ import {
 } from "lightweight-charts";
 import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, Drawing, IndicatorConfig, OrderUpdate, Position, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
+import { formatCandleCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
@@ -83,14 +84,18 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
   const [drawingMenu, setDrawingMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [movingDrawingId, setMovingDrawingId] = useState<string | null>(null);
   const [tradeLineTops, setTradeLineTops] = useState<Record<string, number>>({});
+  const [candleCountdown, setCandleCountdown] = useState("");
+  const [candleCountdownTop, setCandleCountdownTop] = useState<number | null>(null);
   const [draggingOrder, setDraggingOrder] = useState<{ id: string; originalPrice: number; price: number } | null>(null);
   const draggingOrderRef = useRef<typeof draggingOrder>(null);
   const [draggingProjection, setDraggingProjection] = useState<{ field: keyof OrderProjection; lineId: string; originalPrice: number; price: number } | null>(null);
   const draggingProjectionRef = useRef<typeof draggingProjection>(null);
   const syncTradeLabelsRef = useRef<() => void>(() => undefined);
   const movingDrawingIdRef = useRef<string | null>(null);
-  const latest = hovered ?? bars.at(-1) ?? null;
+  const liveBar = bars.at(-1);
+  const latest = hovered ?? liveBar ?? null;
   const change = latest ? latest.close - latest.open : 0;
+  const candleCountdownTone = kind === "candles" && liveBar ? liveBar.close >= liveBar.open ? "up" : "down" : kind;
   const tradeLines = [...buildTradeLines(tradeSymbol, positions, orders), ...buildProjectedTradeLines(orderProjection)];
   const displayPrices = new Map(tradeLines.map((line) => [line.id,
     draggingOrder && draggingOrder.id === line.order?.id ? draggingOrder.price
@@ -110,6 +115,9 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     const price = priceRef.current;
     const height = host.current?.clientHeight ?? 0;
     if (!price || !height) return;
+    const latestPrice = barsRef.current.at(-1)?.close;
+    const latestCoordinate = latestPrice == null ? null : price.priceToCoordinate(latestPrice);
+    setCandleCountdownTop((current) => current === latestCoordinate ? current : latestCoordinate);
     const next: Record<string, number> = {};
     tradeLineRefs.current.forEach((line, id) => {
       const coordinate = price.priceToCoordinate(line.options().price);
@@ -160,9 +168,9 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     const priceFormat = { type: "price" as const, precision: pricePrecision(minMove), minMove };
 
     let priceSeries: ISeriesApi<any>;
-    if (kind === "line") priceSeries = chart.addSeries(LineSeries, { color: "#34d6e9", lineWidth: 2, priceLineVisible: true, priceFormat });
-    else if (kind === "area") priceSeries = chart.addSeries(AreaSeries, { lineColor: "#37d5e8", topColor: "rgba(55,213,232,.28)", bottomColor: "rgba(55,213,232,.01)", lineWidth: 2, priceFormat });
-    else priceSeries = chart.addSeries(CandlestickSeries, { upColor: "#16c79a", downColor: "#ef466f", borderVisible: false, wickUpColor: "#16c79a", wickDownColor: "#ef466f", priceFormat });
+    if (kind === "line") priceSeries = chart.addSeries(LineSeries, { color: "#34d6e9", lineWidth: 2, lastValueVisible: false, priceLineVisible: true, priceFormat });
+    else if (kind === "area") priceSeries = chart.addSeries(AreaSeries, { lineColor: "#37d5e8", topColor: "rgba(55,213,232,.28)", bottomColor: "rgba(55,213,232,.01)", lineWidth: 2, lastValueVisible: false, priceLineVisible: true, priceFormat });
+    else priceSeries = chart.addSeries(CandlestickSeries, { upColor: "#16c79a", downColor: "#ef466f", borderVisible: false, wickUpColor: "#16c79a", wickDownColor: "#ef466f", lastValueVisible: false, priceLineVisible: true, priceFormat });
     priceRef.current = priceSeries;
     const rayPrimitive = new HorizontalRayPrimitive();
     priceSeries.attachPrimitive(rayPrimitive);
@@ -268,6 +276,18 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone]);
+
+  useEffect(() => {
+    const latestOpenTime = bars.at(-1)?.time;
+    const price = priceRef.current;
+    if (!price || latestOpenTime == null) return;
+    price.applyOptions({ title: "" });
+    const updateCountdown = () => setCandleCountdown(formatCandleCountdown(latestOpenTime, timeframe));
+    updateCountdown();
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
+    const timer = window.setInterval(updateCountdown, 1_000);
+    return () => window.clearInterval(timer);
+  }, [bars.at(-1)?.time, timeframe, chartGeneration]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -520,6 +540,11 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       </div>
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />
+      {candleCountdownTop != null && candleCountdown && liveBar && <div
+        className={`current-price-label ${candleCountdownTone}`}
+        style={{ top: candleCountdownTop }}
+        aria-label={`Current price ${liveBar.close.toFixed(pricePrecision(minMove))}; candle closes in ${candleCountdown}`}
+      ><strong>{liveBar.close.toFixed(pricePrecision(minMove))}</strong><span>{candleCountdown}</span></div>}
       {tradeLines.map((line) => {
         const top = tradeLineTops[line.id];
         if (top == null) return null;
