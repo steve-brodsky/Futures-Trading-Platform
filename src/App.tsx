@@ -5,15 +5,16 @@ import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } fr
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, Download,
   LineChart, ListChecks, LockKeyhole, Maximize2, Minus,
-  Magnet, MousePointer2, PanelBottom, PanelRight, Plus, RotateCcw,
+  Magnet, MousePointer2, PanelBottom, PanelRight, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
-  Undo2, Wifi, X, Zap,
+  Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart } from "./components/TradingChart";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { api } from "./lib/bridge";
-import { balanceForAccount } from "./lib/accountBalances";
+import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
+import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type EmaCrossSide } from "./lib/emaAlerts";
 import { estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
@@ -21,7 +22,7 @@ import { flattenOrderDraft, withOrderPrice, type OrderProjection } from "./lib/t
 import { defaultIndicators } from "./lib/workspace";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const newYorkClock = new Intl.DateTimeFormat("en-US", {
@@ -35,7 +36,7 @@ const newYorkClock = new Intl.DateTimeFormat("en-US", {
 
 const defaultWorkspace: WorkspaceState = {
   revision: 0,
-  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators, chartTimezone: "exchange", magnetEnabled: false }],
+  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
@@ -117,6 +118,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<SymbolMeta[]>(futures);
   const [indicatorOpen, setIndicatorOpen] = useState(false);
+  const [alertOpen, setAlertOpen] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [entryRulesOpen, setEntryRulesOpen] = useState(false);
   const [review, setReview] = useState<ReviewState | null>(null);
@@ -134,6 +136,12 @@ export default function App() {
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
   const [currentTime, setCurrentTime] = useState(() => Date.now());
   const subscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; timeframe: Timeframe; epoch: string }>());
+  const alertSubscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; timeframe: Timeframe; epoch: string }>());
+  const alertBarsRef = useRef(new Map<string, Bar[]>());
+  const alertSidesRef = useRef(new Map<string, EmaCrossSide>());
+  const alertLoadedEpochRef = useRef(new Map<string, string>());
+  const alertDesiredRef = useRef(new Set<string>());
+  const alertDataEpochRef = useRef("");
   const vwapSubscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; epoch: string }>());
   const vwapSymbolsRef = useRef(new Set<string>());
   const vwapRangeTimersRef = useRef(new Map<string, number>());
@@ -164,10 +172,15 @@ export default function App() {
     [workspace.entryRules, bars, activeQuote],
   );
   const tabStreamKey = workspace.tabs.map((tab) => `${tab.id}:${tab.symbol.symbol}:${tab.timeframe}`).join("|");
+  const alertOwnershipKey = workspace.tabs.flatMap((tab) => ALERT_TIMEFRAMES.filter((timeframe) => tab.ema200Alert[timeframe].enabled).map((timeframe) => `${tab.id}:${tab.symbol.symbol}:${timeframe}`)).join("|");
+  const alertMarkets = desiredAlertMarkets(workspace.tabs);
+  const alertMarketsKey = alertMarkets.map((market) => market.key).sort().join("|");
+  const activeAlertCount = ALERT_TIMEFRAMES.filter((timeframe) => activeTab.ema200Alert[timeframe].enabled).length;
   const chartSymbolsKey = [...new Set(workspace.tabs.map((tab) => tab.symbol.symbol))].sort().join("|");
   const tradeDetailSymbolsKey = [...new Set(workspace.tabs.filter((tab) => isContinuousFuture(tab.symbol)).map(resolveTradeSymbol).filter((symbol): symbol is string => Boolean(symbol)))].sort().join("|");
   const quoteSymbolsKey = quoteSubscriptionSymbols(workspace).join("|");
   const vwapSymbolsKey = nySessionVwapSymbols(workspace.tabs).join("|");
+  alertDesiredRef.current = new Set(alertMarkets.map((market) => market.key));
   vwapSymbolsRef.current = new Set(vwapSymbolsKey.split("|").filter(Boolean));
   vwapDataEpochRef.current = `${environment}:${authEpoch}`;
   environmentRef.current = environment;
@@ -176,6 +189,57 @@ export default function App() {
       ? { symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
       : quoteFor(activeTradeSymbol))
     : { symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
+
+  function alertOwnerKey(tab: ChartTabState, timeframe: Timeframe): string {
+    return `${tab.id}\u0000${tab.symbol.symbol}\u0000${timeframe}`;
+  }
+
+  function matchingAlertTabs(symbol: string, timeframe: Timeframe): ChartTabState[] {
+    return workspaceRef.current.tabs.filter((tab) => tab.symbol.symbol === symbol && tab.ema200Alert[timeframe].enabled);
+  }
+
+  function primeAlertMarket(symbol: string, timeframe: Timeframe, incoming: Bar[], reset = true) {
+    if (currentWindowId !== MAIN_WINDOW_ID) return;
+    const key = alertMarketKey(symbol, timeframe);
+    if (!alertDesiredRef.current.has(key)) return;
+    const nextBars = reset ? mergeBars([], incoming) : mergeBars(alertBarsRef.current.get(key) ?? [], incoming);
+    alertBarsRef.current.set(key, nextBars);
+    matchingAlertTabs(symbol, timeframe).forEach((tab) => {
+      const ownerKey = alertOwnerKey(tab, timeframe);
+      if (!reset && alertSidesRef.current.has(ownerKey)) return;
+      const evaluation = evaluateEma200Cross(nextBars);
+      if (evaluation.side) alertSidesRef.current.set(ownerKey, evaluation.side);
+      else alertSidesRef.current.delete(ownerKey);
+    });
+  }
+
+  function handleAlertBarUpdate(payload: BarUpdateEvent) {
+    if (currentWindowId !== MAIN_WINDOW_ID || payload.environment !== environmentRef.current) return;
+    const key = alertMarketKey(payload.symbol, payload.timeframe);
+    if (!alertDesiredRef.current.has(key)) return;
+    const nextBars = mergeBars(alertBarsRef.current.get(key) ?? [], [payload.bar]);
+    alertBarsRef.current.set(key, nextBars);
+    matchingAlertTabs(payload.symbol, payload.timeframe).forEach((tab) => {
+      const ownerKey = alertOwnerKey(tab, payload.timeframe);
+      const previousSide = alertSidesRef.current.get(ownerKey);
+      const evaluation = evaluateEma200Cross(nextBars, previousSide);
+      if (evaluation.side) alertSidesRef.current.set(ownerKey, evaluation.side);
+      if (!previousSide || !evaluation.direction || evaluation.price == null || evaluation.ema == null) return;
+      const config = tab.ema200Alert[payload.timeframe];
+      playAlertSound(config.sound, config.durationSeconds);
+      const direction = evaluation.direction === "above" ? "above" : "below";
+      const message = `${payload.symbol} ${payload.timeframe} crossed ${direction} EMA 200 at ${formatPrice(evaluation.price)} (EMA ${formatPrice(evaluation.ema)}).`;
+      showToast(message);
+      setNotifications((current) => [{
+        id: crypto.randomUUID(),
+        symbol: payload.symbol,
+        time: new Date().toISOString(),
+        title: `EMA 200 cross · ${payload.timeframe}`,
+        text: `Price crossed ${direction} at ${formatPrice(evaluation.price)}; EMA 200 was ${formatPrice(evaluation.ema)}.`,
+        level: "warning" as const,
+      }, ...current].slice(0, 250));
+    });
+  }
 
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
@@ -202,6 +266,7 @@ export default function App() {
         if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], payload.bars) } }));
         }
+        if (payload.environment === environmentRef.current) primeAlertMarket(payload.symbol, payload.timeframe, payload.bars);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
         if (workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) {
@@ -210,6 +275,7 @@ export default function App() {
         if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], [payload.bar]) } }));
         }
+        handleAlertBarUpdate(payload);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
         setQuotes((current) => ({ ...current, [payload.quote.symbol]: { ...payload.quote, receivedAt: Date.now() } }));
@@ -340,6 +406,64 @@ export default function App() {
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
     const epoch = `${authEpoch}:${environment}:${authenticated}`;
+    if (alertDataEpochRef.current !== epoch) {
+      alertDataEpochRef.current = epoch;
+      alertBarsRef.current.clear();
+      alertSidesRef.current.clear();
+      alertLoadedEpochRef.current.clear();
+    }
+
+    const desired = desiredAlertMarkets(workspace.tabs);
+    const desiredKeys = new Set(desired.map((market) => market.key));
+    const uncovered = uncoveredAlertMarkets(workspace.tabs);
+    const uncoveredKeys = new Set(uncovered.map((market) => market.key));
+    const ownerKeys = new Set(workspace.tabs.flatMap((tab) => ALERT_TIMEFRAMES
+      .filter((timeframe) => tab.ema200Alert[timeframe].enabled)
+      .map((timeframe) => alertOwnerKey(tab, timeframe))));
+
+    alertSubscriptionsRef.current.forEach((subscription, key) => {
+      if (uncoveredKeys.has(key) && subscription.epoch === epoch) return;
+      if (api.isNative) void api.stopBarStream(subscription.subscriptionId);
+      alertSubscriptionsRef.current.delete(key);
+    });
+    alertBarsRef.current.forEach((_, key) => {
+      if (!desiredKeys.has(key)) alertBarsRef.current.delete(key);
+    });
+    alertLoadedEpochRef.current.forEach((_, key) => {
+      if (!desiredKeys.has(key)) alertLoadedEpochRef.current.delete(key);
+    });
+    alertSidesRef.current.forEach((_, key) => {
+      if (!ownerKeys.has(key)) alertSidesRef.current.delete(key);
+    });
+
+    desired.forEach((market) => {
+      const existing = alertBarsRef.current.get(market.key);
+      if (existing?.length) primeAlertMarket(market.symbol, market.timeframe, existing, false);
+      if (alertLoadedEpochRef.current.get(market.key) === epoch) return;
+      alertLoadedEpochRef.current.set(market.key, epoch);
+      const load = api.isNative ? api.cachedBars(market.symbol, market.timeframe) : api.bars(market.symbol, market.timeframe);
+      load.then((loaded) => {
+        if (alertDataEpochRef.current === epoch && alertDesiredRef.current.has(market.key)) primeAlertMarket(market.symbol, market.timeframe, loaded, false);
+      }).catch(() => undefined);
+    });
+
+    uncovered.forEach((market) => {
+      if (alertSubscriptionsRef.current.has(market.key) || !api.isNative || !authenticated) return;
+      const subscriptionId = `ema-alert:${encodeURIComponent(market.symbol)}:${market.timeframe}`;
+      alertSubscriptionsRef.current.set(market.key, { subscriptionId, symbol: market.symbol, timeframe: market.timeframe, epoch });
+      api.startBarStream(subscriptionId, market.symbol, market.timeframe).catch((error) => {
+        if (alertSubscriptionsRef.current.get(market.key)?.epoch !== epoch) return;
+        alertSubscriptionsRef.current.delete(market.key);
+        const message = `EMA alert data unavailable for ${market.symbol} ${market.timeframe}: ${String(error)}`;
+        showToast(message);
+        setNotifications((current) => [{ id: crypto.randomUUID(), symbol: market.symbol, time: new Date().toISOString(), title: "EMA alert stream unavailable", text: message, level: "error" as const }, ...current].slice(0, 250));
+      });
+    });
+  }, [alertMarketsKey, alertOwnershipKey, tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    const epoch = `${authEpoch}:${environment}:${authenticated}`;
     const desired = new Set(vwapSymbolsKey.split("|").filter(Boolean));
     const sharedOneMinute = new Set(workspace.tabs.filter((tab) => tab.timeframe === "1m").map((tab) => tab.symbol.symbol));
 
@@ -406,6 +530,7 @@ export default function App() {
     vwapRangeTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     if (currentWindowId === MAIN_WINDOW_ID) {
       subscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId));
+      alertSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId));
       vwapSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId));
     }
   }, []);
@@ -670,6 +795,10 @@ export default function App() {
     updateActiveTab({ indicators: activeTab.indicators.map((indicator) => indicator.id === id ? { ...indicator, ...patch } : indicator) });
   }
 
+  function updateTimeframeAlert(timeframe: Timeframe, patch: Partial<TimeframeAlertConfig>) {
+    updateActiveTab({ ema200Alert: { ...activeTab.ema200Alert, [timeframe]: { ...activeTab.ema200Alert[timeframe], ...patch } } });
+  }
+
   function selectTab(tabId: string) {
     commitWorkspace((current) => ({ ...current, windows: current.windows.map((item) => item.id === currentWindowId ? { ...item, activeTabId: tabId } : item) }));
   }
@@ -836,7 +965,7 @@ export default function App() {
       await api.setEnvironment(envConfirm);
       setEnvironmentState(envConfirm);
       setAuthenticated(api.isNative ? authenticated : false);
-      setOrders([]); setPositions([]); setBalances([]); setBodBalances([]);
+      setOrders([]); setPositions([]);
       setEnvConfirm(null);
       setAccounts(await api.accounts().catch(() => []));
       showToast(`Switched to ${envConfirm.toUpperCase()}`);
@@ -1033,13 +1162,24 @@ export default function App() {
         <IconButton label="Area chart" active={activeTab.chartKind === "area"} onClick={() => updateActiveTab({ chartKind: "area" })}><Activity size={17} /></IconButton>
       </div>
       <div className="toolbar-popover-anchor">
-        <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => setIndicatorOpen((value) => !value)}><SlidersHorizontal size={16} />Indicators</button>
+        <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => { setAlertOpen(false); setIndicatorOpen((value) => !value); }}><SlidersHorizontal size={16} />Indicators</button>
         {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible).length} active</span></header>{activeTab.indicators.map((indicator) => <div key={indicator.id} className="indicator-row"><label className="indicator-color" title={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`}><input type="color" value={indicator.color} aria-label={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" aria-pressed={indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind === "VWAP" ? "NY Session VWAP" : indicator.kind}</strong><small>{indicator.kind === "VWAP" ? isIntradayTimeframe(activeTab.timeframe) ? "9:30 AM–4:00 PM ET" : "Intraday only" : `Length ${indicator.period}`}</small></span><span className={`toggle ${indicator.visible ? "on" : ""}`} /></button></div>)}</div>}
       </div>
-      <button className="text-tool-button"><Bell size={16} />Alert</button>
+      {!isDetached && <div className="toolbar-popover-anchor">
+        <button className={`text-tool-button alert-tool-button ${alertOpen || activeAlertCount > 0 ? "active" : ""}`} aria-pressed={activeAlertCount > 0} title={`${activeAlertCount} EMA 200 alert timeframe${activeAlertCount === 1 ? "" : "s"} active`} onClick={() => { prepareAlertAudio(); setIndicatorOpen(false); setAlertOpen((value) => !value); }}><Bell size={16} fill={activeAlertCount > 0 ? "currentColor" : "none"} /><span className="tool-label">Alert</span></button>
+        {alertOpen && <div className="popover alert-popover"><header><strong>EMA 200 Alerts</strong><span>{activeAlertCount} active</span></header><div className="alert-list">{ALERT_TIMEFRAMES.map((timeframe) => {
+          const config = activeTab.ema200Alert[timeframe];
+          return <section key={timeframe} className={`alert-row ${config.enabled ? "enabled" : ""}`}>
+            <button className="alert-toggle-button" aria-pressed={config.enabled} onClick={() => { prepareAlertAudio(); updateTimeframeAlert(timeframe, { enabled: !config.enabled }); }}><span><strong>{timeframe}</strong><small>Price crosses EMA 200</small></span><span className={`toggle ${config.enabled ? "on" : ""}`} /></button>
+            <div className="alert-row-controls">
+              <label><span>Sound</span><select aria-label={`${timeframe} alert sound`} value={config.sound} onChange={(event) => updateTimeframeAlert(timeframe, { sound: event.target.value as AlertSound })}>{ALERT_SOUNDS.map((sound) => <option key={sound.value} value={sound.value}>{sound.label}</option>)}</select></label>
+              <label><span>Duration</span><select aria-label={`${timeframe} alert duration`} value={config.durationSeconds} onChange={(event) => updateTimeframeAlert(timeframe, { durationSeconds: Number(event.target.value) as AlertDurationSeconds })}>{ALERT_DURATIONS.map((duration) => <option key={duration} value={duration}>{duration}s</option>)}</select></label>
+              <button className="alert-preview-button" onClick={() => playAlertSound(config.sound, config.durationSeconds)}>Preview</button>
+            </div>
+          </section>;
+        })}</div></div>}
+      </div>}
       <div className="divider" />
-      <IconButton label="Undo"><Undo2 size={17} /></IconButton>
-      <IconButton label="Reset chart"><RotateCcw size={17} /></IconButton>
       <span className="toolbar-spacer" />
       {!isDetached && <><IconButton label="Toggle bottom panel" active={workspace.bottomPanelOpen} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}><PanelBottom size={17} /></IconButton><IconButton label="Toggle right panel" active={workspace.rightPanelOpen} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}><PanelRight size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton></>}
       <IconButton label="Fullscreen"><Maximize2 size={17} /></IconButton>
@@ -1287,8 +1427,7 @@ function BottomPanel({ workspace, updateWorkspace, accounts, account, positions,
   const visibleHistory = history.orders.filter((order) => statusMatches(order.status, historyFilter));
   const money = (value?: number) => value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const time = (value?: string) => value ? new Date(value).toLocaleString() : "—";
-  const balance = balanceForAccount(balances, account?.id);
-  const bod = balanceForAccount(bodBalances, account?.id);
+  const balance = balances[0]; const bod = bodBalances[0];
   const exportRows = () => {
     let rows: Array<Record<string, unknown>> = [];
     if (workspace.bottomTab === "positions") rows = positions as unknown as Array<Record<string, unknown>>;

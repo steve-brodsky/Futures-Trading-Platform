@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
+import { defaultEma200Alert } from "./emaAlerts";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./chartWorkspace";
 
 const fallback: WorkspaceState = {
   revision: 0,
-  tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], chartTimezone: "exchange", magnetEnabled: false }],
+  tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
@@ -62,7 +63,9 @@ describe("chart workspace", () => {
     const source = { ...fallback.tabs[0], indicators: [{ id: "ema", kind: "EMA" as const, period: 20, color: "#fff", visible: true }] };
     const clone = cloneChartTab(source, "copy");
     clone.indicators[0].color = "#000";
+    clone.ema200Alert["1m"].enabled = true;
     expect(source.indicators[0].color).toBe("#fff");
+    expect(source.ema200Alert["1m"].enabled).toBe(false);
   });
 
   it("moves tabs between windows and removes an empty detached window", () => {
@@ -99,6 +102,14 @@ describe("chart workspace", () => {
   it("defaults legacy workspaces to order confirmation", () => {
     const result = normalizeChartWorkspace({ ...fallback, confirmOrders: undefined }, fallback);
     expect(result.confirmOrders).toBe(true);
+  });
+
+  it("defaults legacy alert settings and preserves per-timeframe choices", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, tabs: [{ ...fallback.tabs[0], ema200Alert: undefined }] }, fallback);
+    expect(legacy.tabs[0].ema200Alert["1m"]).toEqual({ enabled: false, sound: "chime", durationSeconds: 3 });
+    const saved = structuredClone(fallback);
+    saved.tabs[0].ema200Alert["5m"] = { enabled: true, sound: "siren", durationSeconds: 10 };
+    expect(normalizeChartWorkspace(saved, fallback).tabs[0].ema200Alert["5m"]).toEqual({ enabled: true, sound: "siren", durationSeconds: 10 });
   });
 
   it("preserves an explicit disabled confirmation preference", () => {
