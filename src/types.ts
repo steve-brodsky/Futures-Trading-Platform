@@ -240,8 +240,14 @@ export interface ChartLabelSettings {
   fontSize: number;
 }
 
+export interface OrderTicketSettings {
+  swingStopPivotBars: 2 | 3;
+  swingStopOffsetTicks: number;
+}
+
 export interface WorkspaceSettings {
   chartLabels: ChartLabelSettings;
+  orderTicket: OrderTicketSettings;
 }
 
 export interface WorkspaceState {

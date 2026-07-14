@@ -103,6 +103,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     return valid.length ? [[symbol, valid]] : [];
   }));
   const savedChartLabels = value.settings?.chartLabels;
+  const savedOrderTicket = value.settings?.orderTicket;
   return {
     revision: typeof value.revision === "number" ? value.revision : 0,
     environment: value.environment === "live" || value.environment === "sim" ? value.environment : fallback.environment,
@@ -129,6 +130,14 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
         fontSize: typeof savedChartLabels?.fontSize === "number" && Number.isFinite(savedChartLabels.fontSize)
           ? Math.max(8, Math.min(16, Math.round(savedChartLabels.fontSize)))
           : fallback.settings.chartLabels.fontSize,
+      },
+      orderTicket: {
+        swingStopPivotBars: savedOrderTicket?.swingStopPivotBars === 2 || savedOrderTicket?.swingStopPivotBars === 3
+          ? savedOrderTicket.swingStopPivotBars
+          : fallback.settings.orderTicket.swingStopPivotBars,
+        swingStopOffsetTicks: typeof savedOrderTicket?.swingStopOffsetTicks === "number" && Number.isFinite(savedOrderTicket.swingStopOffsetTicks)
+          ? Math.max(1, Math.min(100, Math.round(savedOrderTicket.swingStopOffsetTicks)))
+          : fallback.settings.orderTicket.swingStopOffsetTicks,
       },
     },
   };
@@ -204,6 +213,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
   const settings = current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
     && current.settings.chartLabels.showRMultiple === incoming.settings.chartLabels.showRMultiple
     && current.settings.chartLabels.fontSize === incoming.settings.chartLabels.fontSize
+    && current.settings.orderTicket.swingStopPivotBars === incoming.settings.orderTicket.swingStopPivotBars
+    && current.settings.orderTicket.swingStopOffsetTicks === incoming.settings.orderTicket.swingStopOffsetTicks
     ? current.settings
     : incoming.settings;
 

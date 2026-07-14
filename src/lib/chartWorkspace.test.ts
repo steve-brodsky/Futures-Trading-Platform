@@ -11,7 +11,7 @@ const fallback: WorkspaceState = {
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
-  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 11 } },
+  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
 };
 
 describe("chart workspace", () => {
@@ -78,6 +78,23 @@ describe("chart workspace", () => {
     expect(clamped.settings.chartLabels.fontSize).toBe(16);
   });
 
+  it("defaults, preserves, and clamps swing-stop settings", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, settings: { chartLabels: fallback.settings.chartLabels } }, fallback);
+    expect(legacy.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 1 });
+
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 12.6 } },
+    }, fallback);
+    expect(saved.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 13 });
+
+    const clamped = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 4, swingStopOffsetTicks: 500 } },
+    }, fallback);
+    expect(clamped.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 100 });
+  });
+
   it("accepts changed global settings from a workspace broadcast", () => {
     const current = normalizeChartWorkspace(fallback, fallback);
     const broadcast = normalizeChartWorkspace({
@@ -87,6 +104,18 @@ describe("chart workspace", () => {
     }, fallback);
     const result = stabilizeChartWorkspace(current, broadcast);
     expect(result.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: false, fontSize: 13 });
+    expect(result.settings).not.toBe(current.settings);
+  });
+
+  it("accepts changed swing-stop settings from a workspace broadcast", () => {
+    const current = normalizeChartWorkspace(fallback, fallback);
+    const broadcast = normalizeChartWorkspace({
+      ...current,
+      revision: 2,
+      settings: { ...current.settings, orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 4 } },
+    }, fallback);
+    const result = stabilizeChartWorkspace(current, broadcast);
+    expect(result.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 4 });
     expect(result.settings).not.toBe(current.settings);
   });
 

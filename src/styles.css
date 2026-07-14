@@ -190,6 +190,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .field input.invalid { border-color: var(--red); }
 .field.compact { margin: 11px 0; }
 .take-profit-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
+.stop-loss-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
+.stop-loss-control button { height: 36px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 5px; color: #8d98a8; background: #151b23; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
+.stop-loss-control button:not(:disabled):hover { color: var(--cyan); border-color: rgba(55,213,232,.52); background: rgba(55,213,232,.08); }
 .r-selector { position: relative; min-width: 0; }
 .r-selector-button { width: 100%; height: 36px; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 5px; color: #8d98a8; background: #151b23; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
 .r-selector-button:not(:disabled):hover, .r-selector-button.active { color: var(--cyan); border-color: rgba(55,213,232,.52); background: rgba(55,213,232,.08); }
@@ -384,6 +387,15 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .settings-font-row > div { min-width: 180px; display: grid; grid-template-columns: minmax(120px,1fr) 38px; align-items: center; gap: 10px; }
 .settings-font-row input { width: 100%; accent-color: var(--cyan); cursor: ew-resize; }
 .settings-font-row output { color: #dce3eb; font: 600 10px DM Mono, monospace; text-align: right; }
+.settings-control-row { min-height: 62px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line-soft); }
+.settings-control-row > span { display: flex; flex-direction: column; gap: 3px; }
+.settings-control-row strong { font-size: 10px; font-weight: 500; }
+.settings-control-row small { color: var(--muted); font: 400 8px DM Mono, monospace; }
+.settings-control-row select, .settings-control-row input { height: 34px; border: 1px solid #2a3442; border-radius: 5px; color: #dce2ea; background: #11161d; padding: 0 9px; font: 500 10px DM Mono, monospace; }
+.settings-control-row select { width: 150px; }
+.settings-number-control { display: flex; align-items: center; gap: 8px; }
+.settings-number-control input { width: 72px; }
+.settings-number-control > span { color: var(--muted); font: 500 9px DM Mono, monospace; }
 .settings-api-section .demo-warning { margin-left: 0; margin-right: 0; }
 .connection-actions { display: grid; grid-template-columns: 1fr 1.25fr; gap: 8px; margin-bottom: 17px; }
 .connection-actions .primary-button, .connection-actions .secondary-button { width: 100%; margin: 0; }
