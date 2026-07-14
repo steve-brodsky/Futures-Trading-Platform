@@ -246,6 +246,7 @@ export interface WorkspaceSettings {
 
 export interface WorkspaceState {
   revision: number;
+  environment: TradingEnvironment;
   tabs: ChartTabState[];
   windows: ChartWindowState[];
   watchlist: string[];

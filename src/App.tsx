@@ -18,6 +18,7 @@ import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaul
 import { estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
+import { quoteDayChangePercent } from "./lib/quotes";
 import { flattenOrderDraft, withOrderPrice, type OrderProjection } from "./lib/tradeLines";
 import { defaultIndicators } from "./lib/workspace";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
@@ -36,6 +37,7 @@ const newYorkClock = new Intl.DateTimeFormat("en-US", {
 
 const defaultWorkspace: WorkspaceState = {
   revision: 0,
+  environment: "sim",
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
@@ -117,7 +119,7 @@ export default function App() {
   const [workspace, setWorkspace] = useState(defaultWorkspace);
   const workspaceRef = useRef(workspace);
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
-  const [environment, setEnvironmentState] = useState<TradingEnvironment>("sim");
+  const environment = workspace.environment;
   const [tabMarkets, setTabMarkets] = useState<Record<string, TabMarketState>>({});
   const [vwapMarkets, setVwapMarkets] = useState<Record<string, VwapMarketState>>({});
   const vwapMarketsRef = useRef(vwapMarkets);
@@ -193,6 +195,7 @@ export default function App() {
   const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
     ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
     : quoteFor(activeTab.symbol.symbol));
+  const activeChangePct = quoteDayChangePercent(activeQuote);
   const activeEntryEligibility = useMemo(
     () => evaluateEntryRules(workspace.entryRules, bars, activeQuote),
     [workspace.entryRules, bars, activeQuote],
@@ -269,7 +272,9 @@ export default function App() {
 
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
-      setWorkspace(normalizeChartWorkspace(saved, defaultWorkspace));
+      const normalized = normalizeChartWorkspace(saved, defaultWorkspace);
+      await api.setEnvironment(normalized.environment);
+      setWorkspace(normalized);
       setCredentialsConfigured(auth.configured);
       setAuthenticated(auth.authenticated);
       setAccounts(currentWindowId === MAIN_WINDOW_ID && auth.authenticated ? await api.accounts().catch(() => []) : []);
@@ -305,6 +310,7 @@ export default function App() {
         handleAlertBarUpdate(payload);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
+        if (payload.environment !== environmentRef.current) return;
         setQuotes((current) => ({ ...current, [payload.quote.symbol]: { ...payload.quote, receivedAt: Date.now() } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<StreamStateEvent>("stream-state", ({ payload }) => {
@@ -1081,7 +1087,7 @@ export default function App() {
     setBusy(true);
     try {
       await api.setEnvironment(envConfirm);
-      setEnvironmentState(envConfirm);
+      updateWorkspace({ environment: envConfirm });
       setAuthenticated(api.isNative ? authenticated : false);
       setOrders([]); setPositions([]);
       setEnvConfirm(null);
@@ -1288,7 +1294,7 @@ export default function App() {
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
       <div className="brand"><div className="brand-glyph"><TrendingUp size={16} strokeWidth={2.4} /></div><span>NORTHSTAR</span><small>TRADER</small></div>
-      {hasWindowTabs && <div className="instrument-summary"><strong>{activeTab.symbol.symbol}</strong><span>{activeQuote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span className={activeQuote.change >= 0 ? "positive" : "negative"}>{activeQuote.change >= 0 ? "+" : ""}{activeQuote.changePct.toFixed(2)}%</span></div>}
+      {hasWindowTabs && <div className="instrument-summary"><strong>{activeTab.symbol.symbol}</strong><span>{activeQuote.last.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span><span className={activeChangePct >= 0 ? "positive" : "negative"}>{activeChangePct >= 0 ? "+" : ""}{activeChangePct.toFixed(2)}%</span></div>}
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
       {!isDetached && <button className={`environment-badge ${environment}`} onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}

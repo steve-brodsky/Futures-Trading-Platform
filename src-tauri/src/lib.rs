@@ -792,7 +792,23 @@ async fn run_quote_stream(
 ) {
     let path = format!("/marketdata/stream/quotes/{}", symbols.join(","));
     let mut attempt = 0u32;
-    let mut quotes = HashMap::new();
+    let mut quotes: HashMap<_, _> = api
+        .quotes(&symbols)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|quote| (quote.symbol.clone(), quote))
+        .collect();
+    for quote in quotes.values() {
+        let _ = app.emit(
+            "quote-update",
+            QuoteUpdateEvent {
+                subscription_id: subscription_id.clone(),
+                environment: environment.clone(),
+                quote: quote.clone(),
+            },
+        );
+    }
     loop {
         emit_stream_state(
             &app,

@@ -105,6 +105,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   const savedChartLabels = value.settings?.chartLabels;
   return {
     revision: typeof value.revision === "number" ? value.revision : 0,
+    environment: value.environment === "live" || value.environment === "sim" ? value.environment : fallback.environment,
     tabs,
     windows,
     watchlist: Array.isArray(value.watchlist) ? value.watchlist : fallback.watchlist,

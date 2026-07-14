@@ -6,6 +6,7 @@ import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS
 
 const fallback: WorkspaceState = {
   revision: 0,
+  environment: "sim",
   tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
@@ -52,6 +53,12 @@ describe("chart workspace", () => {
     expect(result.tabs).toHaveLength(1);
     expect(result.tabs[0].timeframe).toBe("15m");
     expect(result.windows[0].tabIds).toEqual([result.tabs[0].id]);
+  });
+
+  it("defaults legacy environments to SIM and preserves a saved LIVE environment", () => {
+    expect(normalizeChartWorkspace({ ...fallback, environment: undefined }, fallback).environment).toBe("sim");
+    expect(normalizeChartWorkspace({ ...fallback, environment: "live" }, fallback).environment).toBe("live");
+    expect(normalizeChartWorkspace({ ...fallback, environment: "invalid" }, fallback).environment).toBe("sim");
   });
 
   it("defaults legacy chart-label settings and preserves explicit preferences", () => {
