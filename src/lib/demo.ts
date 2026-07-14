@@ -36,7 +36,7 @@ export const demoOrders: OrderUpdate[] = [
   { id: "1047918", accountId: "SIM-849201", symbol: "MESU26", side: "Buy", type: "Market", quantity: 2, filledQuantity: 2, remainingQuantity: 0, averageFillPrice: 6253.25, status: "Filled", duration: "DAY", timestamp: new Date(Date.now() - 900000).toISOString(), closedAt: new Date(Date.now() - 899000).toISOString(), commission: 2.48, relatedOrders: [] },
   { id: "1047901", accountId: "SIM-849201", symbol: "MNQU26", side: "Sell", type: "StopMarket", quantity: 1, filledQuantity: 0, remainingQuantity: 1, stopPrice: 22980, status: "Cancelled", duration: "GTC", timestamp: new Date(Date.now() - 3600000).toISOString(), closedAt: new Date(Date.now() - 3500000).toISOString(), relatedOrders: [] },
 ];
-export const demoBalance: AccountBalance = { accountId: "SIM-849201", accountType: "Futures", currency: "USD", cashBalance: 4996.52, buyingPower: 4996.52, equity: 5064.02, marketValue: 62600, todaysProfitLoss: 67.5, unrealizedProfitLoss: 67.5, unclearedDeposit: 0, commission: 2.48, initialMargin: 2460, maintenanceMargin: 2200, openOrderMargin: 0 };
+export const demoBalance: AccountBalance = { accountId: "SIM-849201", accountType: "Futures", currency: "USD", cashBalance: 4996.52, buyingPower: 4996.52, equity: 5064.02, marketValue: 62600, todaysProfitLoss: 67.5, realizedProfitLoss: 0, unrealizedProfitLoss: 67.5, unclearedDeposit: 0, commission: 2.48, initialMargin: 2460, maintenanceMargin: 2200, openOrderMargin: 0 };
 export const demoBodBalance: AccountBalance = { accountId: "SIM-849201", accountType: "Futures", currency: "USD", cashBalance: 4996.52, equity: 4996.52, marketValue: 0 };
 
 export function quoteFor(symbol: string, offset = 0): Quote {

@@ -1149,7 +1149,8 @@ fn balance_from_value(item: &Value) -> AccountBalance {
         equity: optional_number(item, "Equity"),
         market_value: optional_number(item, "MarketValue"),
         todays_profit_loss: optional_number(item, "TodaysProfitLoss"),
-        unrealized_profit_loss: optional_number(item, "UnrealizedProfitLoss"),
+        realized_profit_loss: optional_number(detail, "RealizedProfitLoss"),
+        unrealized_profit_loss: optional_number(detail, "UnrealizedProfitLoss"),
         uncleared_deposit: optional_number(item, "UnclearedDeposit"),
         commission: optional_number(item, "Commission")
             .or_else(|| optional_number(detail, "Commission")),
@@ -1629,7 +1630,11 @@ mod tests {
     fn balance_parser_reads_todays_profit_loss_numeric_strings() {
         let negative = balance_from_value(&json!({
             "AccountID": "123456781", "AccountType": "Futures",
-            "TodaysProfitLoss": "-549.999999"
+            "TodaysProfitLoss": "-549.999999",
+            "BalanceDetail": {
+                "RealizedProfitLoss": "125.25",
+                "UnrealizedProfitLoss": "-599.999999"
+            }
         }));
         let positive = balance_from_value(&json!({
             "AccountID": "123456782", "AccountType": "Margin",
@@ -1637,6 +1642,8 @@ mod tests {
         }));
 
         assert_eq!(negative.todays_profit_loss, Some(-549.999999));
+        assert_eq!(negative.realized_profit_loss, Some(125.25));
+        assert_eq!(negative.unrealized_profit_loss, Some(-599.999999));
         assert_eq!(positive.todays_profit_loss, Some(982.8001));
     }
 

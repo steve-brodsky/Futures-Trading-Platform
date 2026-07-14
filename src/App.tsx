@@ -128,7 +128,7 @@ export default function App() {
   const [secret, setSecret] = useState("");
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
-  const [brokerageEpoch, setBrokerageEpoch] = useState(0);
+  const brokerageRefreshRef = useRef<() => void>(() => undefined);
   const [busy, setBusy] = useState(false);
   const [closingPositionIds, setClosingPositionIds] = useState<Set<string>>(() => new Set());
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
@@ -218,7 +218,7 @@ export default function App() {
         if (!workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId) || payload.channel !== "bars") return;
         setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: payload.state } }));
       }).then((unlisten) => cleanups.push(unlisten));
-      listen<{ accountId: string }>("brokerage-update", () => setBrokerageEpoch((value) => value + 1)).then((unlisten) => cleanups.push(unlisten));
+      listen<{ accountId: string }>("brokerage-update", () => brokerageRefreshRef.current()).then((unlisten) => cleanups.push(unlisten));
       listen<string>("brokerage-stream-error", ({ payload }) => setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Brokerage stream reconnecting", text: payload, level: "warning" as const }, ...current].slice(0, 250))).then((unlisten) => cleanups.push(unlisten));
     }
     listen<WorkspaceState>("workspace-sync", ({ payload }) => {
@@ -253,6 +253,34 @@ export default function App() {
     if (currentWindowId !== MAIN_WINDOW_ID || !selectedAccount) return;
     if (workspace.selectedAccountId !== selectedAccount.id) updateWorkspace({ selectedAccountId: selectedAccount.id });
     let active = true;
+    let balanceRefreshTimer: number | undefined;
+    let balanceRefreshInFlight = false;
+    let balanceRefreshQueued = false;
+    const refreshBalances = async () => {
+      if (balanceRefreshInFlight) {
+        balanceRefreshQueued = true;
+        return;
+      }
+      balanceRefreshInFlight = true;
+      do {
+        balanceRefreshQueued = false;
+        try {
+          const nextBalances = await api.balances(selectedAccount.id);
+          if (active) setBalances(nextBalances);
+        } catch (error) {
+          if (active) setBrokerageError(String(error));
+        }
+      } while (active && balanceRefreshQueued);
+      balanceRefreshInFlight = false;
+    };
+    const requestBalanceRefresh = () => {
+      if (!active || balanceRefreshTimer != null) return;
+      balanceRefreshTimer = window.setTimeout(() => {
+        balanceRefreshTimer = undefined;
+        void refreshBalances();
+      }, 2_000);
+    };
+    brokerageRefreshRef.current = requestBalanceRefresh;
     const refresh = async () => {
       setBrokerageLoading(true); setBrokerageError(undefined);
       try {
@@ -267,8 +295,13 @@ export default function App() {
     };
     refresh();
     const timer = window.setInterval(refresh, 30_000);
-    return () => { active = false; clearInterval(timer); };
-  }, [selectedAccount?.id, authEpoch, environment, brokerageEpoch]);
+    return () => {
+      active = false;
+      clearInterval(timer);
+      if (balanceRefreshTimer != null) clearTimeout(balanceRefreshTimer);
+      if (brokerageRefreshRef.current === requestBalanceRefresh) brokerageRefreshRef.current = () => undefined;
+    };
+  }, [selectedAccount?.id, authEpoch, environment]);
 
   useEffect(() => {
     if (currentWindowId !== MAIN_WINDOW_ID || !selectedAccount || !api.isNative || !authenticated) return;
@@ -864,7 +897,7 @@ export default function App() {
     try {
       const update = await api.placeOrder(draft);
       setOrders((current) => [update, ...current]);
-      setBrokerageEpoch((value) => value + 1);
+      brokerageRefreshRef.current();
       if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(draft.symbol);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
     } catch (error) { showToast(String(error)); }
@@ -888,7 +921,7 @@ export default function App() {
     setClosingPositionIds((current) => new Set(current).add(positionId));
     try {
       const result = await api.closePosition(selectedAccount.id, positionId);
-      setBrokerageEpoch((value) => value + 1);
+      brokerageRefreshRef.current();
       if (result.error) {
         setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), symbol: result.symbol, title: "Position close aborted", text: result.error!, level: "error" as const }, ...current].slice(0, 250));
         showToast(result.error);
@@ -918,7 +951,7 @@ export default function App() {
     try {
       const updated = await api.replaceOrder(selectedAccount.id, order.id, newPrice);
       setOrders((current) => current.map((item) => item.id === order.id ? { ...item, ...updated } : item));
-      setBrokerageEpoch((value) => value + 1);
+      brokerageRefreshRef.current();
       showToast(`${order.type === "Limit" ? "Take profit" : "Stop loss"} moved to ${formatPrice(newPrice)}.`);
     } catch (error) {
       setOrders((current) => current.map((item) => item.id === order.id ? withOrderPrice(item, original) : item));
@@ -932,7 +965,7 @@ export default function App() {
     try {
       await api.cancelOrder(id);
       setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled", closedAt: new Date().toISOString() } : order));
-      setBrokerageEpoch((value) => value + 1);
+      brokerageRefreshRef.current();
       setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Order cancellation sent", text: `Cancellation requested for order ${id}`, level: "warning" }, ...current]);
     } catch (error) { showToast(String(error)); }
   }
@@ -951,7 +984,7 @@ export default function App() {
     try {
       const update = await api.placeOrder(review.draft);
       setOrders((current) => [update, ...current]);
-      setBrokerageEpoch((value) => value + 1);
+      brokerageRefreshRef.current();
       if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(review.draft.symbol);
       setReview(null);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
@@ -1273,7 +1306,7 @@ function BottomPanel({ workspace, updateWorkspace, accounts, account, positions,
   const OrderTable = ({ rows }: { rows: OrderUpdate[] }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong>{o.symbol}</strong></td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
   return <section className={`bottom-panel ${maximized ? "maximized" : ""}`}><div className="resize-handle" onPointerDown={startResize} />
     <header className="bottom-provider"><strong>TradeStation</strong><span className="bottom-status"><span className={`status-dot ${error ? "error" : ""}`} />{error ? "Data unavailable" : loading ? "Refreshing…" : "Brokerage data active"}</span><button title="Collapse panel" onClick={() => updateWorkspace({ bottomPanelOpen: false })}><Minus size={16} /></button><button title={maximized ? "Restore" : "Maximize"} onClick={() => { setMaximized(!maximized); updateWorkspace({ bottomPanelHeight: maximized ? 360 : window.innerHeight - 150 }); }}><Maximize2 size={15} /></button></header>
-    <div className="account-summary"><select value={account?.id ?? ""} onChange={(event) => updateWorkspace({ selectedAccountId: event.target.value })}>{accounts.map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Today’s profit</dt><dd>{money(balance?.todaysProfitLoss)}</dd></div><div><dt>Unrealized PnL</dt><dd>{money(balance?.unrealizedProfitLoss ?? positions.reduce((sum, item) => sum + item.unrealizedPnl, 0))}</dd></div></dl></div>
+    <div className="account-summary"><select value={account?.id ?? ""} onChange={(event) => updateWorkspace({ selectedAccountId: event.target.value })}>{accounts.map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Today’s profit</dt><dd>{money(balance?.realizedProfitLoss)}</dd></div><div><dt>Unrealized PnL</dt><dd>{money(balance?.unrealizedProfitLoss ?? positions.reduce((sum, item) => sum + item.unrealizedPnl, 0))}</dd></div></dl></div>
     <nav className="bottom-tabs">{tabs.map(([tab, label]) => <button key={tab} className={workspace.bottomTab === tab ? "active" : ""} onClick={() => updateWorkspace({ bottomTab: tab })}>{label}</button>)}<button className="export-button" title="Export active tab to CSV" onClick={exportRows}><Download size={16} /></button></nav>
     <div className="table-wrap">{error && <div className="panel-error">{error}</div>}
       {workspace.bottomTab === "positions" && (positions.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Stop loss</th><th>Take profit</th><th>Last price</th><th>Bid price</th><th>Ask price</th><th>Unrealized PnL</th><th>PnL quantity</th><th>PnL percent</th><th /></tr></thead><tbody>{positions.map((p) => { const closing = closingPositionIds.has(p.id); return <tr key={p.id}><td><strong>{p.symbol}</strong></td><td className={p.side === "Long" ? "buy-text" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{money(p.averagePrice)}</td><td>—</td><td>—</td><td>{money(p.last)}</td><td>{money(p.bid)}</td><td>{money(p.ask)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(p.unrealizedPnl)}</td><td>{money(p.unrealizedPnlQuantity)}</td><td>{p.unrealizedPnlPercent == null ? "—" : `${p.unrealizedPnlPercent.toFixed(2)}%`}</td><td><button className="close-position-button" disabled={closing} onClick={() => onClosePosition(p)}><X size={12} />{closing ? "Closing…" : "Close Position"}</button></td></tr>; })}</tbody></table> : <Empty label="There are no open positions in this account" />)}
@@ -1285,6 +1318,6 @@ function BottomPanel({ workspace, updateWorkspace, accounts, account, positions,
 }
 
 function BalanceSection({ title, balance, money }: { title: string; balance?: AccountBalance; money: (value?: number) => string }) {
-  const cells: Array<[string, number | undefined]> = [["Currency", undefined], ["Account balance", balance?.cashBalance], ["Realized PnL", balance?.todaysProfitLoss], ["Unrealized PnL", balance?.unrealizedProfitLoss], ["Net worth", balance?.equity], ["Commission", balance?.commission], ["Uncleared deposits", balance?.unclearedDeposit], ["Real time BP", balance?.buyingPower], ["Initial margin", balance?.initialMargin], ["Maintenance margin", balance?.maintenanceMargin], ["Open order margin", balance?.openOrderMargin]];
+  const cells: Array<[string, number | undefined]> = [["Currency", undefined], ["Account balance", balance?.cashBalance], ["Realized PnL", balance?.realizedProfitLoss], ["Unrealized PnL", balance?.unrealizedProfitLoss], ["Net worth", balance?.equity], ["Commission", balance?.commission], ["Uncleared deposits", balance?.unclearedDeposit], ["Real time BP", balance?.buyingPower], ["Initial margin", balance?.initialMargin], ["Maintenance margin", balance?.maintenanceMargin], ["Open order margin", balance?.openOrderMargin]];
   return <section><h3>{title}</h3><div className="balance-grid">{cells.map(([label, value], index) => <div key={label}><span>{label}</span><strong>{index === 0 ? balance?.currency ?? "—" : money(value)}</strong></div>)}</div></section>;
 }

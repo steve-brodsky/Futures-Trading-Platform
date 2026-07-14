@@ -110,6 +110,7 @@ export interface AccountBalance {
   equity?: number;
   marketValue?: number;
   todaysProfitLoss?: number;
+  realizedProfitLoss?: number;
   unrealizedProfitLoss?: number;
   unclearedDeposit?: number;
   commission?: number;

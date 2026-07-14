@@ -177,6 +177,7 @@ pub struct AccountBalance {
     pub equity: Option<f64>,
     pub market_value: Option<f64>,
     pub todays_profit_loss: Option<f64>,
+    pub realized_profit_loss: Option<f64>,
     pub unrealized_profit_loss: Option<f64>,
     pub uncleared_deposit: Option<f64>,
     pub commission: Option<f64>,
