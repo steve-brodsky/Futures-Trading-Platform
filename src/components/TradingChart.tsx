@@ -329,13 +329,25 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     const price = priceRef.current;
     if (!price) return;
 
-    tradeLineRefs.current.forEach((line) => price.removePriceLine(line));
-    const next = new Map<string, IPriceLine>();
-    [...buildTradeLines(tradeSymbol, positions, orders), ...buildProjectedTradeLines(orderProjection)].forEach((line) => {
-      const projected = line.kind === "projected-take-profit" || line.kind === "projected-stop-loss";
-      next.set(line.id, price.createPriceLine({ price: line.price, color: line.color, lineWidth: 1, lineStyle: projected ? LineStyle.Dotted : LineStyle.Dashed, axisLabelVisible: false, title: "" }));
+    const lines = [...buildTradeLines(tradeSymbol, positions, orders), ...buildProjectedTradeLines(orderProjection)];
+    const nextIds = new Set(lines.map((line) => line.id));
+    tradeLineRefs.current.forEach((line, id) => {
+      if (nextIds.has(id)) return;
+      price.removePriceLine(line);
+      tradeLineRefs.current.delete(id);
     });
-    tradeLineRefs.current = next;
+    lines.forEach((line) => {
+      const projected = line.kind === "projected-take-profit" || line.kind === "projected-stop-loss";
+      const orderDrag = draggingOrderRef.current;
+      const projectionDrag = draggingProjectionRef.current;
+      const displayPrice = orderDrag && orderDrag.id === line.order?.id ? orderDrag.price
+        : projectionDrag && projectionDrag.lineId === line.id ? projectionDrag.price
+          : line.price;
+      const options = { price: displayPrice, color: line.color, lineWidth: 1 as const, lineStyle: projected ? LineStyle.Dotted : LineStyle.Dashed, axisLabelVisible: false, title: "" };
+      const existing = tradeLineRefs.current.get(line.id);
+      if (existing) existing.applyOptions(options);
+      else tradeLineRefs.current.set(line.id, price.createPriceLine(options));
+    });
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   }, [orders, positions, tradeSymbol, orderProjection?.takeProfit, orderProjection?.stopLoss, chartGeneration]);
 
