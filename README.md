@@ -91,6 +91,14 @@ On a Windows machine where the Visual Studio developer environment does not incl
 npm run desktop:windows
 ```
 
+Build a single Windows executable without generating MSI or NSIS installer bundles:
+
+```powershell
+npm run tauri build -- --no-bundle
+```
+
+The executable is written to `src-tauri\target\release\northstar-trader.exe`. The target Windows machine must have the WebView2 Runtime installed.
+
 ## TradeStation configuration
 
 1. Add `http://localhost:8080` to the allowed callback URLs for the TradeStation API application.
@@ -129,6 +137,7 @@ Order confirmation is enabled in a new workspace, but it can currently be disabl
 | `npm run test:unit` | Run the frontend unit suite |
 | `npm run tauri dev` | Start the native app in development |
 | `npm run tauri build` | Build native desktop bundles |
+| `npm run tauri build -- --no-bundle` | Build one Windows `.exe` without installer bundles |
 | `npm run desktop:windows` | Start Tauri with auto-detected Windows SDK paths |
 
 Run all current automated checks:

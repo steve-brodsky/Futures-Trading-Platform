@@ -1728,7 +1728,7 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   const [draggedSymbol, setDraggedSymbol] = useState<string>();
   const [dropSymbol, setDropSymbol] = useState<string>();
   const watchlistRef = useRef(workspace.watchlist);
-  const pointerDragRef = useRef<{ symbol: string; pointerId: number }>();
+  const pointerDragRef = useRef<{ symbol: string; pointerId: number } | undefined>(undefined);
   watchlistRef.current = workspace.watchlist;
 
   useEffect(() => {
