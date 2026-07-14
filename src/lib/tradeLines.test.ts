@@ -101,6 +101,18 @@ describe("chart trade lines", () => {
     expect(shortMetrics.get("order:o2")).toEqual({ dollarAmount: -50, rMultiple: -1 });
   });
 
+  it("uses the live quote for position metrics while leaving exit projections unchanged", () => {
+    const tradePosition = { ...position, averagePrice: 100, unrealizedPnl: 5 };
+    const lines = buildTradeLines("MES", [tradePosition], [
+      { ...baseOrder, price: 110 },
+      { ...baseOrder, id: "o2", type: "StopMarket", price: undefined, stopPrice: 95 },
+    ]);
+    const metrics = buildTradeLineMetrics(lines, 5, 102.5);
+    expect(metrics.get("position:p1")).toEqual({ dollarAmount: 25, rMultiple: .5 });
+    expect(metrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: 2 });
+    expect(metrics.get("order:o2")).toEqual({ dollarAmount: -50, rMultiple: -1 });
+  });
+
   it("uses the nearest valid stop as the risk baseline", () => {
     const tradePosition = { ...position, averagePrice: 100 };
     const lines = buildTradeLines("MES", [tradePosition], [

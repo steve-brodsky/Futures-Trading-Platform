@@ -100,7 +100,7 @@ export function buildProjectedTradeLines(projection?: OrderProjection): TradeLin
   return lines;
 }
 
-export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: number): Map<string, TradeLineMetrics> {
+export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: number, currentPrice?: number): Map<string, TradeLineMetrics> {
   const metrics = new Map<string, TradeLineMetrics>();
   if (!Number.isFinite(pointValue) || pointValue <= 0) return metrics;
 
@@ -123,7 +123,10 @@ export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: numbe
       rMultiple: riskAmount != null && riskAmount > 0 ? dollarAmount / riskAmount : null,
     });
 
-    if (Number.isFinite(position.unrealizedPnl)) metrics.set(positionLine.id, withRisk(position.unrealizedPnl));
+    const liveDollarAmount = currentPrice != null && Number.isFinite(currentPrice) && currentPrice > 0
+      ? direction * (currentPrice - position.averagePrice) * pointValue * quantity
+      : position.unrealizedPnl;
+    if (Number.isFinite(liveDollarAmount)) metrics.set(positionLine.id, withRisk(liveDollarAmount));
     lines.forEach((line) => {
       if ((line.kind !== "take-profit" && line.kind !== "stop-loss") || line.order?.symbol !== position.symbol) return;
       const dollarAmount = direction * (line.price - position.averagePrice) * pointValue * quantity;

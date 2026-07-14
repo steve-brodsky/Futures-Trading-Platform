@@ -365,7 +365,8 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .settings-font-row input { width: 100%; accent-color: var(--cyan); cursor: ew-resize; }
 .settings-font-row output { color: #dce3eb; font: 600 10px DM Mono, monospace; text-align: right; }
 .settings-api-section .demo-warning { margin-left: 0; margin-right: 0; }
-.settings-api-section .primary-button { width: 100%; margin-right: 0; margin-left: 0; }
+.connection-actions { display: grid; grid-template-columns: 1fr 1.25fr; gap: 8px; margin-bottom: 17px; }
+.connection-actions .primary-button, .connection-actions .secondary-button { width: 100%; margin: 0; }
 .entry-rules-builder { margin-top: 0; margin-bottom: 17px; }
 .entry-rules-intro { margin: 0; padding: 13px 0; border-bottom: 1px solid var(--line); color: #8793a3; font-size: 9px; line-height: 1.55; }
 .entry-rule-side { padding: 15px 0 17px; border-bottom: 1px solid var(--line); }

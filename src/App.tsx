@@ -91,14 +91,16 @@ function Modal({ title, children, onClose, width = 440 }: { title: string; child
   return <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-label={title} style={{ width }}><header><h2>{title}</h2><IconButton label="Close" onClick={onClose}><X size={17} /></IconButton></header>{children}</section></div>;
 }
 
-function TradeStationCredentials({ clientId, secret, busy, native, showIntro = true, onClientIdChange, onSecretChange, onConnect }: {
+function TradeStationCredentials({ clientId, secret, busy, configured, native, showIntro = true, onClientIdChange, onSecretChange, onSave, onConnect }: {
   clientId: string;
   secret: string;
   busy: boolean;
+  configured: boolean;
   native: boolean;
   showIntro?: boolean;
   onClientIdChange: (value: string) => void;
   onSecretChange: (value: string) => void;
+  onSave: () => void;
   onConnect: () => void;
 }) {
   return <>
@@ -107,7 +109,7 @@ function TradeStationCredentials({ clientId, secret, busy, native, showIntro = t
     <label className="field"><span>Auth0 API key / client ID</span><input value={clientId} onChange={(event) => onClientIdChange(event.target.value)} placeholder="Enter client ID" autoComplete="off" /></label>
     <label className="field"><span>Client secret</span><input value={secret} onChange={(event) => onSecretChange(event.target.value)} type="password" placeholder="Enter client secret" autoComplete="new-password" /></label>
     <div className="callback-note"><span>Callback URL</span><code>http://localhost:8080</code></div>
-    <button className="primary-button" disabled={busy || !native} onClick={onConnect}>{busy ? "Starting…" : "Save and connect"}</button>
+    <div className="connection-actions"><button className="secondary-button" disabled={busy || !native || !clientId.trim() || !secret.trim()} onClick={onSave}>Save credentials</button><button className="primary-button" disabled={busy || !native || !configured} onClick={onConnect}>Connect to TradeStation</button></div>
   </>;
 }
 
@@ -150,6 +152,7 @@ export default function App() {
   const [horizontalToolsOpen, setHorizontalToolsOpen] = useState(false);
   const [clientId, setClientId] = useState("");
   const [secret, setSecret] = useState("");
+  const [credentialsConfigured, setCredentialsConfigured] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
   const brokerageRefreshRef = useRef<() => void>(() => undefined);
@@ -266,6 +269,7 @@ export default function App() {
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
       setWorkspace(normalizeChartWorkspace(saved, defaultWorkspace));
+      setCredentialsConfigured(auth.configured);
       setAuthenticated(auth.authenticated);
       setAccounts(currentWindowId === MAIN_WINDOW_ID && auth.authenticated ? await api.accounts().catch(() => []) : []);
       if (currentWindowId === MAIN_WINDOW_ID && api.isNative && !auth.configured) setSetupOpen(true);
@@ -1004,17 +1008,28 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
-  async function connect() {
+  async function saveTradeStationCredentials() {
     if (!clientId.trim() || !secret.trim()) return showToast("Client ID and secret are required.");
     setBusy(true);
     try {
       await api.saveCredentials(clientId.trim(), secret);
+      setCredentialsConfigured(true);
+      setSecret("");
+      showToast("TradeStation credentials saved.");
+    } catch (error) { showToast(String(error)); }
+    finally { setBusy(false); }
+  }
+
+  async function connect() {
+    if (!credentialsConfigured) return showToast("Save TradeStation credentials before connecting.");
+    setBusy(true);
+    try {
       await api.beginLogin();
       setSetupOpen(false);
       setSettingsOpen(false);
       showToast("Complete authorization in your browser.");
     } catch (error) { showToast(String(error)); }
-    finally { setBusy(false); setSecret(""); }
+    finally { setBusy(false); }
   }
 
   function eligibilityForEntry(sourceTabId: string, expectedChartSymbol: string, expectedTradeSymbol: string): Record<EntryRuleSide, EntryRuleResult> {
@@ -1231,7 +1246,7 @@ export default function App() {
         </div>
       </aside>
 
-      <TradingChart key={activeTab.id} bars={bars} vwapBars={vwapMarkets[activeTab.symbol.symbol]?.bars ?? []} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} pointValue={activeTradeMeta?.pointValue ?? activeTab.symbol.pointValue} chartLabelSettings={workspace.settings.chartLabels} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={(field, price) => setOrderProjection((current) => current && current.tradeSymbol === activeTradeSymbol ? { ...current, [field]: price } : current)} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={requestVisibleVwap} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
+      <TradingChart key={activeTab.id} bars={bars} vwapBars={vwapMarkets[activeTab.symbol.symbol]?.bars ?? []} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} pointValue={activeTradeMeta?.pointValue ?? activeTab.symbol.pointValue} currentPrice={activeTradeQuote.last} chartLabelSettings={workspace.settings.chartLabels} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={(field, price) => setOrderProjection((current) => current && current.tradeSymbol === activeTradeSymbol ? { ...current, [field]: price } : current)} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={requestVisibleVwap} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
 
       {!isDetached && workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>
@@ -1243,11 +1258,11 @@ export default function App() {
 
     {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateActiveTab({ symbol: result, tradeContract: undefined }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
 
-    {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} native={api.isNative} onClientIdChange={setClientId} onSecretChange={setSecret} onConnect={connect} /></Modal>}
+    {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></Modal>}
 
     {settingsOpen && <Modal title="Settings" onClose={() => setSettingsOpen(false)} width={540}><div className="settings-content">
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Position labels</h3><p>Choose which performance values appear beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
-      <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onConnect={connect} /></section>
+      <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
     </div></Modal>}
 
     {envConfirm && <Modal title={`Switch to ${envConfirm.toUpperCase()}?`} onClose={() => setEnvConfirm(null)}><div className={`environment-confirm ${envConfirm}`}><Zap size={22} /><div><strong>{envConfirm === "live" ? "Real orders and real money" : "Simulated execution"}</strong><p>{envConfirm === "live" ? "Changing to LIVE clears SIM account data and disables quick-submit for this session." : "SIM uses a separate account environment and simulated fills."}</p></div></div><div className="modal-actions"><button className="secondary-button" onClick={() => setEnvConfirm(null)}>Cancel</button><button className={envConfirm === "live" ? "danger-button" : "primary-button"} disabled={busy} onClick={confirmEnvironment}>Switch to {envConfirm.toUpperCase()}</button></div></Modal>}

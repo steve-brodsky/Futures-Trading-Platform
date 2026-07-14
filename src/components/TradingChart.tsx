@@ -24,6 +24,7 @@ interface Props {
   exchange: string;
   minMove: number;
   pointValue: number;
+  currentPrice: number;
   chartLabelSettings: ChartLabelSettings;
   timeframe: Timeframe;
   timezone: ChartTimezone;
@@ -56,7 +57,7 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -96,7 +97,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       : draggingProjection && draggingProjection.lineId === line.id ? draggingProjection.price
         : line.price,
   ]));
-  const tradeLineMetrics = buildTradeLineMetrics(tradeLines.map((line) => ({ ...line, price: displayPrices.get(line.id) ?? line.price })), pointValue);
+  const tradeLineMetrics = buildTradeLineMetrics(tradeLines.map((line) => ({ ...line, price: displayPrices.get(line.id) ?? line.price })), pointValue, currentPrice);
 
   barsRef.current = bars;
   magnetEnabledRef.current = magnetEnabled;
