@@ -12,6 +12,32 @@ use tokio::sync::{oneshot, watch, Mutex};
 const HISTORY_CREDIT_CAPACITY: f64 = 200.0;
 const HISTORY_CREDITS_PER_SECOND: f64 = 200.0 / 60.0;
 const BACKGROUND_RESERVE_RATIO: f64 = 0.10;
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+const REST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HttpClientPolicy {
+    total_timeout: Option<Duration>,
+}
+
+const REST_CLIENT_POLICY: HttpClientPolicy = HttpClientPolicy {
+    total_timeout: Some(REST_REQUEST_TIMEOUT),
+};
+const STREAM_CLIENT_POLICY: HttpClientPolicy = HttpClientPolicy {
+    // TradeStation streams are intentionally open-ended. A total request
+    // timeout would terminate every healthy stream at a fixed interval.
+    total_timeout: None,
+};
+
+fn build_http_client(policy: HttpClientPolicy) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent("NorthstarTrader/0.1")
+        .connect_timeout(HTTP_CONNECT_TIMEOUT);
+    if let Some(timeout) = policy.total_timeout {
+        builder = builder.timeout(timeout);
+    }
+    builder.build()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RequestPriority {
@@ -369,6 +395,7 @@ pub struct Session {
 #[derive(Clone)]
 pub struct TradeStation {
     pub client: reqwest::Client,
+    stream_client: reqwest::Client,
     pub session: Arc<Mutex<Session>>,
     quota: QuotaCoordinator,
     cache: Arc<Mutex<ClientCache>>,
@@ -403,14 +430,12 @@ struct BrokerageSnapshot {
 
 impl TradeStation {
     pub fn new() -> Result<Self, AppError> {
-        let client = reqwest::Client::builder()
-            .user_agent("NorthstarTrader/0.1")
-            .connect_timeout(Duration::from_secs(12))
-            .timeout(Duration::from_secs(30))
-            .build()?;
+        let client = build_http_client(REST_CLIENT_POLICY)?;
+        let stream_client = build_http_client(STREAM_CLIENT_POLICY)?;
         let (brokerage_revision, _) = watch::channel(0);
         Ok(Self {
             client,
+            stream_client,
             session: Arc::new(Mutex::new(Session::default())),
             quota: QuotaCoordinator::default(),
             cache: Arc::new(Mutex::new(ClientCache::default())),
@@ -653,7 +678,12 @@ impl TradeStation {
             .await?;
         let token = self.token().await?;
         let url = format!("{}{}", self.base().await, path);
-        let response = self.client.get(url).bearer_auth(token).send().await?;
+        let response = self
+            .stream_client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await?;
         self.quota.observe(resource, response.headers()).await;
         if response.status() == StatusCode::UNAUTHORIZED {
             self.clear_token().await;
@@ -2521,6 +2551,17 @@ fn mask_account(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_client_has_no_total_request_timeout() {
+        assert_eq!(
+            REST_CLIENT_POLICY.total_timeout,
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(STREAM_CLIENT_POLICY.total_timeout, None);
+        assert!(build_http_client(REST_CLIENT_POLICY).is_ok());
+        assert!(build_http_client(STREAM_CLIENT_POLICY).is_ok());
+    }
 
     #[test]
     fn historical_credit_calculation_matches_tradestation_rules() {
