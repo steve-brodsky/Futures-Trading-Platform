@@ -155,7 +155,7 @@ export default function App() {
   const [credentialsConfigured, setCredentialsConfigured] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
-  const brokerageRefreshRef = useRef<() => void>(() => undefined);
+  const brokerageRefreshRef = useRef<(settle?: boolean) => void>(() => undefined);
   const [busy, setBusy] = useState(false);
   const [closingPositionIds, setClosingPositionIds] = useState<Set<string>>(() => new Set());
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
@@ -348,6 +348,36 @@ export default function App() {
     let balanceRefreshTimer: number | undefined;
     let balanceRefreshInFlight = false;
     let balanceRefreshQueued = false;
+    let tradingRefreshInFlight = false;
+    let tradingRefreshQueued = false;
+    const settlementTimers = new Set<number>();
+    const refreshTradingState = async () => {
+      if (!active) return;
+      if (tradingRefreshInFlight) {
+        tradingRefreshQueued = true;
+        return;
+      }
+      tradingRefreshInFlight = true;
+      try {
+        do {
+          tradingRefreshQueued = false;
+          try {
+            const [nextPositions, nextOrders] = await Promise.all([
+              api.positions(selectedAccount.id), api.orders(selectedAccount.id),
+            ]);
+            if (active) {
+              setPositions(nextPositions);
+              setOrders(nextOrders);
+              setBrokerageError(undefined);
+            }
+          } catch (error) {
+            if (active) setBrokerageError(String(error));
+          }
+        } while (active && tradingRefreshQueued);
+      } finally {
+        tradingRefreshInFlight = false;
+      }
+    };
     const refreshBalances = async () => {
       if (balanceRefreshInFlight) {
         balanceRefreshQueued = true;
@@ -372,26 +402,50 @@ export default function App() {
         void refreshBalances();
       }, 2_000);
     };
-    brokerageRefreshRef.current = requestBalanceRefresh;
-    const refresh = async () => {
-      setBrokerageLoading(true); setBrokerageError(undefined);
+    const refreshBodBalances = async () => {
       try {
-        const [nextPositions, nextOrders, nextBalances, nextBod] = await Promise.all([
-          api.positions(selectedAccount.id), api.orders(selectedAccount.id), api.balances(selectedAccount.id), api.bodBalances(selectedAccount.id),
-        ]);
-        if (!active) return;
-        setPositions(nextPositions); setOrders(nextOrders); setBalances(nextBalances); setBodBalances(nextBod);
+        const nextBod = await api.bodBalances(selectedAccount.id);
+        if (active) setBodBalances(nextBod);
       } catch (error) {
         if (active) setBrokerageError(String(error));
-      } finally { if (active) setBrokerageLoading(false); }
+      }
     };
-    refresh();
-    const timer = window.setInterval(refresh, 30_000);
+    const scheduleSettlementRefreshes = () => {
+      settlementTimers.forEach((timer) => window.clearTimeout(timer));
+      settlementTimers.clear();
+      [350, 1_000, 2_500].forEach((delay) => {
+        const timer = window.setTimeout(() => {
+          settlementTimers.delete(timer);
+          void refreshTradingState();
+        }, delay);
+        settlementTimers.add(timer);
+      });
+    };
+    const requestBrokerageRefresh = (settle = false) => {
+      if (!active) return;
+      void refreshTradingState();
+      requestBalanceRefresh();
+      if (settle) scheduleSettlementRefreshes();
+    };
+    brokerageRefreshRef.current = requestBrokerageRefresh;
+    const refreshAll = async () => {
+      setBrokerageLoading(true); setBrokerageError(undefined);
+      await Promise.all([refreshTradingState(), refreshBalances(), refreshBodBalances()]);
+      if (active) setBrokerageLoading(false);
+    };
+    void refreshAll();
+    const tradingTimer = window.setInterval(() => void refreshTradingState(), 5_000);
+    const accountTimer = window.setInterval(() => {
+      void refreshBalances();
+      void refreshBodBalances();
+    }, 30_000);
     return () => {
       active = false;
-      clearInterval(timer);
+      clearInterval(tradingTimer);
+      clearInterval(accountTimer);
       if (balanceRefreshTimer != null) clearTimeout(balanceRefreshTimer);
-      if (brokerageRefreshRef.current === requestBalanceRefresh) brokerageRefreshRef.current = () => undefined;
+      settlementTimers.forEach((timer) => window.clearTimeout(timer));
+      if (brokerageRefreshRef.current === requestBrokerageRefresh) brokerageRefreshRef.current = () => undefined;
     };
   }, [selectedAccount?.id, authEpoch, environment]);
 
@@ -1074,7 +1128,7 @@ export default function App() {
     try {
       const update = await api.placeOrder(draft);
       setOrders((current) => [update, ...current]);
-      brokerageRefreshRef.current();
+      brokerageRefreshRef.current(true);
       if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(draft.symbol);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
     } catch (error) { showToast(String(error)); }
@@ -1098,7 +1152,7 @@ export default function App() {
     setClosingPositionIds((current) => new Set(current).add(positionId));
     try {
       const result = await api.closePosition(selectedAccount.id, positionId);
-      brokerageRefreshRef.current();
+      brokerageRefreshRef.current(true);
       if (result.error) {
         setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), symbol: result.symbol, title: "Position close aborted", text: result.error!, level: "error" as const }, ...current].slice(0, 250));
         showToast(result.error);
@@ -1128,7 +1182,7 @@ export default function App() {
     try {
       const updated = await api.replaceOrder(selectedAccount.id, order.id, newPrice);
       setOrders((current) => current.map((item) => item.id === order.id ? { ...item, ...updated } : item));
-      brokerageRefreshRef.current();
+      brokerageRefreshRef.current(true);
       showToast(`${order.type === "Limit" ? "Take profit" : "Stop loss"} moved to ${formatPrice(newPrice)}.`);
     } catch (error) {
       setOrders((current) => current.map((item) => item.id === order.id ? withOrderPrice(item, original) : item));
@@ -1142,7 +1196,7 @@ export default function App() {
     try {
       await api.cancelOrder(id);
       setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled", closedAt: new Date().toISOString() } : order));
-      brokerageRefreshRef.current();
+      brokerageRefreshRef.current(true);
       setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Order cancellation sent", text: `Cancellation requested for order ${id}`, level: "warning" }, ...current]);
     } catch (error) { showToast(String(error)); }
   }
@@ -1161,7 +1215,7 @@ export default function App() {
     try {
       const update = await api.placeOrder(review.draft);
       setOrders((current) => [update, ...current]);
-      brokerageRefreshRef.current();
+      brokerageRefreshRef.current(true);
       if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(review.draft.symbol);
       setReview(null);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
