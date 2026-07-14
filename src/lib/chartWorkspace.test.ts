@@ -204,8 +204,9 @@ describe("chart workspace", () => {
 
   it("retains exact physical detached-window geometry across mixed-DPI monitors", () => {
     const detached = { id: "detached", detached: true, tabIds: ["chart-1"], activeTabId: "chart-1" };
-    const saved = rememberWindowGeometry(detached, { x: 2880, y: 180, width: 1650, height: 1140 }, 1.5);
+    const saved = rememberWindowGeometry(detached, { x: 2880, y: 180, width: 1650, height: 1140 }, 1.5, true);
     expect(saved).toMatchObject({
+      maximized: true,
       x: 1920,
       y: 120,
       width: 1100,
@@ -216,6 +217,16 @@ describe("chart workspace", () => {
       physicalHeight: 1140,
     });
     expect(savedPhysicalWindowGeometry(saved)).toEqual({ x: 2880, y: 180, width: 1650, height: 1140 });
+  });
+
+  it("accepts a changed main-window maximized state from a workspace broadcast", () => {
+    const current = normalizeChartWorkspace(fallback, fallback);
+    const incoming = normalizeChartWorkspace({
+      ...current,
+      revision: current.revision + 1,
+      windows: current.windows.map((window) => window.id === "main" ? { ...window, maximized: true } : window),
+    }, fallback);
+    expect(stabilizeChartWorkspace(current, incoming).windows[0].maximized).toBe(true);
   });
 
   it("ignores incomplete or invalid physical window geometry", () => {

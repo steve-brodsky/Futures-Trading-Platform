@@ -78,6 +78,20 @@ async function syncWorkspaceToOpenWindows(workspace: WorkspaceState): Promise<vo
   await Promise.all(workspace.windows.map((window) => emitTo(window.id, "workspace-sync", workspace).catch(() => undefined)));
 }
 
+async function restoreMainWindowGeometry(state: ChartWindowState): Promise<void> {
+  if (!api.isNative) return;
+  const current = getCurrentWindow();
+  const savedPhysical = savedPhysicalWindowGeometry(state);
+  if (savedPhysical) {
+    const monitors = await availableMonitors();
+    const screens = monitors.map((monitor) => ({ x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }));
+    const geometry = clampWindowGeometry(savedPhysical, screens);
+    await current.setSize(new PhysicalSize(geometry.width, geometry.height));
+    await current.setPosition(new PhysicalPosition(geometry.x, geometry.y));
+  }
+  if (state.maximized === true) await current.maximize();
+}
+
 interface VwapMarketState {
   bars: Bar[];
   loadedRanges: EpochRange[];
@@ -278,6 +292,10 @@ export default function App() {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
       const normalized = normalizeChartWorkspace(saved, defaultWorkspace);
       await api.setEnvironment(normalized.environment);
+      if (currentWindowId === MAIN_WINDOW_ID) {
+        const mainWindow = normalized.windows.find((item) => item.id === MAIN_WINDOW_ID);
+        if (mainWindow) await restoreMainWindowGeometry(mainWindow).catch(() => undefined);
+      }
       setWorkspace(normalized);
       setCredentialsConfigured(auth.configured);
       setAuthenticated(auth.authenticated);
@@ -1081,11 +1099,11 @@ export default function App() {
       closing = true;
       if (currentWindowId === MAIN_WINDOW_ID) {
         const windows = await getAllWindows();
-        const savedWindows = await Promise.all(windows.filter((item) => item.label !== MAIN_WINDOW_ID).map(async (item) => {
+        const savedWindows = await Promise.all(windows.map(async (item) => {
           const state = workspaceRef.current.windows.find((window) => window.id === item.label);
           if (!state) return undefined;
-          const [position, size, scale] = await Promise.all([item.outerPosition(), item.innerSize(), item.scaleFactor()]);
-          return rememberWindowGeometry(state, { x: position.x, y: position.y, width: size.width, height: size.height }, scale);
+          const [position, size, scale, maximized] = await Promise.all([item.outerPosition(), item.innerSize(), item.scaleFactor(), item.isMaximized()]);
+          return rememberWindowGeometry(state, { x: position.x, y: position.y, width: size.width, height: size.height }, scale, maximized);
         }));
         const geometryById = new Map(savedWindows.filter((item): item is ChartWindowState => item != null).map((item) => [item.id, item]));
         if (geometryById.size) {
@@ -1106,13 +1124,13 @@ export default function App() {
       await current.destroy();
     }).then((unlisten) => cleanups.push(unlisten));
     const saveGeometry = () => {
-      if (currentWindowId === MAIN_WINDOW_ID) return;
       window.clearTimeout(geometryTimer);
       window.clearTimeout(dockTimer);
       geometryTimer = window.setTimeout(async () => {
-        const [position, size, scale] = await Promise.all([current.outerPosition(), current.innerSize(), current.scaleFactor()]);
-        commitWorkspace((workspace) => ({ ...workspace, windows: workspace.windows.map((item) => item.id === currentWindowId ? rememberWindowGeometry(item, { x: position.x, y: position.y, width: size.width, height: size.height }, scale) : item) }));
+        const [position, size, scale, maximized] = await Promise.all([current.outerPosition(), current.innerSize(), current.scaleFactor(), current.isMaximized()]);
+        commitWorkspace((workspace) => ({ ...workspace, windows: workspace.windows.map((item) => item.id === currentWindowId ? rememberWindowGeometry(item, { x: position.x, y: position.y, width: size.width, height: size.height }, scale, maximized) : item) }));
       }, 250);
+      if (currentWindowId === MAIN_WINDOW_ID) return;
       dockTimer = window.setTimeout(async () => {
         const point = await cursorPosition();
         const bounds = [...stripBoundsRef.current.values()].find((item) => item.windowId !== currentWindowId && point.x >= item.left && point.x <= item.right && point.y >= item.top && point.y <= item.bottom);

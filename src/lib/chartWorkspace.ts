@@ -15,10 +15,11 @@ export function savedPhysicalWindowGeometry(window: ChartWindowState): ScreenRec
   return { x: window.physicalX!, y: window.physicalY!, width: window.physicalWidth!, height: window.physicalHeight! };
 }
 
-export function rememberWindowGeometry(window: ChartWindowState, geometry: ScreenRect, scaleFactor: number): ChartWindowState {
+export function rememberWindowGeometry(window: ChartWindowState, geometry: ScreenRect, scaleFactor: number, maximized = window.maximized === true): ChartWindowState {
   const scale = Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1;
   return {
     ...window,
+    maximized,
     x: Math.round(geometry.x / scale),
     y: Math.round(geometry.y / scale),
     width: Math.round(geometry.width / scale),
@@ -212,7 +213,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
   const currentWindows = new Map(current.windows.map((window) => [window.id, window]));
   const windows = incoming.windows.map((window) => {
     const prior = currentWindows.get(window.id);
-    return prior && prior.activeTabId === window.activeTabId && prior.detached === window.detached
+    return prior && prior.activeTabId === window.activeTabId && prior.detached === window.detached && prior.maximized === window.maximized
       && prior.x === window.x && prior.y === window.y && prior.width === window.width && prior.height === window.height
       && prior.physicalX === window.physicalX && prior.physicalY === window.physicalY
       && prior.physicalWidth === window.physicalWidth && prior.physicalHeight === window.physicalHeight

@@ -228,6 +228,7 @@ export interface ChartWindowState {
   tabIds: string[];
   activeTabId: string;
   detached: boolean;
+  maximized?: boolean;
   /** Legacy logical-pixel geometry retained for backward compatibility. */
   x?: number;
   y?: number;
