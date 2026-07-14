@@ -18,7 +18,7 @@ import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaul
 import { estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
-import { quoteDayChangePercent } from "./lib/quotes";
+import { previousSessionClose, quoteDayChangePercent } from "./lib/quotes";
 import { flattenOrderDraft, withOrderPrice, type OrderProjection } from "./lib/tradeLines";
 import { defaultIndicators } from "./lib/workspace";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
@@ -195,7 +195,7 @@ export default function App() {
   const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
     ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
     : quoteFor(activeTab.symbol.symbol));
-  const activeChangePct = quoteDayChangePercent(activeQuote);
+  const activeChangePct = quoteDayChangePercent(activeQuote, previousSessionClose(bars, activeTab.timeframe));
   const activeEntryEligibility = useMemo(
     () => evaluateEntryRules(workspace.entryRules, bars, activeQuote),
     [workspace.entryRules, bars, activeQuote],
