@@ -171,6 +171,7 @@ export default function App() {
   const [activeTool, setActiveTool] = useState("cursor");
   const [horizontalToolsOpen, setHorizontalToolsOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [bottomPanelMaximized, setBottomPanelMaximized] = useState(false);
   const [clientId, setClientId] = useState("");
   const [secret, setSecret] = useState("");
   const [credentialsConfigured, setCredentialsConfigured] = useState(false);
@@ -1404,7 +1405,7 @@ export default function App() {
       <IconButton label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} active={isFullscreen} onClick={toggleFullscreen}>{isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</IconButton>
     </nav>
 
-    <section className={`workspace ${hasWindowTabs ? "" : "empty-chart-workspace"} ${!isDetached && workspace.rightPanelOpen ? "with-right" : ""} ${!isDetached ? "with-bottom" : ""} ${!isDetached && !workspace.bottomPanelOpen ? "bottom-collapsed" : ""}`} style={{ "--bottom-height": `${workspace.bottomPanelOpen ? workspace.bottomPanelHeight ?? 360 : 42}px` } as React.CSSProperties}>
+    <section className={`workspace ${hasWindowTabs ? "" : "empty-chart-workspace"} ${!isDetached && workspace.rightPanelOpen ? "with-right" : ""} ${!isDetached ? "with-bottom" : ""} ${!isDetached && !workspace.bottomPanelOpen ? "bottom-collapsed" : ""} ${!isDetached && workspace.bottomPanelOpen && bottomPanelMaximized ? "bottom-maximized" : ""}`} style={{ "--bottom-height": workspace.bottomPanelOpen && bottomPanelMaximized ? "100%" : `${workspace.bottomPanelOpen ? workspace.bottomPanelHeight ?? 360 : 42}px` } as React.CSSProperties}>
       <aside className="drawing-rail" aria-label="Drawing tools" onKeyDown={(event) => { if (event.key === "Escape") setHorizontalToolsOpen(false); }}>
         <IconButton label="Cursor" active={activeTool === "cursor"} onClick={() => setActiveTool("cursor")}><MousePointer2 size={18} /></IconButton>
         <IconButton label="Magnet: snap crosshair to candle high or low" active={activeTab.magnetEnabled} onClick={() => updateActiveTab({ magnetEnabled: !activeTab.magnetEnabled })}><Magnet size={18} /></IconButton>
@@ -1424,7 +1425,7 @@ export default function App() {
         {workspace.rightTab === "order" ? <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={(projection) => setOrderProjection({ ...projection, tradeSymbol: activeTradeSymbol })} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} /> : <Watchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={(symbol) => { const meta = futures.find((item) => item.symbol === symbol); if (meta) updateActiveTab({ symbol: meta, tradeContract: undefined }); }} />}
       </aside>}
 
-      {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
+      {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
     </section>
 
     {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateActiveTab({ symbol: result, tradeContract: undefined }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
@@ -1707,8 +1708,8 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
   </div>;
 }
 
-function BottomPanel({ workspace, updateWorkspace, accounts, account, positions, orders, balances, bodBalances, history, setHistory, loading, error, notifications, closingPositionIds, onClosePosition, onNotify, onCancel }: {
-  workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; accounts: Account[]; account?: Account; positions: Position[]; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; notifications: ActivityNotification[]; closingPositionIds: Set<string>; onClosePosition: (position: Position) => void; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
+function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange, accounts, account, positions, orders, balances, bodBalances, history, setHistory, loading, error, notifications, closingPositionIds, onClosePosition, onNotify, onCancel }: {
+  workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; maximized: boolean; onMaximizedChange: (maximized: boolean) => void; accounts: Account[]; account?: Account; positions: Position[]; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; notifications: ActivityNotification[]; closingPositionIds: Set<string>; onClosePosition: (position: Position) => void; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
 }) {
   const tabs: Array<[WorkspaceState["bottomTab"], string]> = [["positions", "Positions"], ["orders", "Orders"], ["history", "Order history"], ["summary", "Account summary"], ["notifications", "Notifications log"]];
   const [orderFilter, setOrderFilter] = useState("All");
@@ -1717,11 +1718,37 @@ function BottomPanel({ workspace, updateWorkspace, accounts, account, positions,
   const [until, setUntil] = useState(today);
   const [historyFilter, setHistoryFilter] = useState("All");
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [maximized, setMaximized] = useState(false);
   const startResize = (event: React.PointerEvent) => {
-    event.preventDefault(); const startY = event.clientY; const startHeight = workspace.bottomPanelHeight ?? 360;
-    const move = (next: PointerEvent) => updateWorkspace({ bottomPanelHeight: Math.max(220, Math.min(window.innerHeight - 150, startHeight + startY - next.clientY)) });
-    const stop = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); };
+    event.preventDefault();
+    const panel = event.currentTarget.parentElement;
+    const workspaceElement = panel?.parentElement;
+    const startY = event.clientY;
+    const startHeight = panel?.clientHeight ?? workspace.bottomPanelHeight ?? 360;
+    const maxHeight = workspaceElement?.clientHeight ?? window.innerHeight;
+    let pendingHeight = startHeight;
+    let frame: number | undefined;
+    if (maximized) {
+      updateWorkspace({ bottomPanelHeight: startHeight });
+      onMaximizedChange(false);
+    }
+    document.body.style.cursor = "ns-resize";
+    document.body.style.userSelect = "none";
+    const applyHeight = () => {
+      frame = undefined;
+      workspaceElement?.style.setProperty("--bottom-height", `${pendingHeight}px`);
+    };
+    const move = (next: PointerEvent) => {
+      pendingHeight = Math.max(220, Math.min(maxHeight, startHeight + startY - next.clientY));
+      if (frame == null) frame = window.requestAnimationFrame(applyHeight);
+    };
+    const stop = () => {
+      if (frame != null) window.cancelAnimationFrame(frame);
+      updateWorkspace({ bottomPanelHeight: pendingHeight });
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop);
   };
   const loadHistory = async (append = false) => {
@@ -1768,7 +1795,7 @@ function BottomPanel({ workspace, updateWorkspace, accounts, account, positions,
   const OrderTable = ({ rows }: { rows: OrderUpdate[] }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong>{o.symbol}</strong></td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
   return <section className={`bottom-panel ${workspace.bottomPanelOpen ? "open" : "collapsed"} ${maximized ? "maximized" : ""}`}>
     {workspace.bottomPanelOpen && <div className="resize-handle" onPointerDown={startResize} />}
-    <header className="bottom-provider"><strong>TradeStation</strong><span className="bottom-status"><span className={`status-dot ${error ? "error" : ""}`} />{error ? "Data unavailable" : loading ? "Refreshing…" : "Brokerage data active"}</span><button className="drawer-toggle" type="button" aria-label={workspace.bottomPanelOpen ? "Collapse bottom drawer" : "Open bottom drawer"} aria-expanded={workspace.bottomPanelOpen} title={workspace.bottomPanelOpen ? "Collapse drawer" : "Open drawer"} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}>{workspace.bottomPanelOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}</button>{workspace.bottomPanelOpen && <button type="button" title={maximized ? "Restore" : "Maximize"} onClick={() => { setMaximized(!maximized); updateWorkspace({ bottomPanelHeight: maximized ? 360 : window.innerHeight - 150 }); }}><Maximize2 size={15} /></button>}</header>
+    <header className="bottom-provider"><strong>TradeStation</strong><span className="bottom-status"><span className={`status-dot ${error ? "error" : ""}`} />{error ? "Data unavailable" : loading ? "Refreshing…" : "Brokerage data active"}</span><button className="drawer-toggle" type="button" aria-label={workspace.bottomPanelOpen ? "Collapse bottom drawer" : "Open bottom drawer"} aria-expanded={workspace.bottomPanelOpen} title={workspace.bottomPanelOpen ? "Collapse drawer" : "Open drawer"} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}>{workspace.bottomPanelOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}</button>{workspace.bottomPanelOpen && <button type="button" title={maximized ? "Restore" : "Maximize"} onClick={() => onMaximizedChange(!maximized)}><Maximize2 size={15} /></button>}</header>
     {workspace.bottomPanelOpen && <><div className="account-summary"><select value={account?.id ?? ""} onChange={(event) => updateWorkspace({ selectedAccountId: event.target.value })}>{accounts.map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Today’s profit</dt><dd>{money(balance?.realizedProfitLoss)}</dd></div><div><dt>Unrealized PnL</dt><dd>{money(balance?.unrealizedProfitLoss ?? positions.reduce((sum, item) => sum + item.unrealizedPnl, 0))}</dd></div></dl></div>
     <nav className="bottom-tabs">{tabs.map(([tab, label]) => <button key={tab} className={workspace.bottomTab === tab ? "active" : ""} onClick={() => updateWorkspace({ bottomTab: tab })}>{label}</button>)}<button className="export-button" title="Export active tab to CSV" onClick={exportRows}><Download size={16} /></button></nav>
     <div className="table-wrap">{error && <div className="panel-error">{error}</div>}

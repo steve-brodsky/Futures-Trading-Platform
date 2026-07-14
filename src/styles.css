@@ -90,7 +90,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .workspace.empty-chart-workspace > * { display: none; }
 .workspace.empty-chart-workspace::after { content: "Drag a chart tab into this window or use + to create one"; color: #596678; font: 500 11px DM Mono, monospace; }
 .workspace.with-right { grid-template-columns: 44px minmax(0, 1fr) 314px; }
-.workspace.with-bottom { grid-template-rows: minmax(0, 1fr) var(--bottom-height, 360px); transition: grid-template-rows .18s ease-out; }
+.workspace.with-bottom { grid-template-rows: minmax(0, 1fr) var(--bottom-height, 360px); }
+.workspace.bottom-maximized .drawing-rail { visibility: hidden; pointer-events: none; }
 .drawing-rail { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; align-items: center; padding: 6px; gap: 2px; background: #0d1117; border-right: 1px solid var(--line); z-index: 4; }
 .drawing-tool-anchor { position: relative; }
 .drawing-flyout-backdrop { position: fixed; inset: 0; z-index: 39; border: 0; background: transparent; }
