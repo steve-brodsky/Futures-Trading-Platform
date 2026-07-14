@@ -8,6 +8,28 @@ export const MAIN_WINDOW_ID = "main";
 
 export interface ScreenRect { x: number; y: number; width: number; height: number; }
 
+export function savedPhysicalWindowGeometry(window: ChartWindowState): ScreenRect | undefined {
+  const values = [window.physicalX, window.physicalY, window.physicalWidth, window.physicalHeight];
+  if (!values.every((value) => typeof value === "number" && Number.isFinite(value))) return undefined;
+  if (window.physicalWidth! <= 0 || window.physicalHeight! <= 0) return undefined;
+  return { x: window.physicalX!, y: window.physicalY!, width: window.physicalWidth!, height: window.physicalHeight! };
+}
+
+export function rememberWindowGeometry(window: ChartWindowState, geometry: ScreenRect, scaleFactor: number): ChartWindowState {
+  const scale = Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1;
+  return {
+    ...window,
+    x: Math.round(geometry.x / scale),
+    y: Math.round(geometry.y / scale),
+    width: Math.round(geometry.width / scale),
+    height: Math.round(geometry.height / scale),
+    physicalX: Math.round(geometry.x),
+    physicalY: Math.round(geometry.y),
+    physicalWidth: Math.round(geometry.width),
+    physicalHeight: Math.round(geometry.height),
+  };
+}
+
 export function clampWindowGeometry(window: ScreenRect, screens: ScreenRect[]): ScreenRect {
   if (!screens.length) return window;
   const visible = screens.some((screen) => window.x < screen.x + screen.width && window.x + window.width > screen.x && window.y < screen.y + screen.height && window.y + 40 > screen.y);
@@ -192,6 +214,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     const prior = currentWindows.get(window.id);
     return prior && prior.activeTabId === window.activeTabId && prior.detached === window.detached
       && prior.x === window.x && prior.y === window.y && prior.width === window.width && prior.height === window.height
+      && prior.physicalX === window.physicalX && prior.physicalY === window.physicalY
+      && prior.physicalWidth === window.physicalWidth && prior.physicalHeight === window.physicalHeight
       && sameArray(prior.tabIds, window.tabIds, (a, b) => a === b)
       ? prior
       : window;

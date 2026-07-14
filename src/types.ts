@@ -228,10 +228,16 @@ export interface ChartWindowState {
   tabIds: string[];
   activeTabId: string;
   detached: boolean;
+  /** Legacy logical-pixel geometry retained for backward compatibility. */
   x?: number;
   y?: number;
   width?: number;
   height?: number;
+  /** Exact desktop geometry used to restore windows across mixed-DPI monitors. */
+  physicalX?: number;
+  physicalY?: number;
+  physicalWidth?: number;
+  physicalHeight?: number;
 }
 
 export interface ChartLabelSettings {

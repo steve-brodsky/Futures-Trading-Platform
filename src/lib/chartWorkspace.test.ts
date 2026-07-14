@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
 import { defaultEma200Alert } from "./emaAlerts";
-import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./chartWorkspace";
+import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, tabInsertionIndex } from "./chartWorkspace";
 
 const fallback: WorkspaceState = {
   revision: 0,
@@ -200,6 +200,27 @@ describe("chart workspace", () => {
   it("moves an off-screen detached window onto an available monitor", () => {
     expect(clampWindowGeometry({ x: 3000, y: 200, width: 1000, height: 700 }, [{ x: 0, y: 0, width: 1920, height: 1080 }]))
       .toEqual({ x: 920, y: 200, width: 1000, height: 700 });
+  });
+
+  it("retains exact physical detached-window geometry across mixed-DPI monitors", () => {
+    const detached = { id: "detached", detached: true, tabIds: ["chart-1"], activeTabId: "chart-1" };
+    const saved = rememberWindowGeometry(detached, { x: 2880, y: 180, width: 1650, height: 1140 }, 1.5);
+    expect(saved).toMatchObject({
+      x: 1920,
+      y: 120,
+      width: 1100,
+      height: 760,
+      physicalX: 2880,
+      physicalY: 180,
+      physicalWidth: 1650,
+      physicalHeight: 1140,
+    });
+    expect(savedPhysicalWindowGeometry(saved)).toEqual({ x: 2880, y: 180, width: 1650, height: 1140 });
+  });
+
+  it("ignores incomplete or invalid physical window geometry", () => {
+    const detached = { id: "detached", detached: true, tabIds: ["chart-1"], activeTabId: "chart-1", physicalX: 200, physicalY: 100, physicalWidth: 0, physicalHeight: 700 };
+    expect(savedPhysicalWindowGeometry(detached)).toBeUndefined();
   });
 
   it("calculates and clamps cross-window insertion positions", () => {

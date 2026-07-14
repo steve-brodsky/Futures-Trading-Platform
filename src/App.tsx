@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
@@ -22,7 +23,7 @@ import { previousSessionClose, quoteDayChangePercent } from "./lib/quotes";
 import { calculateSwingStop } from "./lib/swingStop";
 import { flattenOrderDraft, withOrderPrice, type OrderProjection } from "./lib/tradeLines";
 import { defaultIndicators } from "./lib/workspace";
-import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
+import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderTicketSettings, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
@@ -953,7 +954,17 @@ export default function App() {
     if (!api.isNative || !state.detached || await WebviewWindow.getByLabel(state.id)) return;
     const monitors = await availableMonitors();
     const screens = monitors.map((monitor) => ({ x: monitor.position.x / monitor.scaleFactor, y: monitor.position.y / monitor.scaleFactor, width: monitor.size.width / monitor.scaleFactor, height: monitor.size.height / monitor.scaleFactor }));
-    const geometry = clampWindowGeometry({ x: state.x ?? screens[0]?.x ?? 0, y: state.y ?? screens[0]?.y ?? 0, width: state.width ?? 1100, height: state.height ?? 760 }, screens);
+    const physicalScreens = monitors.map((monitor) => ({ x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }));
+    const savedPhysical = savedPhysicalWindowGeometry(state);
+    const physicalGeometry = savedPhysical ? clampWindowGeometry(savedPhysical, physicalScreens) : undefined;
+    const targetMonitor = physicalGeometry && monitors.find((monitor) => physicalGeometry.x < monitor.position.x + monitor.size.width
+      && physicalGeometry.x + physicalGeometry.width > monitor.position.x
+      && physicalGeometry.y < monitor.position.y + monitor.size.height
+      && physicalGeometry.y + 40 > monitor.position.y);
+    const targetScale = targetMonitor?.scaleFactor ?? 1;
+    const geometry = physicalGeometry
+      ? { x: physicalGeometry.x / targetScale, y: physicalGeometry.y / targetScale, width: physicalGeometry.width / targetScale, height: physicalGeometry.height / targetScale }
+      : clampWindowGeometry({ x: state.x ?? screens[0]?.x ?? 0, y: state.y ?? screens[0]?.y ?? 0, width: state.width ?? 1100, height: state.height ?? 760 }, screens);
     const view = new WebviewWindow(state.id, {
       url: `/?window=${encodeURIComponent(state.id)}`,
       title: "Northstar Trader — Chart",
@@ -965,8 +976,17 @@ export default function App() {
       minHeight: 520,
       resizable: true,
       decorations: true,
+      visible: !physicalGeometry,
     });
     view.once("tauri://created", async () => {
+      if (physicalGeometry) {
+        try {
+          await view.setSize(new PhysicalSize(physicalGeometry.width, physicalGeometry.height));
+          await view.setPosition(new PhysicalPosition(physicalGeometry.x, physicalGeometry.y));
+        } finally {
+          await view.show();
+        }
+      }
       await emitTo(state.id, "workspace-sync", workspaceRef.current);
       state.tabIds.forEach((tabId) => {
         const range = viewRangesRef.current.get(tabId);
@@ -1061,6 +1081,22 @@ export default function App() {
       closing = true;
       if (currentWindowId === MAIN_WINDOW_ID) {
         const windows = await getAllWindows();
+        const savedWindows = await Promise.all(windows.filter((item) => item.label !== MAIN_WINDOW_ID).map(async (item) => {
+          const state = workspaceRef.current.windows.find((window) => window.id === item.label);
+          if (!state) return undefined;
+          const [position, size, scale] = await Promise.all([item.outerPosition(), item.innerSize(), item.scaleFactor()]);
+          return rememberWindowGeometry(state, { x: position.x, y: position.y, width: size.width, height: size.height }, scale);
+        }));
+        const geometryById = new Map(savedWindows.filter((item): item is ChartWindowState => item != null).map((item) => [item.id, item]));
+        if (geometryById.size) {
+          const next = {
+            ...workspaceRef.current,
+            revision: Math.max(workspaceRef.current.revision + 1, Date.now()),
+            windows: workspaceRef.current.windows.map((item) => geometryById.get(item.id) ?? item),
+          };
+          workspaceRef.current = next;
+          await api.saveWorkspace(next).catch(() => undefined);
+        }
         await Promise.all(windows.filter((item) => item.label !== MAIN_WINDOW_ID).map((item) => item.destroy()));
       } else {
         const next = closeDetachedWindow(workspaceRef.current, currentWindowId);
@@ -1074,8 +1110,8 @@ export default function App() {
       window.clearTimeout(geometryTimer);
       window.clearTimeout(dockTimer);
       geometryTimer = window.setTimeout(async () => {
-        const [position, size, scale] = await Promise.all([current.outerPosition(), current.outerSize(), current.scaleFactor()]);
-        commitWorkspace((workspace) => ({ ...workspace, windows: workspace.windows.map((item) => item.id === currentWindowId ? { ...item, x: Math.round(position.x / scale), y: Math.round(position.y / scale), width: Math.round(size.width / scale), height: Math.round(size.height / scale) } : item) }));
+        const [position, size, scale] = await Promise.all([current.outerPosition(), current.innerSize(), current.scaleFactor()]);
+        commitWorkspace((workspace) => ({ ...workspace, windows: workspace.windows.map((item) => item.id === currentWindowId ? rememberWindowGeometry(item, { x: position.x, y: position.y, width: size.width, height: size.height }, scale) : item) }));
       }, 250);
       dockTimer = window.setTimeout(async () => {
         const point = await cursorPosition();

@@ -12,6 +12,9 @@
     "core:window:allow-available-monitors",
     "core:window:allow-start-dragging",
     "core:window:allow-set-fullscreen",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-show",
     "core:webview:allow-create-webview-window",
     "core:event:allow-emit",
     "core:event:allow-listen"
