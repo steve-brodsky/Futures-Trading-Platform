@@ -29,6 +29,17 @@ describe("indicator workspace normalization", () => {
   it("preserves unknown saved indicators", () => {
     expect(normalizeIndicators(savedIndicators)).toContainEqual(savedIndicators[2]);
   });
+
+  it("removes retired RSI and MACD indicators from legacy workspaces", () => {
+    const legacyIndicators = [
+      ...savedIndicators,
+      { id: "rsi14", kind: "RSI", period: 14, color: "#ff7ac6", visible: true },
+      { id: "macd", kind: "MACD", period: 12, color: "#47b6ff", visible: true },
+    ] as unknown as IndicatorConfig[];
+
+    expect(normalizeIndicators(legacyIndicators).map((indicator) => indicator.kind)).not.toContain("RSI");
+    expect(normalizeIndicators(legacyIndicators).map((indicator) => indicator.kind)).not.toContain("MACD");
+  });
 });
 
 describe("magnet workspace compatibility", () => {

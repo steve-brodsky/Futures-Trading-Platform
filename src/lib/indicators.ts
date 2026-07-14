@@ -47,20 +47,6 @@ export function nySessionVwap(bars: Bar[]): SessionVwapValue[] {
   });
 }
 
-export function rsi(values: number[], period = 14): Array<number | null> {
-  let gains = 0;
-  let losses = 0;
-  return values.map((value, index) => {
-    if (index === 0) return null;
-    const change = value - values[index - 1];
-    gains = index <= period ? gains + Math.max(change, 0) : (gains * (period - 1) + Math.max(change, 0)) / period;
-    losses = index <= period ? losses + Math.max(-change, 0) : (losses * (period - 1) + Math.max(-change, 0)) / period;
-    if (index < period) return null;
-    if (index === period) { gains /= period; losses /= period; }
-    return losses === 0 ? 100 : 100 - 100 / (1 + gains / losses);
-  });
-}
-
 export function validateTick(price: number, minMove: number): boolean {
   if (!Number.isFinite(price) || minMove <= 0) return false;
   return Math.abs(price / minMove - Math.round(price / minMove)) < 1e-8;

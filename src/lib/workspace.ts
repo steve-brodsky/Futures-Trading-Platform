@@ -5,9 +5,9 @@ export const defaultIndicators: IndicatorConfig[] = [
   { id: "ema200", kind: "EMA", period: 200, color: "#ef466f", visible: true },
   { id: "vwap", kind: "VWAP", period: 1, color: "#a879ff", visible: true },
   { id: "sma50", kind: "SMA", period: 50, color: "#37d5e8", visible: false },
-  { id: "rsi14", kind: "RSI", period: 14, color: "#ff7ac6", visible: false },
-  { id: "macd", kind: "MACD", period: 12, color: "#47b6ff", visible: false },
 ];
+
+const retiredIndicatorKinds = new Set<string>(["RSI", "MACD"]);
 
 export function normalizeMagnetEnabled(saved: boolean | undefined): boolean {
   return saved ?? false;
@@ -16,11 +16,12 @@ export function normalizeMagnetEnabled(saved: boolean | undefined): boolean {
 export function normalizeIndicators(saved: IndicatorConfig[] | undefined): IndicatorConfig[] {
   if (!saved) return defaultIndicators.map((indicator) => ({ ...indicator }));
 
-  const savedById = new Map(saved.map((indicator) => [indicator.id, indicator]));
+  const supportedSaved = saved.filter((indicator) => !retiredIndicatorKinds.has(indicator.kind));
+  const savedById = new Map(supportedSaved.map((indicator) => [indicator.id, indicator]));
   const known = defaultIndicators.map((indicator) => ({
     ...indicator,
     ...savedById.get(indicator.id),
   }));
   const defaultIds = new Set(defaultIndicators.map((indicator) => indicator.id));
-  return [...known, ...saved.filter((indicator) => !defaultIds.has(indicator.id))];
+  return [...known, ...supportedSaved.filter((indicator) => !defaultIds.has(indicator.id))];
 }

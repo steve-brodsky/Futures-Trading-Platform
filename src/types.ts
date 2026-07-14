@@ -151,7 +151,7 @@ export interface OrderPreview {
 
 export interface IndicatorConfig {
   id: string;
-  kind: "SMA" | "EMA" | "VWAP" | "RSI" | "MACD";
+  kind: "SMA" | "EMA" | "VWAP";
   period: number;
   color: string;
   visible: boolean;
