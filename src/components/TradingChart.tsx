@@ -11,7 +11,7 @@ import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
 import { HorizontalRayPrimitive, nearestChartTime } from "../lib/horizontalRay";
-import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, formatTradeLineMetrics, snapTradeLinePrice, tradeLinePriceChanged, type OrderProjection } from "../lib/tradeLines";
+import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, formatTradeLineMetrics, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, type OrderProjection, type ProjectedExitField } from "../lib/tradeLines";
 import { NySessionVwapPrimitive } from "../lib/nySessionVwapPrimitive";
 
 interface Props {
@@ -33,7 +33,8 @@ interface Props {
   orders: OrderUpdate[];
   positions: Position[];
   orderProjection?: OrderProjection;
-  onOrderProjectionChange: (field: keyof OrderProjection, price: number) => void;
+  onOrderProjectionChange: (field: ProjectedExitField, price: number) => void;
+  onOrderProjectionRestore: (projection: OrderProjection) => void;
   closingPositionIds: Set<string>;
   replacingOrderIds: Set<string>;
   onClosePosition: (position: Position) => void;
@@ -58,7 +59,7 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -88,7 +89,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
   const [candleCountdownTop, setCandleCountdownTop] = useState<number | null>(null);
   const [draggingOrder, setDraggingOrder] = useState<{ id: string; originalPrice: number; price: number } | null>(null);
   const draggingOrderRef = useRef<typeof draggingOrder>(null);
-  const [draggingProjection, setDraggingProjection] = useState<{ field: keyof OrderProjection; lineId: string; originalPrice: number; price: number } | null>(null);
+  const [draggingProjection, setDraggingProjection] = useState<{ field: ProjectedExitField; lineId: string; originalPrice: number; price: number; originalProjection: OrderProjection; edited: boolean } | null>(null);
   const draggingProjectionRef = useRef<typeof draggingProjection>(null);
   const syncTradeLabelsRef = useRef<() => void>(() => undefined);
   const movingDrawingIdRef = useRef<string | null>(null);
@@ -360,7 +361,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       if (currentOrder) tradeLineRefs.current.get(`order:${currentOrder.id}`)?.applyOptions({ price: currentOrder.originalPrice });
       if (currentProjection) {
         tradeLineRefs.current.get(currentProjection.lineId)?.applyOptions({ price: currentProjection.originalPrice });
-        onOrderProjectionChange(currentProjection.field, currentProjection.originalPrice);
+        if (currentProjection.edited) onOrderProjectionRestore(currentProjection.originalProjection);
       }
       requestAnimationFrame(() => syncTradeLabelsRef.current());
       draggingOrderRef.current = null;
@@ -371,7 +372,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     };
     window.addEventListener("keydown", cancel);
     return () => window.removeEventListener("keydown", cancel);
-  }, [draggingOrder?.id, draggingProjection?.lineId, onOrderProjectionChange]);
+  }, [draggingOrder?.id, draggingProjection?.lineId, onOrderProjectionRestore]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -489,11 +490,12 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   };
 
-  const startProjectionDrag = (event: ReactPointerEvent<HTMLDivElement>, field: keyof OrderProjection, lineId: string, price: number) => {
+  const startProjectionDrag = (event: ReactPointerEvent<HTMLDivElement>, field: ProjectedExitField, lineId: string, price: number) => {
+    if (!orderProjection) return;
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    const drag = { field, lineId, originalPrice: price, price };
+    const drag = { field, lineId, originalPrice: price, price, originalProjection: snapshotOrderProjection(orderProjection), edited: false };
     draggingProjectionRef.current = drag;
     setDraggingProjection(drag);
     chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: false, horzTouchDrag: false, vertTouchDrag: false } });
@@ -509,7 +511,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     if (rawPrice == null) return;
     const snapped = snapTradeLinePrice(rawPrice, minMove);
     if (snapped == null || snapped === current.price) return;
-    const next = { ...current, price: snapped };
+    const next = { ...current, price: snapped, edited: true };
     draggingProjectionRef.current = next;
     setDraggingProjection(next);
     tradeLineRefs.current.get(current.lineId)?.applyOptions({ price: snapped });
@@ -523,7 +525,9 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     event.preventDefault();
     event.stopPropagation();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    onOrderProjectionChange(current.field, current.price);
+    const changed = tradeLinePriceChanged(current.originalPrice, current.price, minMove);
+    if (changed) onOrderProjectionChange(current.field, current.price);
+    else if (current.edited) onOrderProjectionRestore(current.originalProjection);
     draggingProjectionRef.current = null;
     setDraggingProjection(null);
     chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
@@ -535,7 +539,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     if (!current) return;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     tradeLineRefs.current.get(current.lineId)?.applyOptions({ price: current.originalPrice });
-    onOrderProjectionChange(current.field, current.originalPrice);
+    if (current.edited) onOrderProjectionRestore(current.originalProjection);
     draggingProjectionRef.current = null;
     setDraggingProjection(null);
     chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
@@ -569,7 +573,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       {tradeLines.map((line) => {
         const top = tradeLineTops[line.id];
         if (top == null) return null;
-        const projectionField: keyof OrderProjection | undefined = line.kind === "projected-take-profit" ? "takeProfit"
+        const projectionField: ProjectedExitField | undefined = line.kind === "projected-take-profit" ? "takeProfit"
           : line.kind === "projected-stop-loss" ? "stopLoss" : undefined;
         const pending = line.order && replacingOrderIds.has(line.order.id);
         const displayPrice = displayPrices.get(line.id) ?? line.price;

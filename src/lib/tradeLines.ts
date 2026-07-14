@@ -1,13 +1,33 @@
 import type { ChartLabelSettings, OrderDraft, OrderUpdate, Position } from "../types";
-import { roundToTick } from "./indicators";
+import { calculateTakeProfitAtR, roundToTick } from "./indicators";
 
 export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "projected-take-profit" | "projected-stop-loss" | "order";
+export const orderRMultiples = [1, 1.5, 2] as const;
+export type OrderRMultiple = typeof orderRMultiples[number];
+export type ProjectedExitField = "takeProfit" | "stopLoss";
 
 export interface OrderProjection {
   takeProfit?: number;
   stopLoss?: number;
   side?: "Buy" | "Sell";
   quantity?: number;
+  rMultiple?: OrderRMultiple;
+}
+
+export function recalculateOrderProjectionAtR(projection: OrderProjection, entryPrice: number, minMove: number): OrderProjection {
+  if (projection.rMultiple == null || projection.stopLoss == null) return projection;
+  const takeProfit = calculateTakeProfitAtR(entryPrice, projection.stopLoss, projection.side ?? "Buy", projection.rMultiple, minMove);
+  if (takeProfit == null || takeProfit === projection.takeProfit) return projection;
+  return { ...projection, takeProfit };
+}
+
+export function applyProjectedExitEdit(projection: OrderProjection, field: ProjectedExitField, price: number, entryPrice: number, minMove: number): OrderProjection {
+  if (field === "takeProfit") return { ...projection, takeProfit: price, rMultiple: undefined };
+  return recalculateOrderProjectionAtR({ ...projection, stopLoss: price }, entryPrice, minMove);
+}
+
+export function snapshotOrderProjection(projection: OrderProjection): OrderProjection {
+  return { ...projection };
 }
 
 export interface TradeLineModel {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrderUpdate, Position } from "../types";
-import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, flattenOrderDraft, formatTradeLineMetrics, isPositionExit, snapTradeLinePrice, tradeLinePriceChanged, withOrderPrice } from "./tradeLines";
+import { applyProjectedExitEdit, buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, flattenOrderDraft, formatTradeLineMetrics, isPositionExit, recalculateOrderProjectionAtR, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, withOrderPrice, type OrderProjection } from "./tradeLines";
 
 const position: Position = { id: "p1", symbol: "MES", side: "Long", quantity: 2, averagePrice: 6250, last: 6251, unrealizedPnl: 10 };
 const baseOrder: OrderUpdate = { id: "o1", symbol: "MES", side: "Sell", type: "Limit", quantity: 2, price: 6260, status: "Working", timestamp: "", openOrClose: "Close", groupName: "OCO 1" };
@@ -70,6 +70,45 @@ describe("chart trade lines", () => {
     expect(snapTradeLinePrice(-1, .25)).toBeNull();
     expect(tradeLinePriceChanged(6250.25, 6250.25, .25)).toBe(false);
     expect(tradeLinePriceChanged(6250.25, 6250.5, .25)).toBe(true);
+  });
+
+  it.each([
+    ["Buy", 96, 108],
+    ["Sell", 104, 92],
+  ] as const)("keeps 2R coupled during rapid %s stop edits", (side, firstStop, expectedFirstTarget) => {
+    const initial: OrderProjection = { takeProfit: side === "Buy" ? 104 : 96, stopLoss: side === "Buy" ? 98 : 102, side, quantity: 1, rMultiple: 2 };
+    const first = applyProjectedExitEdit(initial, "stopLoss", firstStop, 100, .25);
+    const secondStop = side === "Buy" ? 95 : 105;
+    const second = applyProjectedExitEdit(first, "stopLoss", secondStop, 100, .25);
+
+    expect(first).toMatchObject({ stopLoss: firstStop, takeProfit: expectedFirstTarget, rMultiple: 2 });
+    expect(second).toMatchObject({ stopLoss: secondStop, takeProfit: side === "Buy" ? 110 : 90, rMultiple: 2 });
+  });
+
+  it("clears R for a manual take-profit edit without changing the stop", () => {
+    expect(applyProjectedExitEdit({ takeProfit: 108, stopLoss: 96, side: "Buy", rMultiple: 2 }, "takeProfit", 109, 100, .25)).toEqual({
+      takeProfit: 109,
+      stopLoss: 96,
+      side: "Buy",
+      rMultiple: undefined,
+    });
+  });
+
+  it("keeps dormant R and the prior target while a stop is on the wrong side", () => {
+    expect(applyProjectedExitEdit({ takeProfit: 108, stopLoss: 96, side: "Buy", rMultiple: 2 }, "stopLoss", 101, 100, .25)).toEqual({
+      takeProfit: 108,
+      stopLoss: 101,
+      side: "Buy",
+      rMultiple: 2,
+    });
+  });
+
+  it("recalculates R targets on quote changes and snapshots cancellation state", () => {
+    const projection: OrderProjection = { takeProfit: 108, stopLoss: 96, side: "Buy", quantity: 2, rMultiple: 2 };
+    expect(recalculateOrderProjectionAtR(projection, 101, .25)).toMatchObject({ takeProfit: 111, stopLoss: 96, rMultiple: 2 });
+    const snapshot = snapshotOrderProjection(projection);
+    projection.takeProfit = 110;
+    expect(snapshot).toEqual({ takeProfit: 108, stopLoss: 96, side: "Buy", quantity: 2, rMultiple: 2 });
   });
 
   it("can apply and roll back either protective price field", () => {
