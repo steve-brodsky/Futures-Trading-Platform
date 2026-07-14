@@ -200,7 +200,7 @@ The main window owns shared streams and persisted workspace state. Detached wind
 ### 3. Reliability, usability, and maintainability
 
 - Add a diagnostics panel for stream health, quote age, API latency, reconnect attempts, cache coverage, and last successful brokerage refresh.
-- Wire the currently inert fullscreen control and add a command palette plus configurable keyboard shortcuts.
+- Add a command palette plus configurable keyboard shortcuts.
 - Improve accessibility with focus trapping, complete keyboard operation, reduced-motion support, and automated accessibility checks.
 - Add Playwright/Tauri end-to-end coverage using a deterministic mock TradeStation service.
 - Break the large `App.tsx`, `TradingChart.tsx`, and native TradeStation client into feature-focused modules and state hooks.

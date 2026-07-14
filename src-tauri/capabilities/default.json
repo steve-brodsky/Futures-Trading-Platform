@@ -11,6 +11,7 @@
     "core:window:allow-cursor-position",
     "core:window:allow-available-monitors",
     "core:window:allow-start-dragging",
+    "core:window:allow-set-fullscreen",
     "core:webview:allow-create-webview-window",
     "core:event:allow-emit",
     "core:event:allow-listen"

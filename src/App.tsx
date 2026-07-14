@@ -4,7 +4,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, Download,
-  LineChart, ListChecks, LockKeyhole, Maximize2, Minus,
+  LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
   Magnet, MousePointer2, PanelBottom, PanelRight, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
   Wifi, X, Zap,
@@ -150,6 +150,7 @@ export default function App() {
   const [envConfirm, setEnvConfirm] = useState<TradingEnvironment | null>(null);
   const [activeTool, setActiveTool] = useState("cursor");
   const [horizontalToolsOpen, setHorizontalToolsOpen] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [clientId, setClientId] = useState("");
   const [secret, setSecret] = useState("");
   const [credentialsConfigured, setCredentialsConfigured] = useState(false);
@@ -997,6 +998,33 @@ export default function App() {
   }, [workspaceLoaded, workspace.windows]);
 
   useEffect(() => {
+    if (!api.isNative) {
+      const syncFullscreenState = () => setIsFullscreen(document.fullscreenElement != null);
+      syncFullscreenState();
+      document.addEventListener("fullscreenchange", syncFullscreenState);
+      return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
+    }
+
+    const current = getCurrentWindow();
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    const syncFullscreenState = () => {
+      current.isFullscreen().then((fullscreen) => {
+        if (active) setIsFullscreen(fullscreen);
+      }).catch(() => undefined);
+    };
+    syncFullscreenState();
+    current.onResized(syncFullscreenState).then((cleanup) => {
+      if (active) unlisten = cleanup;
+      else cleanup();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
     const liveWindowIds = new Set(workspace.windows.map((item) => item.id));
     stripBoundsRef.current.forEach((_, id) => { if (!liveWindowIds.has(id)) stripBoundsRef.current.delete(id); });
   }, [workspace.windows]);
@@ -1060,6 +1088,23 @@ export default function App() {
       setAccounts(await api.accounts().catch(() => []));
       showToast(`Switched to ${envConfirm.toUpperCase()}`);
     } finally { setBusy(false); }
+  }
+
+  async function toggleFullscreen() {
+    try {
+      if (api.isNative) {
+        const current = getCurrentWindow();
+        const fullscreen = !(await current.isFullscreen());
+        await current.setFullscreen(fullscreen);
+        setIsFullscreen(fullscreen);
+      } else if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch (error) {
+      showToast(`Could not change fullscreen mode: ${String(error)}`);
+    }
   }
 
   async function saveTradeStationCredentials() {
@@ -1283,7 +1328,7 @@ export default function App() {
       <div className="divider" />
       <span className="toolbar-spacer" />
       {!isDetached && <><IconButton label="Toggle bottom panel" active={workspace.bottomPanelOpen} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}><PanelBottom size={17} /></IconButton><IconButton label="Toggle right panel" active={workspace.rightPanelOpen} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}><PanelRight size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
-      <IconButton label="Fullscreen"><Maximize2 size={17} /></IconButton>
+      <IconButton label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} active={isFullscreen} onClick={toggleFullscreen}>{isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</IconButton>
     </nav>
 
     <section className={`workspace ${hasWindowTabs ? "" : "empty-chart-workspace"} ${!isDetached && workspace.rightPanelOpen ? "with-right" : ""} ${!isDetached && workspace.bottomPanelOpen ? "with-bottom" : ""}`} style={{ "--bottom-height": `${workspace.bottomPanelHeight ?? 360}px` } as React.CSSProperties}>
