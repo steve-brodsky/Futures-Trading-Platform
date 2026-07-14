@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrderUpdate, Position } from "../types";
-import { buildProjectedTradeLines, buildTradeLines, flattenOrderDraft, isPositionExit, snapTradeLinePrice, tradeLinePriceChanged, withOrderPrice } from "./tradeLines";
+import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, flattenOrderDraft, formatTradeLineMetrics, isPositionExit, snapTradeLinePrice, tradeLinePriceChanged, withOrderPrice } from "./tradeLines";
 
 const position: Position = { id: "p1", symbol: "MES", side: "Long", quantity: 2, averagePrice: 6250, last: 6251, unrealizedPnl: 10 };
 const baseOrder: OrderUpdate = { id: "o1", symbol: "MES", side: "Sell", type: "Limit", quantity: 2, price: 6260, status: "Working", timestamp: "", openOrClose: "Close", groupName: "OCO 1" };
@@ -78,5 +78,61 @@ describe("chart trade lines", () => {
     expect(withOrderPrice(optimistic, baseOrder.price).price).toBe(6260);
     const stop = { ...baseOrder, type: "StopMarket" as const, price: undefined, stopPrice: 6240 };
     expect(withOrderPrice(stop, 6239.75)).toMatchObject({ stopPrice: 6239.75, price: undefined });
+  });
+
+  it("calculates full-position dollar and R values for long and short trades", () => {
+    const longPosition = { ...position, averagePrice: 100, unrealizedPnl: 60 };
+    const longLines = buildTradeLines("MES", [longPosition], [
+      { ...baseOrder, price: 110 },
+      { ...baseOrder, id: "o2", type: "StopMarket", price: undefined, stopPrice: 95 },
+    ]);
+    const longMetrics = buildTradeLineMetrics(longLines, 5);
+    expect(longMetrics.get("position:p1")).toEqual({ dollarAmount: 60, rMultiple: 1.2 });
+    expect(longMetrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: 2 });
+    expect(longMetrics.get("order:o2")).toEqual({ dollarAmount: -50, rMultiple: -1 });
+
+    const shortPosition = { ...longPosition, side: "Short" as const };
+    const shortLines = buildTradeLines("MES", [shortPosition], [
+      { ...baseOrder, side: "Buy", price: 90 },
+      { ...baseOrder, id: "o2", side: "Buy", type: "StopMarket", price: undefined, stopPrice: 105 },
+    ]);
+    const shortMetrics = buildTradeLineMetrics(shortLines, 5);
+    expect(shortMetrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: 2 });
+    expect(shortMetrics.get("order:o2")).toEqual({ dollarAmount: -50, rMultiple: -1 });
+  });
+
+  it("uses the nearest valid stop as the risk baseline", () => {
+    const tradePosition = { ...position, averagePrice: 100 };
+    const lines = buildTradeLines("MES", [tradePosition], [
+      { ...baseOrder, id: "near", type: "StopMarket", price: undefined, stopPrice: 95 },
+      { ...baseOrder, id: "far", type: "StopMarket", price: undefined, stopPrice: 90 },
+    ]);
+    const metrics = buildTradeLineMetrics(lines, 5);
+    expect(metrics.get("order:near")?.rMultiple).toBe(-1);
+    expect(metrics.get("order:far")?.rMultiple).toBe(-2);
+  });
+
+  it("keeps dollars without an R baseline and ignores projected lines", () => {
+    const tradePosition = { ...position, averagePrice: 100, unrealizedPnl: 25 };
+    const lines = [
+      ...buildTradeLines("MES", [tradePosition], [{ ...baseOrder, price: 110 }]),
+      ...buildProjectedTradeLines({ takeProfit: 112, stopLoss: 94 }),
+    ];
+    const metrics = buildTradeLineMetrics(lines, 5);
+    expect(metrics.get("position:p1")).toEqual({ dollarAmount: 25, rMultiple: null });
+    expect(metrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: null });
+    expect(metrics.has("projection:take-profit")).toBe(false);
+    expect(metrics.has("projection:stop-loss")).toBe(false);
+  });
+
+  it("formats every visibility mode and missing risk without negative zero", () => {
+    const profit = { dollarAmount: 100, rMultiple: 2 };
+    expect(formatTradeLineMetrics(profit, { showDollarAmount: true, showRMultiple: true })).toBe("+$100.00 · +2R");
+    expect(formatTradeLineMetrics(profit, { showDollarAmount: true, showRMultiple: false })).toBe("+$100.00");
+    expect(formatTradeLineMetrics(profit, { showDollarAmount: false, showRMultiple: true })).toBe("+2R");
+    expect(formatTradeLineMetrics(profit, { showDollarAmount: false, showRMultiple: false })).toBeNull();
+    expect(formatTradeLineMetrics({ dollarAmount: 60, rMultiple: 1.24 }, { showDollarAmount: true, showRMultiple: true })).toBe("+$60.00 · +1.2R");
+    expect(formatTradeLineMetrics({ dollarAmount: -0.001, rMultiple: -0.01 }, { showDollarAmount: true, showRMultiple: true })).toBe("$0.00 · 0R");
+    expect(formatTradeLineMetrics({ dollarAmount: -50, rMultiple: null }, { showDollarAmount: true, showRMultiple: true })).toBe("-$50.00 · —");
   });
 });

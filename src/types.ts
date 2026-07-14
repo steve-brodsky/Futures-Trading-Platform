@@ -234,6 +234,15 @@ export interface ChartWindowState {
   height?: number;
 }
 
+export interface ChartLabelSettings {
+  showDollarAmount: boolean;
+  showRMultiple: boolean;
+}
+
+export interface WorkspaceSettings {
+  chartLabels: ChartLabelSettings;
+}
+
 export interface WorkspaceState {
   revision: number;
   tabs: ChartTabState[];
@@ -248,6 +257,7 @@ export interface WorkspaceState {
   selectedAccountId?: string;
   confirmOrders: boolean;
   entryRules: EntryRules;
+  settings: WorkspaceSettings;
 }
 
 export interface BarSnapshotEvent {

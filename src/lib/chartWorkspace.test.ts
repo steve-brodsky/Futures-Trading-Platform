@@ -10,6 +10,7 @@ const fallback: WorkspaceState = {
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: [], rightTab: "order", rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
+  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true } },
 };
 
 describe("chart workspace", () => {
@@ -24,6 +25,7 @@ describe("chart workspace", () => {
     expect(result.windows).toBe(current.windows);
     expect(result.drawings).toBe(current.drawings);
     expect(result.entryRules).toBe(current.entryRules);
+    expect(result.settings).toBe(current.settings);
   });
 
   it("only replaces the tab whose chart configuration changed", () => {
@@ -50,6 +52,29 @@ describe("chart workspace", () => {
     expect(result.tabs).toHaveLength(1);
     expect(result.tabs[0].timeframe).toBe("15m");
     expect(result.windows[0].tabIds).toEqual([result.tabs[0].id]);
+  });
+
+  it("defaults legacy chart-label settings and preserves explicit preferences", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, settings: undefined }, fallback);
+    expect(legacy.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: true });
+
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      settings: { chartLabels: { showDollarAmount: false, showRMultiple: true } },
+    }, fallback);
+    expect(saved.settings.chartLabels).toEqual({ showDollarAmount: false, showRMultiple: true });
+  });
+
+  it("accepts changed global settings from a workspace broadcast", () => {
+    const current = normalizeChartWorkspace(fallback, fallback);
+    const broadcast = normalizeChartWorkspace({
+      ...current,
+      revision: 2,
+      settings: { chartLabels: { showDollarAmount: true, showRMultiple: false } },
+    }, fallback);
+    const result = stabilizeChartWorkspace(current, broadcast);
+    expect(result.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: false });
+    expect(result.settings).not.toBe(current.settings);
   });
 
   it("limits tabs, repairs assignments, and selects a valid active tab", () => {

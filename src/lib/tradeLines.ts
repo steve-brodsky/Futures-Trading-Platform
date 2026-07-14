@@ -1,4 +1,4 @@
-import type { OrderDraft, OrderUpdate, Position } from "../types";
+import type { ChartLabelSettings, OrderDraft, OrderUpdate, Position } from "../types";
 import { roundToTick } from "./indicators";
 
 export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "projected-take-profit" | "projected-stop-loss" | "order";
@@ -19,6 +19,16 @@ export interface TradeLineModel {
   order?: OrderUpdate;
   position?: Position;
 }
+
+export interface TradeLineMetrics {
+  dollarAmount: number;
+  rMultiple: number | null;
+}
+
+const dollarFormatter = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 
 export function isBracketExit(order: OrderUpdate): boolean {
   const groupName = order.groupName?.toUpperCase() ?? "";
@@ -88,6 +98,57 @@ export function buildProjectedTradeLines(projection?: OrderProjection): TradeLin
     lines.push({ id: "projection:stop-loss", kind: "projected-stop-loss", price: projection.stopLoss, color: "#ef466f", side: "", quantity: 0, draggable: true });
   }
   return lines;
+}
+
+export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: number): Map<string, TradeLineMetrics> {
+  const metrics = new Map<string, TradeLineMetrics>();
+  if (!Number.isFinite(pointValue) || pointValue <= 0) return metrics;
+
+  const positionLines = lines.filter((line) => line.kind === "position" && line.position);
+  positionLines.forEach((positionLine) => {
+    const position = positionLine.position!;
+    const quantity = Math.abs(position.quantity);
+    if (!Number.isFinite(quantity) || quantity <= 0) return;
+    const direction = position.side === "Long" ? 1 : -1;
+    const stopLines = lines.filter((line) => line.kind === "stop-loss" && line.order?.symbol === position.symbol
+      && direction * (line.price - position.averagePrice) < 0);
+    const nearestStop = stopLines.reduce<TradeLineModel | undefined>((nearest, line) => (
+      !nearest || Math.abs(line.price - position.averagePrice) < Math.abs(nearest.price - position.averagePrice) ? line : nearest
+    ), undefined);
+    const riskAmount = nearestStop
+      ? Math.abs(nearestStop.price - position.averagePrice) * pointValue * quantity
+      : null;
+    const withRisk = (dollarAmount: number): TradeLineMetrics => ({
+      dollarAmount,
+      rMultiple: riskAmount != null && riskAmount > 0 ? dollarAmount / riskAmount : null,
+    });
+
+    if (Number.isFinite(position.unrealizedPnl)) metrics.set(positionLine.id, withRisk(position.unrealizedPnl));
+    lines.forEach((line) => {
+      if ((line.kind !== "take-profit" && line.kind !== "stop-loss") || line.order?.symbol !== position.symbol) return;
+      const dollarAmount = direction * (line.price - position.averagePrice) * pointValue * quantity;
+      metrics.set(line.id, withRisk(dollarAmount));
+    });
+  });
+  return metrics;
+}
+
+export function formatTradeLineMetrics(metrics: TradeLineMetrics, settings: ChartLabelSettings): string | null {
+  const parts: string[] = [];
+  if (settings.showDollarAmount) {
+    const amount = Math.abs(metrics.dollarAmount) < .005 ? 0 : metrics.dollarAmount;
+    const sign = amount > 0 ? "+" : amount < 0 ? "-" : "";
+    parts.push(`${sign}$${dollarFormatter.format(Math.abs(amount))}`);
+  }
+  if (settings.showRMultiple) {
+    if (metrics.rMultiple == null || !Number.isFinite(metrics.rMultiple)) parts.push("—");
+    else {
+      const rounded = Math.abs(metrics.rMultiple) < .05 ? 0 : Math.round(metrics.rMultiple * 10) / 10;
+      const sign = rounded > 0 ? "+" : rounded < 0 ? "-" : "";
+      parts.push(`${sign}${Math.abs(rounded).toFixed(Number.isInteger(rounded) ? 0 : 1)}R`);
+    }
+  }
+  return parts.length ? parts.join(" · ") : null;
 }
 
 export function flattenOrderDraft(accountId: string, position: Position): OrderDraft {

@@ -102,6 +102,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     }).map((item) => ({ ...item, locked: item.locked === true, lineWidth: [1, 2, 3, 4].includes(item.lineWidth ?? 1) ? item.lineWidth ?? 1 : 1, points: item.points.map((point) => ({ ...point })) }));
     return valid.length ? [[symbol, valid]] : [];
   }));
+  const savedChartLabels = value.settings?.chartLabels;
   return {
     revision: typeof value.revision === "number" ? value.revision : 0,
     tabs,
@@ -116,6 +117,16 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     selectedAccountId: value.selectedAccountId ?? fallback.selectedAccountId,
     confirmOrders: value.confirmOrders ?? true,
     entryRules: normalizeEntryRules(value.entryRules),
+    settings: {
+      chartLabels: {
+        showDollarAmount: typeof savedChartLabels?.showDollarAmount === "boolean"
+          ? savedChartLabels.showDollarAmount
+          : fallback.settings.chartLabels.showDollarAmount,
+        showRMultiple: typeof savedChartLabels?.showRMultiple === "boolean"
+          ? savedChartLabels.showRMultiple
+          : fallback.settings.chartLabels.showRMultiple,
+      },
+    },
   };
 }
 
@@ -186,6 +197,10 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && sameEntryRuleNode(current.entryRules.short, incoming.entryRules.short)
     ? current.entryRules
     : incoming.entryRules;
+  const settings = current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
+    && current.settings.chartLabels.showRMultiple === incoming.settings.chartLabels.showRMultiple
+    ? current.settings
+    : incoming.settings;
 
   return {
     ...incoming,
@@ -197,6 +212,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
       ? current.drawings
       : drawings,
     entryRules,
+    settings,
   };
 }
 

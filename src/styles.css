@@ -107,6 +107,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .trade-line-label { position: absolute; z-index: 7; right: 74px; height: 21px; display: flex; align-items: center; transform: translateY(-50%); border: 1px solid currentColor; border-radius: 3px 0 0 3px; color: #f0b84b; background: rgba(28,24,16,.96); box-shadow: 0 2px 8px rgba(0,0,0,.34); font: 600 8px DM Mono, monospace; user-select: none; touch-action: none; }
 .trade-line-label > span { padding: 0 6px; letter-spacing: .05em; }
 .trade-line-label > strong { align-self: stretch; display: flex; align-items: center; padding: 0 6px; border-left: 1px solid currentColor; color: #eef3f8; font-weight: 600; background: rgba(5,8,12,.28); }
+.trade-line-label > em { align-self: stretch; display: flex; align-items: center; padding: 0 6px; border-left: 1px solid currentColor; color: #eef3f8; background: rgba(5,8,12,.18); font-style: normal; font-weight: 600; white-space: nowrap; }
 .trade-line-label.position.long { color: var(--green); background: rgba(8,34,28,.96); }
 .trade-line-label.position.short { color: var(--red); background: rgba(42,12,20,.96); }
 .trade-line-label.take-profit { color: var(--green); background: rgba(8,34,28,.96); }
@@ -347,6 +348,14 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .demo-warning code, .callback-note code { font-family: DM Mono, monospace; color: #d7dee8; }
 .callback-note { display: flex; justify-content: space-between; margin-top: -4px; margin-bottom: 16px; padding: 9px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
 .modal .primary-button { margin-bottom: 17px; width: calc(100% - 34px); }
+.settings-content { margin-top: 2px; margin-bottom: 17px; }
+.settings-section > header { padding: 16px 0 13px; border-bottom: 1px solid var(--line); }
+.settings-section > header span { color: var(--cyan); font: 600 8px DM Mono, monospace; letter-spacing: .1em; text-transform: uppercase; }
+.settings-section > header h3 { margin: 5px 0 0; color: #e4e9ef; font-size: 11px; font-weight: 600; }
+.settings-section > header p { margin: 5px 0 0; max-width: 370px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.settings-row { min-height: 57px; height: auto; border-bottom: 1px solid var(--line-soft); }
+.settings-row:last-child { border-bottom: 0; }
+.settings-row input { flex: 0 0 auto; cursor: pointer; }
 .entry-rules-builder { margin-top: 0; margin-bottom: 17px; }
 .entry-rules-intro { margin: 0; padding: 13px 0; border-bottom: 1px solid var(--line); color: #8793a3; font-size: 9px; line-height: 1.55; }
 .entry-rule-side { padding: 15px 0 17px; border-bottom: 1px solid var(--line); }
