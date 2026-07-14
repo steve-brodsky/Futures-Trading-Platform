@@ -5,15 +5,17 @@ import {
   type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type Time,
 } from "lightweight-charts";
 import type { Bar, ChartKind, ChartTimezone, Drawing, IndicatorConfig, OrderUpdate, Position, Timeframe } from "../types";
-import { ema, roundToTick, sma, vwap } from "../lib/indicators";
+import { ema, roundToTick, sma } from "../lib/indicators";
 import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
 import { HorizontalRayPrimitive, nearestChartTime } from "../lib/horizontalRay";
 import { buildProjectedTradeLines, buildTradeLines, snapTradeLinePrice, tradeLinePriceChanged, type OrderProjection } from "../lib/tradeLines";
+import { NySessionVwapPrimitive } from "../lib/nySessionVwapPrimitive";
 
 interface Props {
   bars: Bar[];
+  vwapBars: Bar[];
   kind: ChartKind;
   magnetEnabled: boolean;
   symbol: string;
@@ -52,7 +54,7 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -62,6 +64,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
   const drawingLineRefs = useRef<IPriceLine[]>([]);
   const rayPrimitiveRef = useRef<HorizontalRayPrimitive | null>(null);
   const sessionShadingRef = useRef<SessionShading | null>(null);
+  const vwapPrimitiveRef = useRef<NySessionVwapPrimitive | null>(null);
   const previousBars = useRef<Bar[]>([]);
   const barsRef = useRef(bars);
   const magnetEnabledRef = useRef(magnetEnabled);
@@ -159,6 +162,9 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
       const sessionShading = new SessionShading();
       priceSeries.attachPrimitive(sessionShading);
       sessionShadingRef.current = sessionShading;
+      const vwapPrimitive = new NySessionVwapPrimitive();
+      priceSeries.attachPrimitive(vwapPrimitive);
+      vwapPrimitiveRef.current = vwapPrimitive;
     }
 
     const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume", lastValueVisible: false, priceLineVisible: false });
@@ -250,7 +256,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
       resizeObserver.disconnect();
       host.current?.removeEventListener("wheel", syncLabels);
       host.current?.removeEventListener("pointermove", syncLabels);
-      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null;
+      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone]);
 
@@ -259,7 +265,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
     if (!chart) return;
 
     const priceFormat = { type: "price" as const, precision: pricePrecision(minMove), minMove };
-    const visible = indicators.filter((item) => item.visible && ["SMA", "EMA", "VWAP"].includes(item.kind));
+    const visible = indicators.filter((item) => item.visible && ["SMA", "EMA"].includes(item.kind));
     const visibleIds = new Set(visible.map((config) => config.id));
     const existing = new Map(indicatorRefs.current.map((item) => [item.config.id, item]));
 
@@ -279,11 +285,16 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
         priceFormat,
       });
       series.applyOptions({ color: config.color });
-      const values = config.kind === "SMA" ? sma(closes, config.period) : config.kind === "EMA" ? ema(closes, config.period) : vwap(barsRef.current);
+      const values = config.kind === "SMA" ? sma(closes, config.period) : ema(closes, config.period);
       series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(barsRef.current[index].time), value }]));
       return { config, series };
     });
   }, [indicators, chartGeneration, minMove]);
+
+  useEffect(() => {
+    const vwap = indicators.find((indicator) => indicator.kind === "VWAP" && indicator.visible);
+    vwapPrimitiveRef.current?.setData(vwap ? vwapBars : [], bars.map((bar) => bar.time), vwap?.color ?? "#a879ff", timeframe);
+  }, [bars, vwapBars, indicators, chartGeneration]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -366,7 +377,7 @@ export function TradingChart({ bars, kind, magnetEnabled, symbol, tradeSymbol, d
 
     const closes = bars.map((bar) => bar.close);
     indicatorRefs.current.forEach(({ config, series }) => {
-      const values = config.kind === "SMA" ? sma(closes, config.period) : config.kind === "EMA" ? ema(closes, config.period) : vwap(bars);
+      const values = config.kind === "SMA" ? sma(closes, config.period) : ema(closes, config.period);
       series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(bars[index].time), value }]));
     });
     if (firstData.current) {

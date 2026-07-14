@@ -12,7 +12,10 @@ describe("US regular market hours", () => {
   });
 
   it("accounts for Eastern daylight saving time and weekends", () => {
+    expect(isUsRegularMarketHours(epoch("2026-01-12T14:29:00Z"))).toBe(false);
     expect(isUsRegularMarketHours(epoch("2026-01-12T14:30:00Z"))).toBe(true);
+    expect(isUsRegularMarketHours(epoch("2026-01-12T20:59:00Z"))).toBe(true);
+    expect(isUsRegularMarketHours(epoch("2026-01-12T21:00:00Z"))).toBe(false);
     expect(isUsRegularMarketHours(epoch("2026-07-11T15:00:00Z"))).toBe(false);
   });
 });

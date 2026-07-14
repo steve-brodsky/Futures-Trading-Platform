@@ -1,21 +1,9 @@
 import type {
   IChartApi, IPrimitivePaneRenderer, IPrimitivePaneView, ISeriesPrimitive, SeriesAttachedParameter, Time,
 } from "lightweight-charts";
+import { isNyRegularMarketHours } from "./nySession";
 
-const easternClock = new Intl.DateTimeFormat("en-US", {
-  timeZone: "America/New_York",
-  weekday: "short",
-  hour: "2-digit",
-  minute: "2-digit",
-  hourCycle: "h23",
-});
-
-export function isUsRegularMarketHours(epochSeconds: number) {
-  const parts = Object.fromEntries(easternClock.formatToParts(new Date(epochSeconds * 1000)).map((part) => [part.type, part.value]));
-  if (parts.weekday === "Sat" || parts.weekday === "Sun") return false;
-  const minutes = Number(parts.hour) * 60 + Number(parts.minute);
-  return minutes >= 9 * 60 + 30 && minutes < 16 * 60;
-}
+export const isUsRegularMarketHours = isNyRegularMarketHours;
 
 export class SessionShading implements ISeriesPrimitive<Time> {
   private chart: IChartApi | null = null;

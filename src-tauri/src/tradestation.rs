@@ -383,6 +383,28 @@ impl TradeStation {
         Ok(bars)
     }
 
+    pub async fn bars_range(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        first: i64,
+        last: i64,
+    ) -> Result<Vec<Bar>, AppError> {
+        let path = bar_range_path(symbol, timeframe, first, last)?;
+        let body = self.send(Method::GET, &path, None).await?;
+        let mut bars: Vec<_> = body
+            .get("Bars")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| bar_from_value(item, timeframe))
+            .filter(|bar| bar.time >= first && bar.time < last)
+            .collect();
+        bars.sort_by_key(|bar| bar.time);
+        bars.dedup_by_key(|bar| bar.time);
+        Ok(bars)
+    }
+
     pub fn bar_stream_path(symbol: &str, timeframe: &str) -> Result<String, AppError> {
         let (interval, unit, bars_back) = history_spec(timeframe)?;
         Ok(format!("/marketdata/stream/barcharts/{symbol}?interval={interval}&unit={unit}&barsback={bars_back}"))
@@ -1153,6 +1175,33 @@ pub fn history_spec(timeframe: &str) -> Result<(usize, &'static str, usize), App
     }
 }
 
+fn bar_range_path(
+    symbol: &str,
+    timeframe: &str,
+    first: i64,
+    last: i64,
+) -> Result<String, AppError> {
+    if first >= last {
+        return Err(AppError::Validation("Invalid bar range".into()));
+    }
+    let (interval, unit, _) = history_spec(timeframe)?;
+    if unit == "Minute" && last.saturating_sub(first) > 31 * 24 * 60 * 60 {
+        return Err(AppError::Validation(
+            "Minute bar ranges cannot exceed 31 days".into(),
+        ));
+    }
+    let first_date = DateTime::<Utc>::from_timestamp(first, 0)
+        .ok_or_else(|| AppError::Validation("Invalid first bar timestamp".into()))?
+        .to_rfc3339();
+    let last_date = DateTime::<Utc>::from_timestamp(last, 0)
+        .ok_or_else(|| AppError::Validation("Invalid last bar timestamp".into()))?
+        .to_rfc3339();
+    let encoded_first: String =
+        url::form_urlencoded::byte_serialize(first_date.as_bytes()).collect();
+    let encoded_last: String = url::form_urlencoded::byte_serialize(last_date.as_bytes()).collect();
+    Ok(format!("/marketdata/barcharts/{symbol}?interval={interval}&unit={unit}&firstdate={encoded_first}&lastdate={encoded_last}"))
+}
+
 pub fn bar_from_value(item: &Value, timeframe: &str) -> Option<Bar> {
     let closing_time = item
         .get("Epoch")
@@ -1671,6 +1720,16 @@ mod tests {
             "TotalVolume": "10"
         });
         assert_eq!(bar_from_value(&value, "D").unwrap().time, 86_400);
+    }
+
+    #[test]
+    fn minute_bar_range_path_uses_dates_and_enforces_safe_chunks() {
+        let path = bar_range_path("@MES", "1m", 0, 30 * 86_400).unwrap();
+        assert!(path.contains("interval=1&unit=Minute"));
+        assert!(path.contains("firstdate=1970-01-01T00%3A00%3A00%2B00%3A00"));
+        assert!(path.contains("lastdate=1970-01-31T00%3A00%3A00%2B00%3A00"));
+        assert!(bar_range_path("@MES", "1m", 20, 10).is_err());
+        assert!(bar_range_path("@MES", "1m", 0, 32 * 86_400).is_err());
     }
 
     fn full_quote(symbol: &str, bid: f64, ask: f64) -> Value {

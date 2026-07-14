@@ -223,6 +223,58 @@ async fn get_older_bars(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+async fn load_cached_bar_range(
+    symbol: String,
+    timeframe: String,
+    first: i64,
+    last: i64,
+    state: State<'_, NativeState>,
+) -> Result<Vec<Bar>, AppError> {
+    if timeframe != "1m" || first >= last {
+        return Err(AppError::Validation(
+            "VWAP bar ranges require a valid one-minute interval".into(),
+        ));
+    }
+    let environment = state.api.environment().await;
+    storage::load_bars_range(
+        &state.db_path,
+        environment.key(),
+        &symbol,
+        &timeframe,
+        first,
+        last,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_bar_range(
+    symbol: String,
+    timeframe: String,
+    first: i64,
+    last: i64,
+    state: State<'_, NativeState>,
+) -> Result<Vec<Bar>, AppError> {
+    if timeframe != "1m" || first >= last {
+        return Err(AppError::Validation(
+            "VWAP bar ranges require a valid one-minute interval".into(),
+        ));
+    }
+    let environment = state.api.environment().await;
+    let bars = state
+        .api
+        .bars_range(&symbol, &timeframe, first, last)
+        .await?;
+    storage::save_bars(
+        &state.db_path,
+        environment.key(),
+        &symbol,
+        &timeframe,
+        &bars,
+    )?;
+    Ok(bars)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 async fn start_bar_stream(
     app: tauri::AppHandle,
     subscription_id: String,
@@ -847,7 +899,9 @@ pub fn run() {
             get_bars,
             get_quotes,
             load_cached_bars,
+            load_cached_bar_range,
             get_older_bars,
+            get_bar_range,
             start_bar_stream,
             stop_bar_stream,
             start_quote_stream,

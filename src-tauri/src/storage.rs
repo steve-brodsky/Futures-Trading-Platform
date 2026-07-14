@@ -185,6 +185,33 @@ pub fn load_bars(
     Ok(bars)
 }
 
+pub fn load_bars_range(
+    path: &Path,
+    environment: &str,
+    symbol: &str,
+    timeframe: &str,
+    first: i64,
+    last: i64,
+) -> Result<Vec<crate::models::Bar>, AppError> {
+    let db = connection(path)?;
+    let mut statement = db.prepare("SELECT time,open,high,low,close,volume,realtime FROM bars WHERE environment=?1 AND symbol=?2 AND timeframe=?3 AND time>=?4 AND time<?5 ORDER BY time ASC")?;
+    let rows = statement.query_map(
+        params![environment, symbol, timeframe, first, last],
+        |row| {
+            Ok(crate::models::Bar {
+                time: row.get(0)?,
+                open: row.get(1)?,
+                high: row.get(2)?,
+                low: row.get(3)?,
+                close: row.get(4)?,
+                volume: row.get(5)?,
+                realtime: row.get::<_, i32>(6)? != 0,
+            })
+        },
+    )?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 pub fn load_workspace(path: &Path) -> Result<Option<serde_json::Value>, AppError> {
     let db = connection(path)?;
     let mut query = db.prepare("SELECT value FROM settings WHERE key='workspace'")?;
@@ -193,5 +220,59 @@ pub fn load_workspace(path: &Path) -> Result<Option<serde_json::Value>, AppError
         Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Bar;
+
+    #[test]
+    fn cached_bar_ranges_are_ordered_and_scoped() {
+        let path = std::env::temp_dir().join(format!(
+            "northstar-vwap-range-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let bars = vec![
+            Bar {
+                time: 300,
+                open: 3.0,
+                high: 3.0,
+                low: 3.0,
+                close: 3.0,
+                volume: 3.0,
+                realtime: false,
+            },
+            Bar {
+                time: 100,
+                open: 1.0,
+                high: 1.0,
+                low: 1.0,
+                close: 1.0,
+                volume: 1.0,
+                realtime: false,
+            },
+            Bar {
+                time: 200,
+                open: 2.0,
+                high: 2.0,
+                low: 2.0,
+                close: 2.0,
+                volume: 2.0,
+                realtime: false,
+            },
+        ];
+        save_bars(&path, "sim", "@MES", "1m", &bars).unwrap();
+        save_bars(&path, "live", "@MES", "1m", &bars).unwrap();
+        let loaded = load_bars_range(&path, "sim", "@MES", "1m", 150, 301).unwrap();
+        assert_eq!(
+            loaded.iter().map(|bar| bar.time).collect::<Vec<_>>(),
+            vec![200, 300]
+        );
+        assert!(load_bars_range(&path, "sim", "@NQ", "1m", 0, 400)
+            .unwrap()
+            .is_empty());
+        std::fs::remove_file(path).unwrap();
     }
 }

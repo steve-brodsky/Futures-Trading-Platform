@@ -60,6 +60,14 @@ export const api = {
     if (isTauri) return native("get_older_bars", { symbol, timeframe, before });
     return [];
   },
+  async cachedBarRange(symbol: string, timeframe: Timeframe, first: number, last: number): Promise<Bar[]> {
+    if (isTauri) return native("load_cached_bar_range", { symbol, timeframe, first, last });
+    return (await this.bars(symbol, timeframe)).filter((bar) => bar.time >= first && bar.time < last);
+  },
+  async barRange(symbol: string, timeframe: Timeframe, first: number, last: number): Promise<Bar[]> {
+    if (isTauri) return native("get_bar_range", { symbol, timeframe, first, last });
+    return (await this.bars(symbol, timeframe)).filter((bar) => bar.time >= first && bar.time < last);
+  },
   async startBarStream(subscriptionId: string, symbol: string, timeframe: Timeframe): Promise<void> {
     if (isTauri) await native("start_bar_stream", { subscriptionId, symbol, timeframe });
   },

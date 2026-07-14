@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ema, estimateOrderRisk, roundToTick, sma, validateTick } from "./indicators";
+import type { Bar } from "../types";
+import { ema, estimateOrderRisk, nySessionVwap, roundToTick, sma, validateTick } from "./indicators";
+
+const sessionBar = (iso: string, high: number, low: number, close: number, volume: number): Bar => ({
+  time: Date.parse(iso) / 1000, open: close, high, low, close, volume,
+});
 
 describe("indicator math", () => {
   it("computes rolling SMA", () => expect(sma([1, 2, 3, 4], 3)).toEqual([null, null, 2, 3]));
@@ -13,5 +18,26 @@ describe("indicator math", () => {
     expect(estimateOrderRisk(6250, 6247, "Buy", 2, 0.25, 1.25)).toBe(30);
     expect(estimateOrderRisk(6250, 6253, "Sell", 2, 0.25, 1.25)).toBe(30);
     expect(estimateOrderRisk(6250, 6251, "Buy", 1, 0.25, 1.25)).toBeNull();
+  });
+
+  it("calculates HLC3 VWAP only during the New York regular session", () => {
+    const values = nySessionVwap([
+      sessionBar("2026-07-13T13:29:00Z", 10, 10, 10, 100),
+      sessionBar("2026-07-13T13:30:00Z", 12, 10, 11, 100),
+      sessionBar("2026-07-13T13:31:00Z", 15, 12, 15, 300),
+      sessionBar("2026-07-13T20:00:00Z", 20, 20, 20, 100),
+    ]);
+    expect(values.map((item) => item.value)).toEqual([null, 11, 13.25, null]);
+    expect(values[1].sessionKey).toBe("2026-07-13");
+  });
+
+  it("resets each session and waits for positive volume", () => {
+    const values = nySessionVwap([
+      sessionBar("2026-01-12T14:30:00Z", 100, 100, 100, 0),
+      sessionBar("2026-01-12T14:31:00Z", 101, 101, 101, 10),
+      sessionBar("2026-01-13T14:30:00Z", 200, 200, 200, 10),
+    ]);
+    expect(values.map((item) => item.value)).toEqual([null, 101, 200]);
+    expect(values[2].sessionKey).toBe("2026-01-13");
   });
 });

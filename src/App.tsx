@@ -19,6 +19,7 @@ import { formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols,
 import { flattenOrderDraft, withOrderPrice, type OrderProjection } from "./lib/tradeLines";
 import { defaultIndicators } from "./lib/workspace";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
+import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import type { Account, AccountBalance, ActivityNotification, Bar, BarSnapshotEvent, BarUpdateEvent, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
@@ -68,6 +69,13 @@ async function syncWorkspaceToOpenWindows(workspace: WorkspaceState): Promise<vo
   await Promise.all(workspace.windows.map((window) => emitTo(window.id, "workspace-sync", workspace).catch(() => undefined)));
 }
 
+interface VwapMarketState {
+  bars: Bar[];
+  loadedRanges: EpochRange[];
+  pendingRanges: EpochRange[];
+  error?: string;
+}
+
 function blockedEntryResult(reason: string): EntryRuleResult {
   return { allowed: false, status: "waiting", reason, nodeResults: {} };
 }
@@ -86,6 +94,8 @@ export default function App() {
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
   const [environment, setEnvironmentState] = useState<TradingEnvironment>("sim");
   const [tabMarkets, setTabMarkets] = useState<Record<string, TabMarketState>>({});
+  const [vwapMarkets, setVwapMarkets] = useState<Record<string, VwapMarketState>>({});
+  const vwapMarketsRef = useRef(vwapMarkets);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [positions, setPositions] = useState<Position[]>(api.isNative ? [] : demoPositions);
   const [orders, setOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoOrders);
@@ -123,6 +133,11 @@ export default function App() {
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
   const [currentTime, setCurrentTime] = useState(() => Date.now());
   const subscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; timeframe: Timeframe; epoch: string }>());
+  const vwapSubscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; epoch: string }>());
+  const vwapSymbolsRef = useRef(new Set<string>());
+  const vwapRangeTimersRef = useRef(new Map<string, number>());
+  const vwapDataEpochRef = useRef("");
+  const environmentRef = useRef(environment);
   const stripBoundsRef = useRef(new Map<string, StripBounds>());
   const viewRangesRef = useRef(new Map<string, { from: number; to: number }>());
   const windowState = workspace.windows.find((item) => item.id === currentWindowId) ?? workspace.windows[0];
@@ -138,6 +153,7 @@ export default function App() {
     : activeTab.symbol;
 
   workspaceRef.current = workspace;
+  vwapMarketsRef.current = vwapMarkets;
 
   const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
     ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
@@ -150,6 +166,10 @@ export default function App() {
   const chartSymbolsKey = [...new Set(workspace.tabs.map((tab) => tab.symbol.symbol))].sort().join("|");
   const tradeDetailSymbolsKey = [...new Set(workspace.tabs.filter((tab) => isContinuousFuture(tab.symbol)).map(resolveTradeSymbol).filter((symbol): symbol is string => Boolean(symbol)))].sort().join("|");
   const quoteSymbolsKey = quoteSubscriptionSymbols(workspace).join("|");
+  const vwapSymbolsKey = nySessionVwapSymbols(workspace.tabs).join("|");
+  vwapSymbolsRef.current = new Set(vwapSymbolsKey.split("|").filter(Boolean));
+  vwapDataEpochRef.current = `${environment}:${authEpoch}`;
+  environmentRef.current = environment;
   const activeTradeQuote = activeTradeSymbol
     ? quotes[activeTradeSymbol] ?? (api.isNative
       ? { symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
@@ -175,12 +195,20 @@ export default function App() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
-        if (!workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) return;
-        setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: payload.bars } }));
+        if (workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) {
+          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: payload.bars } }));
+        }
+        if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
+          setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], payload.bars) } }));
+        }
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
-        if (!workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) return;
-        setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting", bars: [] }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], [payload.bar]) } }));
+        if (workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) {
+          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting", bars: [] }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], [payload.bar]) } }));
+        }
+        if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
+          setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], [payload.bar]) } }));
+        }
       }).then((unlisten) => cleanups.push(unlisten));
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
         setQuotes((current) => ({ ...current, [payload.quote.symbol]: { ...payload.quote, receivedAt: Date.now() } }));
@@ -276,12 +304,77 @@ export default function App() {
   }, [tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
 
   useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    const epoch = `${authEpoch}:${environment}:${authenticated}`;
+    const desired = new Set(vwapSymbolsKey.split("|").filter(Boolean));
+    const sharedOneMinute = new Set(workspace.tabs.filter((tab) => tab.timeframe === "1m").map((tab) => tab.symbol.symbol));
+
+    vwapRangeTimersRef.current.forEach((timer, symbol) => {
+      if (desired.has(symbol)) return;
+      window.clearTimeout(timer);
+      vwapRangeTimersRef.current.delete(symbol);
+    });
+
+    vwapSubscriptionsRef.current.forEach((subscription, symbol) => {
+      if (!desired.has(symbol) || sharedOneMinute.has(symbol) || subscription.epoch !== epoch) {
+        if (api.isNative) void api.stopBarStream(subscription.subscriptionId);
+        vwapSubscriptionsRef.current.delete(symbol);
+      }
+    });
+
+    desired.forEach((symbol) => {
+      if (sharedOneMinute.has(symbol) || vwapSubscriptionsRef.current.has(symbol)) return;
+      const subscriptionId = `ny-session-vwap:${symbol}`;
+      vwapSubscriptionsRef.current.set(symbol, { subscriptionId, symbol, epoch });
+      const mergeSource = (incoming: Bar[]) => {
+        if (vwapSubscriptionsRef.current.get(symbol)?.epoch !== epoch) return;
+        setVwapMarkets((current) => ({
+          ...current,
+          [symbol]: { ...(current[symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[symbol]?.bars ?? [], incoming) },
+        }));
+      };
+      if (!api.isNative) {
+        api.bars(symbol, "1m").then(mergeSource).catch(() => undefined);
+      } else if (authenticated) {
+        api.cachedBars(symbol, "1m").then(mergeSource).catch(() => undefined);
+        api.startBarStream(subscriptionId, symbol, "1m").catch((error) => {
+          if (vwapSubscriptionsRef.current.get(symbol)?.epoch !== epoch) return;
+          vwapSubscriptionsRef.current.delete(symbol);
+          setVwapMarkets((current) => ({
+            ...current,
+            [symbol]: { ...(current[symbol] ?? { bars: [], loadedRanges: [], pendingRanges: [] }), error: String(error) },
+          }));
+        });
+      }
+    });
+  }, [vwapSymbolsKey, tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
+
+  useEffect(() => {
+    setVwapMarkets((current) => {
+      let changed = false;
+      const next = { ...current };
+      Object.entries(next).forEach(([symbol, state]) => {
+        if (vwapSymbolsRef.current.has(symbol) || !state.pendingRanges.length) return;
+        next[symbol] = { ...state, pendingRanges: [] };
+        changed = true;
+      });
+      return changed ? next : current;
+    });
+  }, [vwapSymbolsKey]);
+
+  useEffect(() => {
     if (!workspaceLoaded || tabMarkets[activeTab.id]?.bars.length) return;
     const load = api.isNative ? api.cachedBars(activeTab.symbol.symbol, activeTab.timeframe) : api.bars(activeTab.symbol.symbol, activeTab.timeframe);
     load.then((loadedBars) => setTabMarkets((current) => ({ ...current, [activeTab.id]: { ...(current[activeTab.id] ?? { hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming" }), bars: mergeBars(loadedBars, current[activeTab.id]?.bars ?? []) } }))).catch(() => undefined);
   }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe]);
 
-  useEffect(() => () => { if (currentWindowId === MAIN_WINDOW_ID) subscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId)); }, []);
+  useEffect(() => () => {
+    vwapRangeTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    if (currentWindowId === MAIN_WINDOW_ID) {
+      subscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId));
+      vwapSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId));
+    }
+  }, []);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative || !authenticated) return;
@@ -302,6 +395,110 @@ export default function App() {
     const timer = window.setInterval(() => setCurrentTime(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  async function loadVwapRange(symbol: string, range: EpochRange) {
+    const epoch = vwapDataEpochRef.current;
+    setVwapMarkets((current) => ({
+      ...current,
+      [symbol]: {
+        ...(current[symbol] ?? { bars: [], loadedRanges: [] }),
+        pendingRanges: [...(current[symbol]?.pendingRanges ?? []), range],
+        error: undefined,
+      },
+    }));
+    try {
+      const cached = await api.cachedBarRange(symbol, "1m", range.first, range.last).catch(() => []);
+      if (epoch !== vwapDataEpochRef.current) return;
+      if (!vwapSymbolsRef.current.has(symbol)) {
+        setVwapMarkets((current) => current[symbol] ? ({
+          ...current,
+          [symbol]: { ...current[symbol], pendingRanges: current[symbol].pendingRanges.filter((item) => item.first !== range.first || item.last !== range.last) },
+        }) : current);
+        return;
+      }
+      if (cached.length) {
+        setVwapMarkets((current) => ({
+          ...current,
+          [symbol]: { ...(current[symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[symbol]?.bars ?? [], cached) },
+        }));
+      }
+      const loaded = await api.barRange(symbol, "1m", range.first, range.last);
+      if (epoch !== vwapDataEpochRef.current) return;
+      if (!vwapSymbolsRef.current.has(symbol)) {
+        setVwapMarkets((current) => current[symbol] ? ({
+          ...current,
+          [symbol]: { ...current[symbol], pendingRanges: current[symbol].pendingRanges.filter((item) => item.first !== range.first || item.last !== range.last) },
+        }) : current);
+        return;
+      }
+      setVwapMarkets((current) => ({
+        ...current,
+        [symbol]: {
+          ...(current[symbol] ?? { bars: [], pendingRanges: [] }),
+          bars: mergeVwapBars(current[symbol]?.bars ?? [], loaded),
+          loadedRanges: mergeEpochRanges([...(current[symbol]?.loadedRanges ?? []), range]),
+          pendingRanges: (current[symbol]?.pendingRanges ?? []).filter((item) => item.first !== range.first || item.last !== range.last),
+          error: undefined,
+        },
+      }));
+    } catch (error) {
+      if (epoch !== vwapDataEpochRef.current) return;
+      setVwapMarkets((current) => ({
+        ...current,
+        [symbol]: {
+          ...(current[symbol] ?? { bars: [], loadedRanges: [] }),
+          pendingRanges: (current[symbol]?.pendingRanges ?? []).filter((item) => item.first !== range.first || item.last !== range.last),
+          error: String(error),
+        },
+      }));
+    }
+  }
+
+  function queueVwapRange(symbol: string, first: number, last: number) {
+    if (!vwapSymbolsRef.current.has(symbol) || !Number.isFinite(first) || !Number.isFinite(last) || first >= last) return;
+    const prior = vwapRangeTimersRef.current.get(symbol);
+    if (prior != null) window.clearTimeout(prior);
+    const timer = window.setTimeout(() => {
+      vwapRangeTimersRef.current.delete(symbol);
+      if (!vwapSymbolsRef.current.has(symbol)) return;
+      const state = vwapMarketsRef.current[symbol];
+      const expanded = expandedVwapRange(first, last);
+      const missing = missingEpochRanges(expanded.first, expanded.last, [
+        ...(state?.loadedRanges ?? []),
+        ...(state?.pendingRanges ?? []),
+      ]);
+      missing.flatMap(chunkVwapRange).forEach((range) => void loadVwapRange(symbol, range));
+    }, 220);
+    vwapRangeTimersRef.current.set(symbol, timer);
+  }
+
+  function requestVisibleVwap(range: { from: number; to: number }) {
+    viewRangesRef.current.set(activeTab.id, range);
+    emit("chart-viewport", { tabId: activeTab.id, range });
+    if (!isIntradayTimeframe(activeTab.timeframe) || !activeTab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible) || !bars.length) return;
+    const firstIndex = Math.max(0, Math.min(bars.length - 1, Math.floor(range.from)));
+    const lastIndex = Math.max(firstIndex, Math.min(bars.length - 1, Math.ceil(range.to)));
+    queueVwapRange(activeTab.symbol.symbol, bars[firstIndex].time, bars[lastIndex].time + 60);
+  }
+
+  useEffect(() => {
+    if (!workspaceLoaded || !bars.length || !isIntradayTimeframe(activeTab.timeframe) || !activeTab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible)) return;
+    const saved = viewRangesRef.current.get(activeTab.id);
+    const firstIndex = saved ? Math.max(0, Math.min(bars.length - 1, Math.floor(saved.from))) : Math.max(0, bars.length - 180);
+    const lastIndex = saved ? Math.max(firstIndex, Math.min(bars.length - 1, Math.ceil(saved.to))) : bars.length - 1;
+    queueVwapRange(activeTab.symbol.symbol, bars[firstIndex].time, bars[lastIndex].time + 60);
+  }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe, activeTab.indicators, bars.length]);
+
+  useEffect(() => {
+    if (api.isNative || activeTab.timeframe !== "1m" || !vwapSymbolsRef.current.has(activeTab.symbol.symbol) || !bars.length) return;
+    setVwapMarkets((current) => ({
+      ...current,
+      [activeTab.symbol.symbol]: {
+        ...(current[activeTab.symbol.symbol] ?? { loadedRanges: [], pendingRanges: [] }),
+        bars: mergeVwapBars(current[activeTab.symbol.symbol]?.bars ?? [], bars),
+      },
+    }));
+  }, [activeTab.symbol.symbol, activeTab.timeframe, bars]);
 
   async function loadOlder() {
     if (!api.isNative || market.loadingOlder || !market.hasOlder || !bars.length) return;
@@ -333,6 +530,9 @@ export default function App() {
     setTradeDetailErrors({});
     setContractChoices({});
     setContractLookupErrors({});
+    setVwapMarkets({});
+    vwapRangeTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    vwapRangeTimersRef.current.clear();
   }, [environment]);
 
   useEffect(() => {
@@ -799,7 +999,7 @@ export default function App() {
       </div>
       <div className="toolbar-popover-anchor">
         <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => setIndicatorOpen((value) => !value)}><SlidersHorizontal size={16} />Indicators</button>
-        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible).length} active</span></header>{activeTab.indicators.map((indicator) => <div key={indicator.id} className="indicator-row"><label className="indicator-color" title={`Change ${indicator.kind} ${indicator.period} color`}><input type="color" value={indicator.color} aria-label={`Change ${indicator.kind} ${indicator.period} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" aria-pressed={indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind}</strong><small>{indicator.kind === "VWAP" ? "Session" : `Length ${indicator.period}`}</small></span><span className={`toggle ${indicator.visible ? "on" : ""}`} /></button></div>)}</div>}
+        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible).length} active</span></header>{activeTab.indicators.map((indicator) => <div key={indicator.id} className="indicator-row"><label className="indicator-color" title={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`}><input type="color" value={indicator.color} aria-label={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" aria-pressed={indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind === "VWAP" ? "NY Session VWAP" : indicator.kind}</strong><small>{indicator.kind === "VWAP" ? isIntradayTimeframe(activeTab.timeframe) ? "9:30 AM–4:00 PM ET" : "Intraday only" : `Length ${indicator.period}`}</small></span><span className={`toggle ${indicator.visible ? "on" : ""}`} /></button></div>)}</div>}
       </div>
       <button className="text-tool-button"><Bell size={16} />Alert</button>
       <div className="divider" />
@@ -823,7 +1023,7 @@ export default function App() {
         </div>
       </aside>
 
-      <TradingChart key={activeTab.id} bars={bars} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={(field, price) => setOrderProjection((current) => current && current.tradeSymbol === activeTradeSymbol ? { ...current, [field]: price } : current)} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={(range) => { viewRangesRef.current.set(activeTab.id, range); emit("chart-viewport", { tabId: activeTab.id, range }); }} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
+      <TradingChart key={activeTab.id} bars={bars} vwapBars={vwapMarkets[activeTab.symbol.symbol]?.bars ?? []} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={(field, price) => setOrderProjection((current) => current && current.tradeSymbol === activeTradeSymbol ? { ...current, [field]: price } : current)} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={requestVisibleVwap} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
 
       {!isDetached && workspace.rightPanelOpen && <aside className="right-panel">
         <div className="panel-tabs"><button className={workspace.rightTab === "order" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "order" })}>Order</button><button className={workspace.rightTab === "watchlist" ? "active" : ""} onClick={() => updateWorkspace({ rightTab: "watchlist" })}>Watchlist</button></div>

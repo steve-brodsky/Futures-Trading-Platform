@@ -1,4 +1,5 @@
 import type { Bar } from "../types";
+import { isNyRegularMarketHours, newYorkSessionTime } from "./nySession";
 
 export function sma(values: number[], period: number): Array<number | null> {
   let total = 0;
@@ -19,14 +20,30 @@ export function ema(values: number[], period: number): Array<number | null> {
   });
 }
 
-export function vwap(bars: Bar[]): number[] {
+export interface SessionVwapValue {
+  value: number | null;
+  sessionKey?: string;
+}
+
+export function nySessionVwap(bars: Bar[]): SessionVwapValue[] {
   let pv = 0;
   let volume = 0;
+  let sessionKey: string | undefined;
   return bars.map((bar) => {
+    if (!isNyRegularMarketHours(bar.time)) return { value: null };
+    const nextSessionKey = newYorkSessionTime(bar.time).sessionKey;
+    if (nextSessionKey !== sessionKey) {
+      sessionKey = nextSessionKey;
+      pv = 0;
+      volume = 0;
+    }
+    if (!Number.isFinite(bar.volume) || bar.volume <= 0) {
+      return { value: volume > 0 ? pv / volume : null, sessionKey };
+    }
     const typical = (bar.high + bar.low + bar.close) / 3;
     pv += typical * bar.volume;
     volume += bar.volume;
-    return volume ? pv / volume : typical;
+    return { value: pv / volume, sessionKey };
   });
 }
 

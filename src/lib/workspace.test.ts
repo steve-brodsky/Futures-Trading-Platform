@@ -4,6 +4,7 @@ import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 
 const savedIndicators: IndicatorConfig[] = [
   { id: "ema20", kind: "EMA", period: 20, color: "#123456", visible: false },
+  { id: "vwap", kind: "VWAP", period: 1, color: "#654321", visible: false },
   { id: "custom", kind: "SMA", period: 100, color: "#abcdef", visible: true },
 ];
 
@@ -21,10 +22,12 @@ describe("indicator workspace normalization", () => {
   it("preserves saved visibility and color", () => {
     expect(normalizeIndicators(savedIndicators).find((indicator) => indicator.id === "ema20"))
       .toEqual(savedIndicators[0]);
+    expect(normalizeIndicators(savedIndicators).find((indicator) => indicator.id === "vwap"))
+      .toEqual(savedIndicators[1]);
   });
 
   it("preserves unknown saved indicators", () => {
-    expect(normalizeIndicators(savedIndicators)).toContainEqual(savedIndicators[1]);
+    expect(normalizeIndicators(savedIndicators)).toContainEqual(savedIndicators[2]);
   });
 });
 
