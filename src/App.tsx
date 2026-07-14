@@ -1727,6 +1727,9 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   const [error, setError] = useState<string>();
   const [draggedSymbol, setDraggedSymbol] = useState<string>();
   const [dropSymbol, setDropSymbol] = useState<string>();
+  const watchlistRef = useRef(workspace.watchlist);
+  const pointerDragRef = useRef<{ symbol: string; pointerId: number }>();
+  watchlistRef.current = workspace.watchlist;
 
   useEffect(() => {
     const value = query.trim();
@@ -1756,8 +1759,44 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   }, [query]);
 
   const move = (fromIndex: number, toIndex: number) => {
-    const next = reorderWatchlist(workspace.watchlist, fromIndex, toIndex);
-    if (next !== workspace.watchlist) onChange(next);
+    const current = watchlistRef.current;
+    const next = reorderWatchlist(current, fromIndex, toIndex);
+    if (next === current) return;
+    watchlistRef.current = next;
+    onChange(next);
+  };
+
+  const startPointerDrag = (event: React.PointerEvent<HTMLButtonElement>, symbol: string) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.focus();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pointerDragRef.current = { symbol, pointerId: event.pointerId };
+    setDraggedSymbol(symbol);
+    setDropSymbol(undefined);
+  };
+
+  const updatePointerDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = pointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-watchlist-symbol]")?.dataset.watchlistSymbol;
+    if (!target || target === drag.symbol) {
+      setDropSymbol(undefined);
+      return;
+    }
+    setDropSymbol(target);
+    const current = watchlistRef.current;
+    move(current.indexOf(drag.symbol), current.indexOf(target));
+  };
+
+  const finishPointerDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = pointerDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    pointerDragRef.current = undefined;
+    setDraggedSymbol(undefined);
+    setDropSymbol(undefined);
   };
 
   const add = (result: SymbolMeta) => {
@@ -1785,11 +1824,11 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
       })}
       {!loading && !error && !results.length && <div className="watchlist-search-state">No futures contracts matched “{query}”.</div>}
     </div>}
-    <div className="watchlist-editor" aria-label="Saved watchlist">
+    <div className={`watchlist-editor ${draggedSymbol ? "dragging" : ""}`} aria-label="Saved watchlist">
       {workspace.watchlist.map((symbol, index) => {
         const meta = knownSymbols.get(symbol);
-        return <div key={symbol} className={`watchlist-editor-row ${dropSymbol === symbol ? "drop-target" : ""}`} onDragOver={(event) => { if (!draggedSymbol || draggedSymbol === symbol) return; event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDropSymbol(symbol); }} onDrop={(event) => { event.preventDefault(); if (draggedSymbol) move(workspace.watchlist.indexOf(draggedSymbol), index); setDraggedSymbol(undefined); setDropSymbol(undefined); }}>
-          <button type="button" className="watchlist-drag-handle" draggable aria-label={`Reorder ${symbol}`} title="Drag or use the up and down arrow keys" onDragStart={(event) => { setDraggedSymbol(symbol); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", symbol); }} onDragEnd={() => { setDraggedSymbol(undefined); setDropSymbol(undefined); }} onKeyDown={(event) => { const offset = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0; if (!offset) return; event.preventDefault(); move(index, index + offset); }}><GripVertical size={15} /></button>
+        return <div key={symbol} data-watchlist-symbol={symbol} className={`watchlist-editor-row ${draggedSymbol === symbol ? "dragging" : ""} ${dropSymbol === symbol ? "drop-target" : ""}`}>
+          <button type="button" className="watchlist-drag-handle" aria-label={`Reorder ${symbol}`} aria-pressed={draggedSymbol === symbol} title="Drag or use the up and down arrow keys" onPointerDown={(event) => startPointerDrag(event, symbol)} onPointerMove={updatePointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={finishPointerDrag} onLostPointerCapture={(event) => { if (pointerDragRef.current?.pointerId === event.pointerId) finishPointerDrag(event); }} onKeyDown={(event) => { const offset = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0; if (!offset) return; event.preventDefault(); move(index, index + offset); }}><GripVertical size={15} /></button>
           <span><strong>{symbol}</strong><small>{meta ? `${meta.exchange} · ${meta.description}` : "Futures symbol"}</small></span>
           <button type="button" className="watchlist-remove" aria-label={`Remove ${symbol} from watchlist`} onClick={() => onChange(workspace.watchlist.filter((item) => item !== symbol))}><X size={14} /></button>
         </div>;

@@ -426,12 +426,15 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .watchlist-search-result > button { height: 27px; border: 1px solid #334152; border-radius: 4px; color: var(--cyan); background: rgba(55,213,232,.08); font-size: 8px; font-weight: 650; cursor: pointer; }
 .watchlist-search-state { padding: 16px 10px; color: var(--muted); font-size: 9px; text-align: center; }
 .watchlist-editor { margin-top: 12px; border-top: 1px solid var(--line); }
+.watchlist-editor.dragging { user-select: none; }
 .watchlist-editor-row { min-height: 49px; display: grid; grid-template-columns: 28px minmax(0,1fr) 30px; align-items: center; gap: 7px; border-bottom: 1px solid var(--line-soft); transition: background .12s, box-shadow .12s; }
 .watchlist-editor-row.drop-target { background: rgba(55,213,232,.05); box-shadow: inset 0 2px var(--cyan); }
+.watchlist-editor-row.dragging { opacity: .58; background: rgba(55,213,232,.035); }
 .watchlist-editor-row > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .watchlist-editor-row strong { font: 600 10px DM Mono, monospace; }
 .watchlist-editor-row small { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .watchlist-drag-handle, .watchlist-remove { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #657184; background: transparent; cursor: grab; }
+.watchlist-drag-handle { touch-action: none; }
 .watchlist-drag-handle:active { cursor: grabbing; }
 .watchlist-remove { color: #778293; cursor: pointer; }
 .watchlist-drag-handle:hover { color: var(--cyan); background: rgba(55,213,232,.07); }
