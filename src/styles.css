@@ -123,6 +123,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .trade-line-label.projected-take-profit { color: var(--green); background: rgba(8,34,28,.78); border-style: dashed; opacity: .76; }
 .trade-line-label.projected-stop-loss { color: var(--red); background: rgba(42,12,20,.78); border-style: dashed; opacity: .76; }
 .trade-line-label.draggable { cursor: ns-resize; }
+.trade-line-label:hover, .trade-line-label:focus-within { z-index: 12; }
 .trade-line-label.draggable:hover { filter: brightness(1.16); }
 .trade-line-label.pending { opacity: .66; cursor: wait; }
 .trade-line-label button { align-self: stretch; width: calc(var(--trade-label-font-size, 11px) + 14px); display: grid; place-items: center; padding: 0; border: 0; border-left: 1px solid currentColor; color: inherit; background: rgba(5,8,12,.34); cursor: pointer; }

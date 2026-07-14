@@ -530,6 +530,15 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   };
 
+  const promoteTradeLine = (lineId: string) => {
+    const price = priceRef.current;
+    const line = tradeLineRefs.current.get(lineId);
+    if (!price || !line) return;
+    const options = line.options();
+    price.removePriceLine(line);
+    tradeLineRefs.current.set(lineId, price.createPriceLine(options));
+  };
+
   const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
 
   return (
@@ -565,6 +574,8 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
           key={line.id}
           className={`trade-line-label ${line.kind} ${line.kind === "position" ? line.side.toLowerCase() : ""} ${line.draggable ? "draggable" : ""} ${pending ? "pending" : ""}`}
           style={{ top, "--trade-label-font-size": `${chartLabelSettings.fontSize}px` } as CSSProperties}
+          onPointerEnter={() => promoteTradeLine(line.id)}
+          onFocus={() => promoteTradeLine(line.id)}
           onPointerDown={line.draggable && line.order ? (event) => startOrderDrag(event, line.order!, line.price)
             : projectionField ? (event) => startProjectionDrag(event, projectionField, line.id, line.price) : undefined}
           onPointerMove={line.order && line.draggable ? moveOrderDrag : projectionField ? moveProjectionDrag : undefined}
