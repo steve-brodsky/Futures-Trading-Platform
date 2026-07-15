@@ -26,6 +26,29 @@ function exampleRules(): EntryRules {
   };
 }
 
+function barsFromCloses(closes: number[], realtimeIndex = -1): Bar[] {
+  return closes.map((close, index) => ({
+    time: index * 60,
+    open: index ? closes[index - 1] : close,
+    high: Math.max(index ? closes[index - 1] : close, close),
+    low: Math.min(index ? closes[index - 1] : close, close),
+    close,
+    volume: 100,
+    realtime: index === realtimeIndex,
+  }));
+}
+
+function emaCrossRules(direction: "above" | "below" | "either", lookback: number, period = 2): EntryRules {
+  return {
+    long: {
+      id: "long-root", kind: "group", combinator: "and", children: [
+        { id: "ema-cross", kind: "emaCross", direction, period, lookback },
+      ],
+    },
+    short: { id: "short-root", kind: "group", combinator: "and", children: [] },
+  };
+}
+
 describe("entry rules", () => {
   it("allows empty Long and Short roots", () => {
     const result = evaluateEntryRules(defaultEntryRules(), [], quote);
@@ -66,6 +89,47 @@ describe("entry rules", () => {
     expect(evaluateEntryRules(rules, bars, { ...quote, ask: bars.at(-1)!.close }).long.allowed).toBe(false);
   });
 
+  it("finds EMA crosses above and below on the most recent closed candle", () => {
+    const above = evaluateEntryRules(emaCrossRules("above", 1), barsFromCloses([100, 100, 99, 101]), quote).long;
+    const below = evaluateEntryRules(emaCrossRules("below", 1), barsFromCloses([100, 100, 101, 99]), quote).long;
+    expect(above.status).toBe("allowed");
+    expect(above.reason).toContain("crossed above");
+    expect(below.status).toBe("allowed");
+    expect(below.reason).toContain("crossed below");
+  });
+
+  it("supports either direction and includes the oldest candle in the lookback", () => {
+    const result = evaluateEntryRules(emaCrossRules("either", 3), barsFromCloses([100, 100, 99, 101, 102, 103]), quote).long;
+    expect(result.status).toBe("allowed");
+    expect(result.reason).toContain("2 closed candles ago");
+  });
+
+  it("ignores a crossover made only by the forming realtime candle", () => {
+    const result = evaluateEntryRules(emaCrossRules("above", 1), barsFromCloses([100, 100, 99, 101], 3), quote).long;
+    expect(result.status).toBe("blocked");
+    expect(result.nodeResults["ema-cross"]).toBe(false);
+  });
+
+  it("counts departure from equality only after the close finishes strictly across the EMA", () => {
+    const equality = evaluateEntryRules(emaCrossRules("above", 1), barsFromCloses([100, 100, 100]), quote).long;
+    const departure = evaluateEntryRules(emaCrossRules("above", 1), barsFromCloses([100, 100, 100, 101]), quote).long;
+    expect(equality.status).toBe("blocked");
+    expect(departure.status).toBe("allowed");
+  });
+
+  it("distinguishes complete no-cross windows from incomplete history", () => {
+    const blocked = evaluateEntryRules(emaCrossRules("either", 2), barsFromCloses([100, 100, 100, 100]), quote).long;
+    const waiting = evaluateEntryRules(emaCrossRules("either", 3), barsFromCloses([100, 100, 100, 100]), quote).long;
+    expect(blocked.status).toBe("blocked");
+    expect(waiting.status).toBe("waiting");
+    expect(waiting.nodeResults["ema-cross"]).toBeNull();
+  });
+
+  it("allows a known recent cross even when the full lookback history is incomplete", () => {
+    const result = evaluateEntryRules(emaCrossRules("above", 3), barsFromCloses([100, 100, 99, 101]), quote).long;
+    expect(result.status).toBe("allowed");
+  });
+
   it("normalizes malformed, duplicate, and over-depth trees to unrestricted roots", () => {
     const duplicate = exampleRules();
     duplicate.long.children[1].id = duplicate.long.children[0].id;
@@ -74,5 +138,18 @@ describe("entry rules", () => {
     let nested: any = { id: "condition", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } };
     for (let depth = 0; depth <= MAX_ENTRY_RULE_DEPTH; depth += 1) nested = { id: `group-${depth}`, kind: "group", combinator: "and", children: [nested] };
     expect(normalizeEntryRules({ long: nested }).long.children).toEqual([]);
+  });
+
+  it("normalizes persisted EMA cross conditions and rejects invalid values", () => {
+    const valid = emaCrossRules("either", 5, 20);
+    expect(normalizeEntryRules(valid)).toEqual(valid);
+
+    for (const invalid of [
+      { ...valid.long.children[0], direction: "sideways" },
+      { ...valid.long.children[0], period: 1 },
+      { ...valid.long.children[0], lookback: 1001 },
+    ]) {
+      expect(normalizeEntryRules({ ...valid, long: { ...valid.long, children: [invalid] } }).long.children).toEqual([]);
+    }
   });
 });

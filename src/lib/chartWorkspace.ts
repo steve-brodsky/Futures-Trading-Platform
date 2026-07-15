@@ -213,6 +213,9 @@ function sameEntryRuleNode(left: EntryRuleNode, right: EntryRuleNode): boolean {
   if (left.kind === "group" && right.kind === "group") {
     return left.combinator === right.combinator && sameArray(left.children, right.children, sameEntryRuleNode);
   }
+  if (left.kind === "emaCross" && right.kind === "emaCross") {
+    return left.direction === right.direction && left.period === right.period && left.lookback === right.lookback;
+  }
   if (left.kind !== "condition" || right.kind !== "condition" || left.operator !== right.operator) return false;
   const sameOperand = (a: typeof left.left, b: typeof right.left) => a.kind === b.kind
     && (a.kind === "marketPrice" || (b.kind === "movingAverage" && a.average === b.average && a.period === b.period));

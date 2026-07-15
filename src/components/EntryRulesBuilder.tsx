@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 import { AlertCircle, Check, GitBranch, Plus, Trash2 } from "lucide-react";
 import type {
-  Bar, EntryRuleCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand,
+  Bar, EntryRuleCondition, EntryRuleEmaCrossCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand,
   EntryRules, EntryRuleSide, Quote,
 } from "../types";
 import {
   emptyEntryRuleGroup, evaluateEntryRules, MAX_ENTRY_RULE_DEPTH, MAX_ENTRY_RULE_NODES,
-  MAX_MOVING_AVERAGE_PERIOD, MIN_MOVING_AVERAGE_PERIOD, sameEntryRuleOperand,
+  MAX_EMA_CROSS_LOOKBACK, MAX_EMA_CROSS_PERIOD, MAX_MOVING_AVERAGE_PERIOD,
+  MIN_EMA_CROSS_LOOKBACK, MIN_EMA_CROSS_PERIOD, MIN_MOVING_AVERAGE_PERIOD, sameEntryRuleOperand,
 } from "../lib/entryRules";
 
 interface Props {
@@ -26,6 +27,10 @@ function newCondition(): EntryRuleCondition {
     id: id("condition"), kind: "condition", left: { kind: "marketPrice" }, operator: "above",
     right: { kind: "movingAverage", average: "EMA", period: 20 },
   };
+}
+
+function newEmaCrossCondition(): EntryRuleEmaCrossCondition {
+  return { id: id("ema-cross"), kind: "emaCross", direction: "above", period: 20, lookback: 5 };
 }
 
 function newGroup(combinator: "and" | "or"): EntryRuleGroup {
@@ -63,6 +68,11 @@ function validationError(group: EntryRuleGroup, depth = 1, root = true): string 
     if (child.kind === "group") {
       const error = validationError(child, depth + 1, false);
       if (error) return error;
+    } else if (child.kind === "emaCross") {
+      if (!Number.isInteger(child.period) || child.period < MIN_EMA_CROSS_PERIOD || child.period > MAX_EMA_CROSS_PERIOD
+        || !Number.isInteger(child.lookback) || child.lookback < MIN_EMA_CROSS_LOOKBACK || child.lookback > MAX_EMA_CROSS_LOOKBACK) {
+        return `EMA cross conditions need an EMA period from ${MIN_EMA_CROSS_PERIOD} to ${MAX_EMA_CROSS_PERIOD} and a lookback from ${MIN_EMA_CROSS_LOOKBACK} to ${MAX_EMA_CROSS_LOOKBACK}.`;
+      }
     } else if (!Number.isInteger(child.left.kind === "movingAverage" ? child.left.period : 1)
       || !Number.isInteger(child.right.kind === "movingAverage" ? child.right.period : 1)
       || sameEntryRuleOperand(child.left, child.right)) {
@@ -116,6 +126,24 @@ function GroupEditor({ group, root, depth, nodeResults, onChange, onRemove }: Gr
     <div className="entry-rule-children">
       {group.children.map((child) => child.kind === "group"
         ? <GroupEditor key={child.id} group={child} root={root} depth={depth + 1} nodeResults={nodeResults} onChange={onChange} onRemove={() => onChange(removeNode(root, child.id))} />
+        : child.kind === "emaCross"
+          ? <div key={child.id} className={`entry-rule-condition entry-rule-ema-cross ${nodeResults[child.id] == null ? "waiting" : nodeResults[child.id] ? "passing" : "failing"}`}>
+            <span className="entry-rule-condition-state">{nodeResults[child.id] == null ? <AlertCircle size={13} /> : nodeResults[child.id] ? <Check size={13} /> : <AlertCircle size={13} />}</span>
+            <div className="entry-rule-ema-cross-editor">
+              <span>Closed candle crossed</span>
+              <select aria-label="EMA cross direction" value={child.direction} onChange={(event) => patchNode(child.id, (node) => ({ ...node as EntryRuleEmaCrossCondition, direction: event.target.value as EntryRuleEmaCrossCondition["direction"] }))}>
+                <option value="above">above</option>
+                <option value="below">below</option>
+                <option value="either">either way across</option>
+              </select>
+              <span>EMA</span>
+              <input type="number" aria-label="EMA cross period" min={MIN_EMA_CROSS_PERIOD} max={MAX_EMA_CROSS_PERIOD} value={child.period} onChange={(event) => patchNode(child.id, (node) => ({ ...node as EntryRuleEmaCrossCondition, period: Math.max(MIN_EMA_CROSS_PERIOD, Math.min(MAX_EMA_CROSS_PERIOD, Math.round(Number(event.target.value) || MIN_EMA_CROSS_PERIOD))) }))} />
+              <span>within</span>
+              <input type="number" aria-label="EMA cross lookback" min={MIN_EMA_CROSS_LOOKBACK} max={MAX_EMA_CROSS_LOOKBACK} value={child.lookback} onChange={(event) => patchNode(child.id, (node) => ({ ...node as EntryRuleEmaCrossCondition, lookback: Math.max(MIN_EMA_CROSS_LOOKBACK, Math.min(MAX_EMA_CROSS_LOOKBACK, Math.round(Number(event.target.value) || MIN_EMA_CROSS_LOOKBACK))) }))} />
+              <span>closed candles</span>
+            </div>
+            <button className="entry-rule-icon danger" aria-label="Remove EMA cross condition" title="Remove EMA cross condition" onClick={() => onChange(removeNode(root, child.id))}><Trash2 size={13} /></button>
+          </div>
         : <div key={child.id} className={`entry-rule-condition ${nodeResults[child.id] == null ? "waiting" : nodeResults[child.id] ? "passing" : "failing"}`}>
           <span className="entry-rule-condition-state">{nodeResults[child.id] == null ? <AlertCircle size={13} /> : nodeResults[child.id] ? <Check size={13} /> : <AlertCircle size={13} />}</span>
           <OperandEditor value={child.left} onChange={(left) => patchNode(child.id, (node) => ({ ...node as EntryRuleCondition, left }))} />
@@ -130,6 +158,7 @@ function GroupEditor({ group, root, depth, nodeResults, onChange, onRemove }: Gr
     </div>
     <div className="entry-rule-add-row">
       <button disabled={atNodeLimit} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newCondition()] }))}><Plus size={12} />Condition</button>
+      <button disabled={atNodeLimit} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newEmaCrossCondition()] }))}><Plus size={12} />EMA cross</button>
       <button disabled={nodeCount > MAX_ENTRY_RULE_NODES - 2 || depth >= MAX_ENTRY_RULE_DEPTH} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newGroup("and")] }))}><Plus size={12} />AND group</button>
       <button disabled={nodeCount > MAX_ENTRY_RULE_NODES - 2 || depth >= MAX_ENTRY_RULE_DEPTH} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newGroup("or")] }))}><Plus size={12} />OR group</button>
     </div>

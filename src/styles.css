@@ -511,6 +511,10 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .entry-rule-operand select { min-width: 0; flex: 1; }
 .entry-rule-operand input { width: 64px; flex: 0 0 64px; }
 .entry-rule-operator { width: 84px; }
+.entry-rule-condition.entry-rule-ema-cross { grid-template-columns: 20px minmax(0,1fr) 26px; }
+.entry-rule-ema-cross-editor { min-width: 0; display: flex; align-items: center; gap: 6px; color: #8f9baa; font: 500 9px DM Mono, monospace; white-space: nowrap; }
+.entry-rule-ema-cross-editor select { width: 132px; }
+.entry-rule-ema-cross-editor input { width: 62px; }
 .entry-rule-icon { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #738093; background: transparent; cursor: pointer; }
 .entry-rule-icon:hover { color: #e9edf3; background: #222b37; }
 .entry-rule-icon.danger:hover { color: var(--red); background: rgba(239,70,111,.1); }
@@ -557,6 +561,9 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
   .entry-rule-condition-state { grid-row: 1 / 4; }
   .entry-rule-condition .entry-rule-operand, .entry-rule-condition .entry-rule-operator { grid-column: 2; width: 100%; }
   .entry-rule-condition > .entry-rule-icon { grid-column: 3; grid-row: 1 / 4; }
+  .entry-rule-ema-cross .entry-rule-condition-state { grid-row: auto; }
+  .entry-rule-ema-cross-editor { flex-wrap: wrap; white-space: normal; }
+  .entry-rule-ema-cross-editor select { width: 132px; }
   .entry-rule-side > header { grid-template-columns: minmax(0,1fr) auto; }
   .entry-rule-side > header .entry-rule-clear { grid-column: 2; }
 }

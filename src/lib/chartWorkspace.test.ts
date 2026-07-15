@@ -235,6 +235,31 @@ describe("chart workspace", () => {
     expect(result.entryRules.short.children).toEqual([]);
   });
 
+  it("stabilizes unchanged EMA cross rules and detects changes to their settings", () => {
+    const entryRules = {
+      long: {
+        id: "long-root", kind: "group" as const, combinator: "and" as const, children: [
+          { id: "cross", kind: "emaCross" as const, direction: "above" as const, period: 20, lookback: 5 },
+        ],
+      },
+      short: { id: "short-root", kind: "group" as const, combinator: "and" as const, children: [] },
+    };
+    const current = normalizeChartWorkspace({ ...fallback, entryRules }, fallback);
+    const unchanged = stabilizeChartWorkspace(current, normalizeChartWorkspace({ ...current }, fallback));
+    expect(unchanged.entryRules).toBe(current.entryRules);
+
+    const changed = normalizeChartWorkspace({
+      ...current,
+      entryRules: {
+        ...entryRules,
+        long: { ...entryRules.long, children: [{ ...entryRules.long.children[0], lookback: 6 }] },
+      },
+    }, fallback);
+    const stabilized = stabilizeChartWorkspace(current, changed);
+    expect(stabilized.entryRules).not.toBe(current.entryRules);
+    expect(stabilized.entryRules.long.children[0]).toMatchObject({ kind: "emaCross", lookback: 6 });
+  });
+
   it("moves an off-screen detached window onto an available monitor", () => {
     expect(clampWindowGeometry({ x: 3000, y: 200, width: 1000, height: 700 }, [{ x: 0, y: 0, width: 1920, height: 1080 }]))
       .toEqual({ x: 920, y: 200, width: 1000, height: 700 });

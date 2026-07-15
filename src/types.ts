@@ -181,6 +181,14 @@ export interface EntryRuleCondition {
   right: EntryRuleOperand;
 }
 
+export interface EntryRuleEmaCrossCondition {
+  id: string;
+  kind: "emaCross";
+  direction: "above" | "below" | "either";
+  period: number;
+  lookback: number;
+}
+
 export interface EntryRuleGroup {
   id: string;
   kind: "group";
@@ -188,7 +196,7 @@ export interface EntryRuleGroup {
   children: EntryRuleNode[];
 }
 
-export type EntryRuleNode = EntryRuleCondition | EntryRuleGroup;
+export type EntryRuleNode = EntryRuleCondition | EntryRuleEmaCrossCondition | EntryRuleGroup;
 
 export interface EntryRules {
   long: EntryRuleGroup;

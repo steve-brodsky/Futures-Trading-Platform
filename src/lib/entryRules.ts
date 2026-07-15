@@ -1,5 +1,5 @@
 import type {
-  Bar, EntryRuleCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand,
+  Bar, EntryRuleCondition, EntryRuleEmaCrossCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand,
   EntryRuleResult, EntryRules, EntryRuleSide, Quote,
 } from "../types";
 import { ema, sma } from "./indicators";
@@ -8,6 +8,10 @@ export const MAX_ENTRY_RULE_DEPTH = 4;
 export const MAX_ENTRY_RULE_NODES = 100;
 export const MIN_MOVING_AVERAGE_PERIOD = 1;
 export const MAX_MOVING_AVERAGE_PERIOD = 1000;
+export const MIN_EMA_CROSS_PERIOD = 2;
+export const MAX_EMA_CROSS_PERIOD = 1000;
+export const MIN_EMA_CROSS_LOOKBACK = 1;
+export const MAX_EMA_CROSS_LOOKBACK = 1000;
 
 export function emptyEntryRuleGroup(side: EntryRuleSide): EntryRuleGroup {
   return { id: `${side}-root`, kind: "group", combinator: "and", children: [] };
@@ -55,6 +59,24 @@ function normalizeSide(value: unknown, side: EntryRuleSide): EntryRuleGroup {
       return { id: node.id, kind: "condition", left, operator: node.operator as "above" | "below", right };
     }
 
+    if (node.kind === "emaCross") {
+      if (!["above", "below", "either"].includes(String(node.direction))
+        || !Number.isInteger(node.period) || Number(node.period) < MIN_EMA_CROSS_PERIOD
+        || Number(node.period) > MAX_EMA_CROSS_PERIOD
+        || !Number.isInteger(node.lookback) || Number(node.lookback) < MIN_EMA_CROSS_LOOKBACK
+        || Number(node.lookback) > MAX_EMA_CROSS_LOOKBACK) {
+        invalid = true;
+        return null;
+      }
+      return {
+        id: node.id,
+        kind: "emaCross",
+        direction: node.direction as EntryRuleEmaCrossCondition["direction"],
+        period: Number(node.period),
+        lookback: Number(node.lookback),
+      };
+    }
+
     if (node.kind !== "group" || !["and", "or"].includes(String(node.combinator))
       || !Array.isArray(node.children) || groupDepth > MAX_ENTRY_RULE_DEPTH || (!root && node.children.length === 0)) {
       invalid = true;
@@ -92,7 +114,9 @@ interface NodeEvaluation { status: EntryRuleResult["status"]; reason: string }
 function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], quote: Quote): EntryRuleResult {
   const nodeResults: Record<string, boolean | null> = {};
   const closes = bars.map((bar) => bar.close);
+  const closedCloses = bars.filter((bar) => bar.realtime !== true).map((bar) => bar.close);
   const averages = new Map<string, number | null>();
+  const closedEmaValues = new Map<number, Array<number | null>>();
 
   function operandValue(operand: EntryRuleOperand): OperandValue {
     if (operand.kind === "marketPrice") {
@@ -125,12 +149,51 @@ function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], qu
       : { status: "blocked", reason: `${comparison} is false (${left.value.toFixed(4)} vs ${right.value.toFixed(4)}).` };
   }
 
+  function emaCross(node: EntryRuleEmaCrossCondition): NodeEvaluation {
+    if (!closedEmaValues.has(node.period)) closedEmaValues.set(node.period, ema(closedCloses, node.period));
+    const values = closedEmaValues.get(node.period)!;
+    const firstCandidate = Math.max(1, closedCloses.length - node.lookback);
+
+    for (let index = closedCloses.length - 1; index >= firstCandidate; index -= 1) {
+      const previousAverage = values[index - 1];
+      const currentAverage = values[index];
+      if (previousAverage == null || currentAverage == null) continue;
+      const crossedAbove = closedCloses[index - 1] <= previousAverage && closedCloses[index] > currentAverage;
+      const crossedBelow = closedCloses[index - 1] >= previousAverage && closedCloses[index] < currentAverage;
+      const direction = crossedAbove ? "above" : crossedBelow ? "below" : null;
+      if (!direction || (node.direction !== "either" && direction !== node.direction)) continue;
+
+      nodeResults[node.id] = true;
+      const candlesAgo = closedCloses.length - 1 - index;
+      const timing = candlesAgo === 0 ? "on the most recent closed candle"
+        : `${candlesAgo} closed candle${candlesAgo === 1 ? "" : "s"} ago`;
+      return { status: "allowed", reason: `EMA ${node.period} crossed ${direction} ${timing}.` };
+    }
+
+    const requiredBars = node.period + node.lookback;
+    if (closedCloses.length < requiredBars) {
+      nodeResults[node.id] = null;
+      return {
+        status: "waiting",
+        reason: `Waiting for EMA ${node.period} crossover history (${closedCloses.length}/${requiredBars} closed candles).`,
+      };
+    }
+
+    nodeResults[node.id] = false;
+    const direction = node.direction === "either" ? "in either direction" : node.direction;
+    return {
+      status: "blocked",
+      reason: `EMA ${node.period} did not cross ${direction} within the last ${node.lookback} closed candle${node.lookback === 1 ? "" : "s"}.`,
+    };
+  }
+
   function group(node: EntryRuleGroup, rootGroup = false): NodeEvaluation {
     if (rootGroup && node.children.length === 0) {
       nodeResults[node.id] = true;
       return { status: "allowed", reason: `No ${side === "long" ? "Long" : "Short"} entry rules configured.` };
     }
-    const results = node.children.map((child) => child.kind === "group" ? group(child) : condition(child));
+    const results = node.children.map((child) => child.kind === "group" ? group(child)
+      : child.kind === "emaCross" ? emaCross(child) : condition(child));
     let status: EntryRuleResult["status"];
     if (node.combinator === "and") {
       status = results.some((result) => result.status === "blocked") ? "blocked"
