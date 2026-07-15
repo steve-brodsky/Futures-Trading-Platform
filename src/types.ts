@@ -328,3 +328,125 @@ export interface PositionUpdateEvent { accountId: string; position: Position; }
 export interface OrdersSnapshotEvent { accountId: string; orders: OrderUpdate[]; }
 export interface OrderStreamUpdateEvent { accountId: string; order: OrderUpdate; }
 export interface BrokerageStreamStateEvent { accountId: string; channel: "positions" | "orders"; state: StreamConnectionState; message?: string; }
+
+export type RiskProvenance = "exact" | "inferred" | "unknown";
+export type JournalTradeStatus = "open" | "closed";
+export type JournalEventType =
+  | "entry-intent"
+  | "risk-added"
+  | "order-observed"
+  | "fill"
+  | "stop-move"
+  | "target-move"
+  | "close-intent"
+  | "cancel-intent"
+  | "order-rejected";
+
+export interface JournalScope {
+  environment: TradingEnvironment;
+  accountId: string;
+  accountLabel: string;
+}
+
+export interface JournalAuthStatus {
+  configured: boolean;
+  authenticated: boolean;
+  email?: string;
+  projectUrl?: string;
+  backfillStart?: string;
+  error?: string;
+}
+
+export interface JournalSyncStatus {
+  state: "idle" | "syncing" | "synced" | "offline" | "error";
+  pendingEvents: number;
+  lastSyncedAt?: string;
+  message?: string;
+}
+
+export interface JournalEvent {
+  id: string;
+  tradeId?: string;
+  brokerOrderId?: string;
+  eventType: JournalEventType;
+  occurredAt: string;
+  source: "northstar" | "broker-stream" | "broker-history";
+  status?: "requested" | "confirmed" | "failed";
+  oldPrice?: number;
+  newPrice?: number;
+  quantity?: number;
+  price?: number;
+  note?: string;
+}
+
+export interface JournalAnnotation {
+  tradeId: string;
+  notes: string;
+  tags: string[];
+  updatedAt?: string;
+}
+
+export interface JournalTrade {
+  id: string;
+  environment: TradingEnvironment;
+  accountId: string;
+  symbol: string;
+  direction: "Long" | "Short";
+  status: JournalTradeStatus;
+  openedAt: string;
+  closedAt?: string;
+  entryQuantity: number;
+  exitQuantity: number;
+  averageEntry: number;
+  averageExit?: number;
+  originalStop?: number;
+  originalTarget?: number;
+  plannedRisk?: number;
+  deployedRisk?: number;
+  pointValue?: number;
+  grossPnl: number;
+  fees: number;
+  netPnl: number;
+  rMultiple?: number;
+  riskProvenance: RiskProvenance;
+  notes: string;
+  tags: string[];
+  events?: JournalEvent[];
+}
+
+export interface JournalSummaryMetrics {
+  netPnl: number;
+  grossPnl: number;
+  fees: number;
+  trades: number;
+  closedTrades: number;
+  winRate?: number;
+  totalR?: number;
+  averageTrade?: number;
+  profitFactor?: number;
+  longTrades: number;
+  shortTrades: number;
+}
+
+export interface JournalCalendarDay {
+  date: string;
+  trades: number;
+  closedTrades: number;
+  netPnl: number;
+  totalR?: number;
+}
+
+export interface JournalMonthSummary {
+  scope: JournalScope;
+  year: number;
+  month: number;
+  metrics: JournalSummaryMetrics;
+  days: JournalCalendarDay[];
+}
+
+export interface JournalDaySummary {
+  scope: JournalScope;
+  date: string;
+  metrics: JournalSummaryMetrics;
+  trades: JournalTrade[];
+}

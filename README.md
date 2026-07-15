@@ -40,6 +40,14 @@ Northstar Trader is a private futures charting and order-entry desktop client fo
 - Position close workflow that cancels working exit orders, waits for cancellation confirmation, refreshes the live quantity, and then submits the flattening market order.
 - Order cancellation, paginated order history, account balances, and live position/order updates with snapshot polling as a fallback.
 
+### Trade journal
+
+- Dedicated native Trade Journal window opened from the chart toolbar, with a Sunday–Friday P&L calendar and daily campaign ledger.
+- Flat-to-flat reconstruction across partial fills, scale-ins, scale-outs, commissions, and position reversals.
+- Durable SQLite outbox for entry intent, fills, closes, and observed stop-loss or take-profit moves.
+- Exact initial-risk provenance for Northstar entries, with inferred or unknown labels for incomplete broker history.
+- Owner-scoped Supabase synchronization, editable notes/tags, and immutable execution history.
+
 ### Browser demo
 
 `npm run dev` starts a browser-safe UI demo with generated bars, quotes, positions, orders, and balances. Browser mode does not authenticate with TradeStation and cannot place, replace, cancel, or close real orders. Its workspace is saved in browser `localStorage`.
@@ -144,6 +152,15 @@ The executable is written to `src-tauri\target\release\northstar-trader.exe`. Th
 6. Return to Northstar Trader and begin in SIM.
 
 The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes, so that port must be available while signing in.
+
+## Supabase trade journal configuration
+
+1. Create a Supabase project and an email/password user for the private journal owner.
+2. Apply [`supabase/migrations/202607150001_trade_journal.sql`](supabase/migrations/202607150001_trade_journal.sql) with the Supabase CLI or SQL editor.
+3. In Northstar, open **Settings → Supabase connection** and enter the project URL, publishable key, existing user email/password, and first backfill date.
+4. Open the journal from the book icon in the main chart toolbar and press **Sync**.
+
+The password is used only for the initial token exchange. Northstar stores the Supabase refresh token in the operating-system credential vault, keeps access tokens in memory, and never accepts a service-role key. Journal tables use row-level security keyed to the authenticated Supabase user.
 
 ## Security and local data
 

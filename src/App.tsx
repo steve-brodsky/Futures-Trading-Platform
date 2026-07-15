@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { TradingChart } from "./components/TradingChart";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
+import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { api } from "./lib/bridge";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
@@ -178,6 +179,11 @@ function TradeStationCredentials({ clientId, secret, busy, configured, native, s
 }
 
 export default function App() {
+  if (new URLSearchParams(window.location.search).get("view") === "journal") return <TradeJournalWindow />;
+  return <TradingApp />;
+}
+
+function TradingApp() {
   const [workspace, setWorkspace] = useState(defaultWorkspace);
   const workspaceRef = useRef(workspace);
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
@@ -532,6 +538,7 @@ export default function App() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OrdersSnapshotEvent>("orders-snapshot", ({ payload }) => {
         if (payload.accountId !== selectedAccountIdRef.current) return;
+        void api.ingestJournalOrders(environmentRef.current, payload.orders).catch(() => undefined);
         const protectedIds = activeProtectionIds(recentOrderIdsRef.current);
         setOrders((current) => reconcileOrderSnapshot(current, payload.orders, protectedIds));
         setBrokerageError(undefined);
@@ -539,6 +546,7 @@ export default function App() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OrderStreamUpdateEvent>("order-stream-update", ({ payload }) => {
         if (payload.accountId !== selectedAccountIdRef.current) return;
+        void api.ingestJournalOrders(environmentRef.current, [payload.order]).catch(() => undefined);
         recentOrderIdsRef.current.set(payload.order.id, Date.now() + 15_000);
         setOrders((current) => upsertStreamOrder(current, payload.order));
         if (isCompletedCloseFill(payload.order)) {
@@ -1593,6 +1601,27 @@ export default function App() {
     }
   }
 
+  async function openTradeJournal() {
+    if (!api.isNative) {
+      window.open("/?view=journal", "northstar-trade-journal", "width=1280,height=800");
+      return;
+    }
+    try {
+      const existing = await WebviewWindow.getByLabel("trade-journal");
+      if (existing) {
+        await existing.show();
+        await existing.unminimize();
+        await existing.setFocus();
+        return;
+      }
+      const journal = new WebviewWindow("trade-journal", {
+        url: "/?view=journal", title: "Northstar Trade Journal", width: 1280, height: 800,
+        minWidth: 960, minHeight: 640, center: true, resizable: true, decorations: true,
+      });
+      journal.once("tauri://error", (event) => showToast(`Could not open Trade Journal: ${String(event.payload)}`));
+    } catch (error) { showToast(`Could not open Trade Journal: ${String(error)}`); }
+  }
+
   async function saveTradeStationCredentials() {
     if (!clientId.trim() || !secret.trim()) return showToast("Client ID and secret are required.");
     setBusy(true);
@@ -1891,7 +1920,7 @@ export default function App() {
       </div>}
       <div className="divider" />
       <span className="toolbar-spacer" />
-      {!isDetached && <><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
+      {!isDetached && <><IconButton label="Trade journal" onClick={openTradeJournal}><BookOpen size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
       <IconButton label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} active={isFullscreen} onClick={toggleFullscreen}>{isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</IconButton>
     </nav>
 
@@ -1928,6 +1957,7 @@ export default function App() {
       <WatchlistSettings workspace={workspace} onChange={(watchlist) => updateWorkspace({ watchlist })} onNotify={showToast} />
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Chart display</h3><p>Configure tab signals and the values shown beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>EMA 200 tab status</strong><small>Green above EMA 200, red below</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showEma200TabDots} onChange={(event) => updateChartLabelSettings({ showEma200TabDots: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure risk sizing and projected swing stops.</p></header><label className="settings-control-row"><span><strong>Risk budget behavior</strong><small>Choose whether risk sizing may exceed the limit</small></span><select aria-label="Risk budget behavior" value={workspace.settings.orderTicket.riskSizingPolicy} onChange={(event) => updateOrderTicketSettings({ riskSizingPolicy: event.target.value as OrderTicketSettings["riskSizingPolicy"] })}><option value="strict">Stay within risk</option><option value="minimum-one">Always allow 1 contract</option></select></label><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
+      <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings /></section>
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
     </div></Modal>}
 
@@ -2200,6 +2230,7 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
     const nextEntryPrice = nextSide === "Buy" ? quote.ask : quote.bid;
     return calculateContractsForRisk(nextRiskAmount, nextEntryPrice, Number(nextStopLoss), nextSide, symbol.minMove, tickValue, minimumRiskQuantity) ?? 0;
   }
+
   const strictRiskQuantity = calculateContractsForRisk(riskAmount, entryPrice, stopLossPrice, side, symbol.minMove, tickValue);
   const calculatedRiskQuantity = minimumRiskQuantity === 0
     ? strictRiskQuantity

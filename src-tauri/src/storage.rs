@@ -16,6 +16,7 @@ struct Credentials {
     client_id: Option<String>,
     client_secret: Option<String>,
     refresh_token: Option<String>,
+    journal_refresh_token: Option<String>,
 }
 
 static CREDENTIALS: OnceLock<Mutex<Option<Credentials>>> = OnceLock::new();
@@ -59,6 +60,7 @@ pub fn get_secret(key: &str) -> Result<Option<String>, AppError> {
         "client_id" => Ok(credentials.client_id),
         "client_secret" => Ok(credentials.client_secret),
         "refresh_token" => Ok(credentials.refresh_token),
+        "journal_refresh_token" => Ok(credentials.journal_refresh_token),
         _ => Err(AppError::Validation(format!(
             "Unknown credential key: {key}"
         ))),
@@ -71,6 +73,7 @@ pub fn set_secret(key: &str, value: &str) -> Result<(), AppError> {
         "client_id" => credentials.client_id = Some(value.to_owned()),
         "client_secret" => credentials.client_secret = Some(value.to_owned()),
         "refresh_token" => credentials.refresh_token = Some(value.to_owned()),
+        "journal_refresh_token" => credentials.journal_refresh_token = Some(value.to_owned()),
         _ => {
             return Err(AppError::Validation(format!(
                 "Unknown credential key: {key}"
@@ -86,6 +89,7 @@ pub fn delete_secret(key: &str) -> Result<(), AppError> {
         "client_id" => credentials.client_id = None,
         "client_secret" => credentials.client_secret = None,
         "refresh_token" => credentials.refresh_token = None,
+        "journal_refresh_token" => credentials.journal_refresh_token = None,
         _ => {
             return Err(AppError::Validation(format!(
                 "Unknown credential key: {key}"

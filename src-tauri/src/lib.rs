@@ -1,7 +1,9 @@
+mod journal;
 mod models;
 mod storage;
 mod tradestation;
 
+use chrono::Utc;
 use futures_util::StreamExt;
 use models::*;
 use serde_json::Value;
@@ -958,9 +960,30 @@ async fn confirm_order(
 #[tauri::command]
 async fn place_order(
     order: OrderDraft,
+    app: tauri::AppHandle,
     state: State<'_, NativeState>,
 ) -> Result<OrderUpdate, AppError> {
-    state.api.place_order(&order).await
+    let environment = state.api.environment().await;
+    let meta = state.api.symbol_details(&order.symbol).await?;
+    let intent = journal::start_entry_intent(&state.db_path, &environment, &order, &meta)?;
+    match state.api.place_order(&order).await {
+        Ok(update) => {
+            journal::complete_entry_intent(&state.db_path, &intent, &update)?;
+            let _ = app.emit(
+                "journal-updated",
+                serde_json::json!({"reason":"entry-intent"}),
+            );
+            Ok(update)
+        }
+        Err(error) => {
+            let _ = journal::fail_entry_intent(&state.db_path, &intent, &error.to_string());
+            let _ = app.emit(
+                "journal-updated",
+                serde_json::json!({"reason":"entry-rejected"}),
+            );
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -968,26 +991,168 @@ async fn replace_order(
     account_id: String,
     order_id: String,
     new_price: f64,
+    app: tauri::AppHandle,
     state: State<'_, NativeState>,
 ) -> Result<OrderUpdate, AppError> {
-    state
+    let environment = state.api.environment().await;
+    let original = state
+        .api
+        .orders(&account_id)
+        .await
+        .ok()
+        .and_then(|orders| orders.into_iter().find(|order| order.id == order_id));
+    let old_price = original
+        .as_ref()
+        .and_then(|order| order.price.or(order.stop_price));
+    if let Some(order) = original.as_ref() {
+        journal::record_order_move(
+            &state.db_path,
+            &environment,
+            &account_id,
+            order,
+            old_price,
+            new_price,
+            "requested",
+            Some("Protective replacement submitted"),
+        )?;
+    }
+    match state
         .api
         .replace_order(&account_id, &order_id, new_price)
         .await
+    {
+        Ok(update) => {
+            let confirmed_price = update.price.or(update.stop_price).unwrap_or(new_price);
+            journal::record_order_move(
+                &state.db_path,
+                &environment,
+                &account_id,
+                &update,
+                old_price,
+                confirmed_price,
+                "confirmed",
+                None,
+            )?;
+            let _ = app.emit(
+                "journal-updated",
+                serde_json::json!({"reason":"protective-order-moved"}),
+            );
+            schedule_journal_flush(app.clone(), state.db_path.clone());
+            Ok(update)
+        }
+        Err(error) => {
+            if let Some(order) = original.as_ref() {
+                let _ = journal::record_order_move(
+                    &state.db_path,
+                    &environment,
+                    &account_id,
+                    order,
+                    old_price,
+                    new_price,
+                    "failed",
+                    Some(&error.to_string()),
+                );
+            }
+            let _ = app.emit(
+                "journal-updated",
+                serde_json::json!({"reason":"protective-order-move-failed"}),
+            );
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn close_position(
     account_id: String,
     position_id: String,
+    app: tauri::AppHandle,
     state: State<'_, NativeState>,
 ) -> Result<ClosePositionResult, AppError> {
-    state.api.close_position(&account_id, &position_id).await
+    let environment = state.api.environment().await;
+    let symbol = state
+        .api
+        .positions(&account_id)
+        .await
+        .ok()
+        .and_then(|positions| {
+            positions
+                .into_iter()
+                .find(|position| position.id == position_id)
+        })
+        .map(|position| position.symbol);
+    if let Some(symbol) = symbol.as_deref() {
+        let _ = journal::record_close_intent(
+            &state.db_path,
+            &environment,
+            &account_id,
+            symbol,
+            "requested",
+            None,
+        );
+    }
+    let result = state.api.close_position(&account_id, &position_id).await;
+    if let Ok(value) = result.as_ref() {
+        let _ = journal::record_close_intent(
+            &state.db_path,
+            &environment,
+            &account_id,
+            &value.symbol,
+            if value.error.is_some() {
+                "failed"
+            } else {
+                "confirmed"
+            },
+            value.error.as_deref(),
+        );
+    }
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"close-position"}),
+    );
+    schedule_journal_flush(app, state.db_path.clone());
+    result
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn cancel_order(order_id: String, state: State<'_, NativeState>) -> Result<(), AppError> {
-    state.api.cancel_order(&order_id).await
+async fn cancel_order(
+    order_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    let environment = state.api.environment().await;
+    journal::record_cancel_intent(&state.db_path, &environment, &order_id, "requested", None)?;
+    match state.api.cancel_order(&order_id).await {
+        Ok(()) => {
+            journal::record_cancel_intent(
+                &state.db_path,
+                &environment,
+                &order_id,
+                "confirmed",
+                None,
+            )?;
+            let _ = app.emit(
+                "journal-updated",
+                serde_json::json!({"reason":"order-cancelled"}),
+            );
+            schedule_journal_flush(app, state.db_path.clone());
+            Ok(())
+        }
+        Err(error) => {
+            let _ = journal::record_cancel_intent(
+                &state.db_path,
+                &environment,
+                &order_id,
+                "failed",
+                Some(&error.to_string()),
+            );
+            let _ = app.emit(
+                "journal-updated",
+                serde_json::json!({"reason":"order-cancel-failed"}),
+            );
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -998,6 +1163,204 @@ fn load_workspace(state: State<'_, NativeState>) -> Result<Option<Value>, AppErr
 #[tauri::command]
 fn save_workspace(workspace: Value, state: State<'_, NativeState>) -> Result<(), AppError> {
     storage::save_workspace(&state.db_path, &workspace)
+}
+
+fn schedule_journal_flush(app: tauri::AppHandle, path: PathBuf) {
+    if !journal::auth_status(&path).is_ok_and(|status| status.configured) {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        for attempt in 0..4u32 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(1u64 << attempt)).await;
+            }
+            match journal::sync_cloud(&path).await {
+                Ok(status) => {
+                    let _ = app.emit(
+                        "journal-updated",
+                        serde_json::json!({"reason":"outbox-flushed","status":status}),
+                    );
+                    return;
+                }
+                Err(error) if attempt == 3 => {
+                    let _ = app.emit("journal-sync-error", error.to_string());
+                }
+                Err(_) => {}
+            }
+        }
+    });
+}
+
+#[tauri::command]
+fn journal_auth_status(
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalAuthStatus, AppError> {
+    journal::auth_status(&state.db_path)
+}
+
+#[tauri::command]
+async fn configure_journal(
+    input: journal::JournalConnectionInput,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalAuthStatus, AppError> {
+    let result = journal::configure(&state.db_path, input).await?;
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"cloud-configured"}),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+fn disconnect_journal(state: State<'_, NativeState>) -> Result<(), AppError> {
+    journal::disconnect(&state.db_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_journal_backfill_start(
+    backfill_start: String,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    journal::set_backfill(&state.db_path, &backfill_start)
+}
+
+async fn ingest_orders_with_metadata(
+    state: &NativeState,
+    environment: &TradingEnvironment,
+    orders: &[OrderUpdate],
+    source: &str,
+) -> Result<usize, AppError> {
+    let symbols: std::collections::HashSet<_> = orders
+        .iter()
+        .map(|order| order.symbol.clone())
+        .filter(|symbol| !symbol.is_empty())
+        .collect();
+    let mut point_values = HashMap::new();
+    for symbol in symbols {
+        if let Ok(meta) = state.api.symbol_details(&symbol).await {
+            point_values.insert(symbol, meta.point_value);
+        }
+    }
+    journal::ingest_orders(&state.db_path, environment, orders, source, &point_values)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn ingest_journal_orders(
+    environment: TradingEnvironment,
+    orders: Vec<OrderUpdate>,
+    source: String,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    if ingest_orders_with_metadata(&state, &environment, &orders, &source).await? > 0 {
+        let _ = app.emit(
+            "journal-updated",
+            serde_json::json!({"reason":"broker-fill"}),
+        );
+        schedule_journal_flush(app, state.db_path.clone());
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn sync_journal(
+    scope: Option<journal::JournalScope>,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalSyncStatus, AppError> {
+    let auth = journal::auth_status(&state.db_path)?;
+    let backfill_start = auth
+        .backfill_start
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
+    let environment = state.api.environment().await;
+    let accounts = state.api.accounts().await?;
+    for account in accounts.into_iter().filter(|account| {
+        account.account_type.eq_ignore_ascii_case("futures")
+            && scope.as_ref().is_none_or(|selected| {
+                selected.account_id == account.id && selected.environment == environment
+            })
+    }) {
+        let since = journal::reconciliation_since(
+            &state.db_path,
+            &environment,
+            &account.id,
+            &backfill_start,
+        )?;
+        let mut token = None;
+        loop {
+            let page = state
+                .api
+                .historical_orders(&account.id, &since, token.as_deref())
+                .await?;
+            ingest_orders_with_metadata(&state, &environment, &page.orders, "broker-history")
+                .await?;
+            token = page.next_token;
+            if token.is_none() {
+                break;
+            }
+        }
+        journal::set_reconciliation_checkpoint(&state.db_path, &environment, &account.id)?;
+    }
+    let result = journal::sync_cloud(&state.db_path).await?;
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"cloud-sync"}),
+    );
+    Ok(result)
+}
+
+#[tauri::command]
+fn get_journal_scopes(
+    state: State<'_, NativeState>,
+) -> Result<Vec<journal::JournalScope>, AppError> {
+    journal::scopes(&state.db_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_journal_month(
+    scope: journal::JournalScope,
+    year: i32,
+    month: u32,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalMonthSummary, AppError> {
+    journal::month(&state.db_path, scope, year, month)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_journal_day(
+    scope: journal::JournalScope,
+    date: String,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalDaySummary, AppError> {
+    journal::day(&state.db_path, scope, &date)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_journal_trade(
+    trade_id: String,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalTrade, AppError> {
+    journal::trade(&state.db_path, &trade_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn update_journal_annotation(
+    trade_id: String,
+    notes: String,
+    tags: Vec<String>,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    journal::update_annotation(&state.db_path, &trade_id, &notes, &tags)?;
+    if journal::auth_status(&state.db_path)?.configured {
+        let _ = journal::sync_cloud(&state.db_path).await;
+    }
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"annotation"}),
+    );
+    Ok(())
 }
 
 fn decode_stream_values(buffer: &mut Vec<u8>, chunk: &[u8]) -> Result<Vec<Value>, AppError> {
@@ -1681,6 +2044,7 @@ pub fn run() {
             let app_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_dir)?;
             let api = TradeStation::new()?;
+            journal::init(&app_dir.join("northstar.sqlite3"))?;
             app.manage(NativeState {
                 api,
                 db_path: app_dir.join("northstar.sqlite3"),
@@ -1723,7 +2087,18 @@ pub fn run() {
             close_position,
             cancel_order,
             load_workspace,
-            save_workspace
+            save_workspace,
+            journal_auth_status,
+            configure_journal,
+            disconnect_journal,
+            set_journal_backfill_start,
+            sync_journal,
+            get_journal_scopes,
+            get_journal_month,
+            get_journal_day,
+            get_journal_trade,
+            update_journal_annotation,
+            ingest_journal_orders
         ])
         .run(tauri::generate_context!())
         .expect("error while running Northstar Trader");

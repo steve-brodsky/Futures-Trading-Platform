@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, HistoricalOrderPage, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSyncStatus, JournalTrade, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import { daySummary, demoJournalTrades, monthSummary } from "./journal";
 import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, futures, makeDemoBars, quoteFor } from "./demo";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -132,5 +133,42 @@ export const api = {
   async saveWorkspace(workspace: WorkspaceState): Promise<void> {
     if (isTauri) await native("save_workspace", { workspace });
     else localStorage.setItem("northstar-workspace", JSON.stringify(workspace));
+  },
+  async journalAuthStatus(): Promise<JournalAuthStatus> {
+    return isTauri ? native("journal_auth_status") : { configured: false, authenticated: false };
+  },
+  async configureJournal(projectUrl: string, publishableKey: string, email: string, password: string, backfillStart: string): Promise<JournalAuthStatus> {
+    if (!isTauri) return { configured: false, authenticated: false, error: "Journal cloud setup is available in the desktop app." };
+    return native("configure_journal", { input: { projectUrl, publishableKey, email, password, backfillStart } });
+  },
+  async disconnectJournal(): Promise<void> {
+    if (isTauri) await native("disconnect_journal");
+  },
+  async setJournalBackfillStart(backfillStart: string): Promise<void> {
+    if (isTauri) await native("set_journal_backfill_start", { backfillStart });
+  },
+  async syncJournal(scope?: JournalScope): Promise<JournalSyncStatus> {
+    return isTauri ? native("sync_journal", { scope }) : { state: "synced", pendingEvents: 0, lastSyncedAt: new Date().toISOString(), message: "Browser demo data" };
+  },
+  async journalScopes(): Promise<JournalScope[]> {
+    return isTauri ? native("get_journal_scopes") : [{ environment: "sim", accountId: "SIM-DEMO-4821", accountLabel: "SIM ··4821" }];
+  },
+  async journalMonth(scope: JournalScope, year: number, month: number): Promise<JournalMonthSummary> {
+    return isTauri ? native("get_journal_month", { scope, year, month }) : monthSummary(scope, year, month, demoJournalTrades());
+  },
+  async journalDay(scope: JournalScope, date: string): Promise<JournalDaySummary> {
+    return isTauri ? native("get_journal_day", { scope, date }) : daySummary(scope, date, demoJournalTrades());
+  },
+  async journalTrade(tradeId: string): Promise<JournalTrade> {
+    if (isTauri) return native("get_journal_trade", { tradeId });
+    const trade = demoJournalTrades().find((item) => item.id === tradeId);
+    if (!trade) throw new Error("Trade not found");
+    return trade;
+  },
+  async updateJournalAnnotation(tradeId: string, notes: string, tags: string[]): Promise<void> {
+    if (isTauri) await native("update_journal_annotation", { tradeId, notes, tags });
+  },
+  async ingestJournalOrders(environment: TradingEnvironment, orders: OrderUpdate[], source: "broker-stream" | "broker-history" = "broker-stream"): Promise<void> {
+    if (isTauri && orders.length) await native("ingest_journal_orders", { environment, orders, source });
   },
 };
