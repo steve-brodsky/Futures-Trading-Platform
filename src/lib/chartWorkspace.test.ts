@@ -12,7 +12,7 @@ const fallback: WorkspaceState = {
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
 describe("chart workspace", () => {
@@ -99,6 +99,17 @@ describe("chart workspace", () => {
       settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 4, swingStopOffsetTicks: 500 } },
     }, fallback);
     expect(clamped.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 100, sizingMode: "contracts", riskSizingPolicy: "strict", riskAmount: undefined });
+  });
+
+  it("defaults legacy journal commission and preserves a configured rate", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, settings: { ...fallback.settings, journal: undefined } }, fallback);
+    expect(legacy.settings.journal.commissionPerContractSide).toBe(0.4);
+
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, journal: { commissionPerContractSide: 1.25 } },
+    }, fallback);
+    expect(saved.settings.journal.commissionPerContractSide).toBe(1.25);
   });
 
   it("defaults, preserves, and validates risk-sizing preferences", () => {

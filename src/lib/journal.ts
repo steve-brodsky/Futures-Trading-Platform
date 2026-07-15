@@ -1,4 +1,4 @@
-import type { JournalCalendarDay, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSummaryMetrics, JournalTrade } from "../types";
+import type { JournalCalendarDay, JournalDaySummary, JournalEvent, JournalMonthSummary, JournalScope, JournalSummaryMetrics, JournalTrade } from "../types";
 
 export const JOURNAL_TIME_ZONE = "America/New_York";
 
@@ -13,6 +13,37 @@ export function journalDate(iso: string): string {
   const parts = newYorkDateFormatter.formatToParts(new Date(iso));
   const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
   return `${value("year")}-${value("month")}-${value("day")}`;
+}
+
+const MOVE_EVENT_WINDOW_MS = 3 * 60 * 1000;
+
+function moveEventPriority(event: JournalEvent): number {
+  if (event.status === "failed") return 4;
+  if (event.status === "confirmed" && event.source === "northstar") return 3;
+  if (event.status === "confirmed") return 2;
+  if (event.status === "requested") return 1;
+  return 0;
+}
+
+export function journalTimelineEvents(events: JournalEvent[]): JournalEvent[] {
+  const groups: Array<{ event: JournalEvent; lastAt: number; moveKey?: string }> = [];
+  const sorted = [...events].sort((left, right) => Date.parse(left.occurredAt) - Date.parse(right.occurredAt));
+  for (const event of sorted) {
+    if (event.eventType !== "stop-move" && event.eventType !== "target-move") {
+      groups.push({ event, lastAt: Date.parse(event.occurredAt) });
+      continue;
+    }
+    const moveKey = [event.eventType, event.brokerOrderId ?? "", event.oldPrice ?? "", event.newPrice ?? ""].join(":");
+    const occurredAt = Date.parse(event.occurredAt);
+    const existing = groups.slice().reverse().find((group) => group.moveKey === moveKey && Math.abs(occurredAt - group.lastAt) <= MOVE_EVENT_WINDOW_MS);
+    if (!existing) {
+      groups.push({ event, lastAt: occurredAt, moveKey });
+      continue;
+    }
+    existing.lastAt = Math.max(existing.lastAt, occurredAt);
+    if (moveEventPriority(event) >= moveEventPriority(existing.event)) existing.event = event;
+  }
+  return groups.map((group) => group.event).sort((left, right) => Date.parse(left.occurredAt) - Date.parse(right.occurredAt));
 }
 
 export function journalMetrics(trades: JournalTrade[]): JournalSummaryMetrics {

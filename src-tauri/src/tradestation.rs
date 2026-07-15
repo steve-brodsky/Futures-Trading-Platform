@@ -2903,6 +2903,8 @@ mod tests {
         assert_eq!(update.raw_status.as_deref(), Some("ReplacePending"));
         assert_eq!(update.remaining_quantity, Some(2.0));
         assert_eq!(update.price, None);
+        assert_eq!(update.open_or_close.as_deref(), Some("Close"));
+        assert_eq!(update.group_name, selected.group_name);
     }
 
     #[test]

@@ -147,6 +147,9 @@ export const api = {
   async setJournalBackfillStart(backfillStart: string): Promise<void> {
     if (isTauri) await native("set_journal_backfill_start", { backfillStart });
   },
+  async setJournalCommission(commissionPerContractSide: number): Promise<void> {
+    if (isTauri) await native("set_journal_commission", { commissionPerContractSide });
+  },
   async syncJournal(scope?: JournalScope): Promise<JournalSyncStatus> {
     return isTauri ? native("sync_journal", { scope }) : { state: "synced", pendingEvents: 0, lastSyncedAt: new Date().toISOString(), message: "Browser demo data" };
   },

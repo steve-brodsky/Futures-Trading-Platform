@@ -591,6 +591,7 @@ async fn start_brokerage_stream(
             account_id.clone(),
             channel.to_string(),
             environment.clone(),
+            state.db_path.clone(),
         )));
     }
     Ok(())
@@ -611,12 +612,21 @@ async fn run_brokerage_stream(
     account_id: String,
     channel: String,
     environment: TradingEnvironment,
+    db_path: PathBuf,
 ) {
     let path = if channel == "positions" {
         format!("/brokerage/stream/accounts/{account_id}/{channel}?changes=true")
     } else {
         format!("/brokerage/stream/accounts/{account_id}/{channel}")
     };
+    if channel == "orders" && journal::auth_status(&db_path).is_ok_and(|status| status.configured) {
+        if let Ok(status) = journal::sync_cloud(&db_path).await {
+            let _ = app.emit(
+                "journal-updated",
+                serde_json::json!({"reason":"stream-start-cloud-sync","status":status}),
+            );
+        }
+    }
     let mut attempt = 0u32;
     loop {
         let connecting_state = if attempt == 0 {
@@ -672,10 +682,23 @@ async fn run_brokerage_stream(
                                 } else {
                                     let orders: Vec<_> = order_records
                                         .values()
-                                        .map(tradestation::order_from_value)
+                                        .map(|value| {
+                                            let mut order = tradestation::order_from_value(value);
+                                            order.account_id = Some(account_id.clone());
+                                            order
+                                        })
                                         .collect();
                                     api.apply_orders_snapshot(&environment, &account_id, &orders)
                                         .await;
+                                    let _ = capture_journal_orders(
+                                        &app,
+                                        &api,
+                                        &db_path,
+                                        &environment,
+                                        &orders,
+                                        "broker-stream",
+                                    )
+                                    .await;
                                     let _ = app.emit(
                                         "orders-snapshot",
                                         OrdersSnapshotEvent {
@@ -736,12 +759,22 @@ async fn run_brokerage_stream(
                                 .or_insert_with(|| Value::Object(Default::default()));
                             merge_stream_record(record, &data);
                             if snapshot_complete {
-                                let order = tradestation::order_from_value(record);
+                                let mut order = tradestation::order_from_value(record);
+                                order.account_id = Some(account_id.clone());
                                 if order.symbol.is_empty() {
                                     continue;
                                 }
                                 api.apply_order_update(&environment, &account_id, &order)
                                     .await;
+                                let _ = capture_journal_orders(
+                                    &app,
+                                    &api,
+                                    &db_path,
+                                    &environment,
+                                    std::slice::from_ref(&order),
+                                    "broker-stream",
+                                )
+                                .await;
                                 if order.status == "Filled" {
                                     tracing::debug!(
                                         account = %account_id.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>(),
@@ -783,11 +816,24 @@ async fn run_brokerage_stream(
                     } else if channel == "orders" && !order_records.is_empty() {
                         let orders: Vec<_> = order_records
                             .values()
-                            .map(tradestation::order_from_value)
+                            .map(|value| {
+                                let mut order = tradestation::order_from_value(value);
+                                order.account_id = Some(account_id.clone());
+                                order
+                            })
                             .filter(|order| !order.symbol.is_empty())
                             .collect();
                         api.apply_orders_snapshot(&environment, &account_id, &orders)
                             .await;
+                        let _ = capture_journal_orders(
+                            &app,
+                            &api,
+                            &db_path,
+                            &environment,
+                            &orders,
+                            "broker-stream",
+                        )
+                        .await;
                         let _ = app.emit(
                             "orders-snapshot",
                             OrdersSnapshotEvent {
@@ -915,9 +961,24 @@ async fn get_positions(
 #[tauri::command(rename_all = "camelCase")]
 async fn get_orders(
     account_id: String,
+    app: tauri::AppHandle,
     state: State<'_, NativeState>,
 ) -> Result<Vec<OrderUpdate>, AppError> {
-    state.api.orders(&account_id).await
+    let environment = state.api.environment().await;
+    let mut orders = state.api.orders(&account_id).await?;
+    for order in &mut orders {
+        order.account_id = Some(account_id.clone());
+    }
+    capture_journal_orders(
+        &app,
+        &state.api,
+        &state.db_path,
+        &environment,
+        &orders,
+        "broker-stream",
+    )
+    .await?;
+    Ok(orders)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -973,6 +1034,7 @@ async fn place_order(
                 "journal-updated",
                 serde_json::json!({"reason":"entry-intent"}),
             );
+            schedule_journal_flush(app.clone(), state.db_path.clone());
             Ok(update)
         }
         Err(error) => {
@@ -981,6 +1043,7 @@ async fn place_order(
                 "journal-updated",
                 serde_json::json!({"reason":"entry-rejected"}),
             );
+            schedule_journal_flush(app, state.db_path.clone());
             Err(error)
         }
     }
@@ -1057,6 +1120,7 @@ async fn replace_order(
                 "journal-updated",
                 serde_json::json!({"reason":"protective-order-move-failed"}),
             );
+            schedule_journal_flush(app, state.db_path.clone());
             Err(error)
         }
     }
@@ -1150,6 +1214,7 @@ async fn cancel_order(
                 "journal-updated",
                 serde_json::json!({"reason":"order-cancel-failed"}),
             );
+            schedule_journal_flush(app, state.db_path.clone());
             Err(error)
         }
     }
@@ -1175,6 +1240,7 @@ fn schedule_journal_flush(app: tauri::AppHandle, path: PathBuf) {
                 tokio::time::sleep(std::time::Duration::from_secs(1u64 << attempt)).await;
             }
             match journal::sync_cloud(&path).await {
+                Ok(status) if status.state == "syncing" => continue,
                 Ok(status) => {
                     let _ = app.emit(
                         "journal-updated",
@@ -1225,12 +1291,29 @@ fn set_journal_backfill_start(
     journal::set_backfill(&state.db_path, &backfill_start)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn set_journal_commission(
+    commission_per_contract_side: f64,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    journal::set_commission_per_contract_side(&state.db_path, commission_per_contract_side)?;
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"commission-updated"}),
+    );
+    schedule_journal_flush(app, state.db_path.clone());
+    Ok(())
+}
+
 async fn ingest_orders_with_metadata(
-    state: &NativeState,
+    api: &TradeStation,
+    db_path: &std::path::Path,
     environment: &TradingEnvironment,
     orders: &[OrderUpdate],
     source: &str,
-) -> Result<usize, AppError> {
+) -> Result<journal::JournalIngestResult, AppError> {
+    journal::repair_misclassified_close_campaigns(db_path, environment, orders)?;
     let symbols: std::collections::HashSet<_> = orders
         .iter()
         .map(|order| order.symbol.clone())
@@ -1238,11 +1321,119 @@ async fn ingest_orders_with_metadata(
         .collect();
     let mut point_values = HashMap::new();
     for symbol in symbols {
-        if let Ok(meta) = state.api.symbol_details(&symbol).await {
+        if let Ok(meta) = api.symbol_details(&symbol).await {
             point_values.insert(symbol, meta.point_value);
         }
     }
-    journal::ingest_orders(&state.db_path, environment, orders, source, &point_values)
+    journal::ingest_orders(db_path, environment, orders, source, &point_values)
+}
+
+async fn reconcile_unmatched_closes(
+    api: &TradeStation,
+    db_path: &std::path::Path,
+    environment: &TradingEnvironment,
+    unmatched: &[OrderUpdate],
+) -> Result<(), AppError> {
+    if unmatched.is_empty() {
+        return Ok(());
+    }
+
+    if journal::auth_status(db_path).is_ok_and(|status| status.configured) {
+        let _ = journal::sync_cloud(db_path).await;
+    }
+
+    let mut needs_history: HashMap<String, Vec<OrderUpdate>> = HashMap::new();
+    for order in unmatched {
+        let account_id = order.account_id.clone().unwrap_or_default();
+        if account_id.is_empty() {
+            continue;
+        }
+        if journal::has_active_trade(db_path, environment, &account_id, &order.symbol)? {
+            let _ = ingest_orders_with_metadata(
+                api,
+                db_path,
+                environment,
+                std::slice::from_ref(order),
+                "broker-stream",
+            )
+            .await?;
+        } else {
+            needs_history
+                .entry(account_id)
+                .or_default()
+                .push(order.clone());
+        }
+    }
+
+    let configured_start = journal::auth_status(db_path)
+        .ok()
+        .and_then(|status| status.backfill_start);
+    for (account_id, closing_orders) in needs_history {
+        let since = configured_start.clone().unwrap_or_else(|| {
+            (Utc::now() - chrono::Duration::days(90))
+                .format("%Y-%m-%d")
+                .to_string()
+        });
+        let mut token = None;
+        let mut historical_orders = Vec::new();
+        loop {
+            let page = api
+                .historical_orders(&account_id, &since, token.as_deref())
+                .await?;
+            let mut orders = page.orders;
+            for order in &mut orders {
+                order.account_id = Some(account_id.clone());
+            }
+            historical_orders.extend(orders);
+            token = page.next_token;
+            if token.is_none() {
+                break;
+            }
+        }
+        let _ = ingest_orders_with_metadata(
+            api,
+            db_path,
+            environment,
+            &historical_orders,
+            "broker-history",
+        )
+        .await?;
+        let _ = ingest_orders_with_metadata(
+            api,
+            db_path,
+            environment,
+            &closing_orders,
+            "broker-stream",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn capture_journal_orders(
+    app: &tauri::AppHandle,
+    api: &TradeStation,
+    db_path: &std::path::Path,
+    environment: &TradingEnvironment,
+    orders: &[OrderUpdate],
+    source: &str,
+) -> Result<(), AppError> {
+    if orders.is_empty() {
+        return Ok(());
+    }
+    let result = ingest_orders_with_metadata(api, db_path, environment, orders, source).await?;
+    let needs_reconciliation = !result.unmatched_closes.is_empty();
+    if needs_reconciliation {
+        reconcile_unmatched_closes(api, db_path, environment, &result.unmatched_closes).await?;
+    }
+    if result.fills > 0 || needs_reconciliation || source == "broker-stream" {
+        let _ = app.emit(
+            "journal-updated",
+            serde_json::json!({"reason": if needs_reconciliation { "close-reconciled" } else if result.fills > 0 { "broker-fill" } else { "broker-order-observed" }}),
+        );
+        schedule_journal_flush(app.clone(), db_path.to_path_buf());
+    }
+    Ok(())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1253,14 +1444,15 @@ async fn ingest_journal_orders(
     app: tauri::AppHandle,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
-    if ingest_orders_with_metadata(&state, &environment, &orders, &source).await? > 0 {
-        let _ = app.emit(
-            "journal-updated",
-            serde_json::json!({"reason":"broker-fill"}),
-        );
-        schedule_journal_flush(app, state.db_path.clone());
-    }
-    Ok(())
+    capture_journal_orders(
+        &app,
+        &state.api,
+        &state.db_path,
+        &environment,
+        &orders,
+        &source,
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1288,18 +1480,29 @@ async fn sync_journal(
             &backfill_start,
         )?;
         let mut token = None;
+        let mut historical_orders = Vec::new();
         loop {
-            let page = state
+            let mut page = state
                 .api
                 .historical_orders(&account.id, &since, token.as_deref())
                 .await?;
-            ingest_orders_with_metadata(&state, &environment, &page.orders, "broker-history")
-                .await?;
+            for order in &mut page.orders {
+                order.account_id = Some(account.id.clone());
+            }
+            historical_orders.extend(page.orders);
             token = page.next_token;
             if token.is_none() {
                 break;
             }
         }
+        ingest_orders_with_metadata(
+            &state.api,
+            &state.db_path,
+            &environment,
+            &historical_orders,
+            "broker-history",
+        )
+        .await?;
         journal::set_reconciliation_checkpoint(&state.db_path, &environment, &account.id)?;
     }
     let result = journal::sync_cloud(&state.db_path).await?;
@@ -1354,7 +1557,7 @@ async fn update_journal_annotation(
 ) -> Result<(), AppError> {
     journal::update_annotation(&state.db_path, &trade_id, &notes, &tags)?;
     if journal::auth_status(&state.db_path)?.configured {
-        let _ = journal::sync_cloud(&state.db_path).await;
+        schedule_journal_flush(app.clone(), state.db_path.clone());
     }
     let _ = app.emit(
         "journal-updated",
@@ -2092,6 +2295,7 @@ pub fn run() {
             configure_journal,
             disconnect_journal,
             set_journal_backfill_start,
+            set_journal_commission,
             sync_journal,
             get_journal_scopes,
             get_journal_month,

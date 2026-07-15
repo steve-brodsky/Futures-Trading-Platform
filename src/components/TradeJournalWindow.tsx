@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../lib/bridge";
-import { journalCalendarDates } from "../lib/journal";
+import { journalCalendarDates, journalTimelineEvents } from "../lib/journal";
 import type { JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSyncStatus, JournalTrade } from "../types";
 
 const monthLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
@@ -128,6 +128,7 @@ export function TradeJournalWindow() {
     if (!api.isNative) return;
     let cleanup: (() => void) | undefined;
     listen("journal-updated", () => {
+      void loadScopes().catch(() => undefined);
       if (scope) api.journalMonth(scope, cursor.year, cursor.month).then(setMonth).catch(() => undefined);
       if (scope && view.kind === "day") api.journalDay(scope, view.date).then(setDay).catch(() => undefined);
     }).then((unlisten) => { cleanup = unlisten; });
@@ -245,6 +246,7 @@ function TradeDrawer({ trade, onClose, onSaved }: { trade: JournalTrade; onClose
   const [notes, setNotes] = useState(trade.notes);
   const [tags, setTags] = useState(trade.tags.join(", "));
   const [saving, setSaving] = useState(false);
+  const timelineEvents = useMemo(() => journalTimelineEvents(trade.events ?? []), [trade.events]);
   useEffect(() => { setNotes(trade.notes); setTags(trade.tags.join(", ")); }, [trade.id, trade.notes, trade.tags]);
 
   async function save() {
@@ -258,7 +260,7 @@ function TradeDrawer({ trade, onClose, onSaved }: { trade: JournalTrade; onClose
     <header><div><span>{trade.status} campaign</span><h2>{trade.symbol} <em className={trade.direction.toLowerCase()}>{trade.direction}</em></h2><p>{journalTime.format(new Date(trade.openedAt))}{trade.closedAt ? ` – ${journalTime.format(new Date(trade.closedAt))} ET` : " – Open"}</p></div><button aria-label="Close trade details" onClick={onClose}><X size={18} /></button></header>
     <dl className="journal-drawer-metrics"><div><dt>Net P&L</dt><dd className={metricClass(trade.netPnl)}>{trade.status === "open" ? "Open" : money(trade.netPnl)}</dd></div><div><dt>R multiple</dt><dd className={metricClass(trade.rMultiple)}>{multiple(trade.rMultiple)}</dd></div><div><dt>Initial risk</dt><dd>{money(trade.deployedRisk)}</dd></div><div><dt>Risk source</dt><dd className={`provenance ${trade.riskProvenance}`}>{trade.riskProvenance}</dd></div></dl>
     <section className="journal-drawer-section"><span>Execution plan</span><dl className="journal-plan-grid"><div><dt>Entry</dt><dd>{trade.entryQuantity} @ {price(trade.averageEntry)}</dd></div><div><dt>Exit</dt><dd>{trade.exitQuantity || "—"} @ {price(trade.averageExit)}</dd></div><div><dt>Original stop</dt><dd>{price(trade.originalStop)}</dd></div><div><dt>Original target</dt><dd>{price(trade.originalTarget)}</dd></div><div><dt>Gross P&L</dt><dd>{money(trade.grossPnl)}</dd></div><div><dt>Fees</dt><dd>{money(-trade.fees)}</dd></div></dl></section>
-    <section className="journal-drawer-section"><span>Order and risk history</span><div className="journal-timeline">{(trade.events ?? []).map((event) => <article key={event.id}><i className={`${event.status ?? "confirmed"}`} /><div><header><strong>{event.eventType.replaceAll("-", " ")}</strong><time>{journalTime.format(new Date(event.occurredAt))} ET</time></header><p>{event.oldPrice != null || event.newPrice != null ? `${price(event.oldPrice)} → ${price(event.newPrice)}` : event.price != null ? `${event.quantity ?? ""} @ ${price(event.price)}` : event.note ?? event.source}</p><small>{event.source} · {event.status ?? "confirmed"}</small></div></article>)}{!trade.events?.length && <p className="journal-no-events">No detailed events are available for this imported campaign.</p>}</div></section>
+    <section className="journal-drawer-section"><span>Order and risk history</span><div className="journal-timeline">{timelineEvents.map((event) => <article key={event.id}><i className={`${event.status ?? "confirmed"}`} /><div><header><strong>{event.eventType.replaceAll("-", " ")}</strong><time>{journalTime.format(new Date(event.occurredAt))} ET</time></header><p>{event.oldPrice != null || event.newPrice != null ? `${price(event.oldPrice)} → ${price(event.newPrice)}` : event.price != null ? `${event.quantity ?? ""} @ ${price(event.price)}` : event.note ?? event.source}</p><small>{event.source} · {event.status ?? "confirmed"}</small></div></article>)}{!timelineEvents.length && <p className="journal-no-events">No detailed events are available for this imported campaign.</p>}</div></section>
     <section className="journal-drawer-section journal-notes"><span>Review notes</span><label><textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="What happened in this trade?" rows={5} /></label><label><Tag size={14} /><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="setup, session, mistake" /></label><button onClick={save} disabled={saving || !api.isNative}><Save size={15} />{saving ? "Saving…" : api.isNative ? "Save notes" : "Demo is read-only"}</button></section>
   </aside></div>;
 }

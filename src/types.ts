@@ -283,6 +283,9 @@ export interface OrderTicketSettings {
 export interface WorkspaceSettings {
   chartLabels: ChartLabelSettings;
   orderTicket: OrderTicketSettings;
+  journal: {
+    commissionPerContractSide: number;
+  };
 }
 
 export interface WorkspaceState {
@@ -340,6 +343,7 @@ export type JournalEventType =
   | "target-move"
   | "close-intent"
   | "cancel-intent"
+  | "unmatched-close"
   | "order-rejected";
 
 export interface JournalScope {

@@ -159,6 +159,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   }));
   const savedChartLabels = value.settings?.chartLabels;
   const savedOrderTicket = value.settings?.orderTicket;
+  const savedJournal = value.settings?.journal;
   const watchlist = normalizeWatchlist(
     Array.isArray(value.watchlist) ? value.watchlist : fallback.watchlist,
     quoteSubscriptionSymbols({ tabs, watchlist: [] }),
@@ -208,6 +209,11 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
         riskAmount: typeof savedOrderTicket?.riskAmount === "number" && Number.isFinite(savedOrderTicket.riskAmount) && savedOrderTicket.riskAmount > 0
           ? savedOrderTicket.riskAmount
           : undefined,
+      },
+      journal: {
+        commissionPerContractSide: typeof savedJournal?.commissionPerContractSide === "number" && Number.isFinite(savedJournal.commissionPerContractSide)
+          ? Math.max(0, Math.min(100, savedJournal.commissionPerContractSide))
+          : fallback.settings.journal.commissionPerContractSide,
       },
     },
   };
@@ -300,6 +306,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && current.settings.orderTicket.sizingMode === incoming.settings.orderTicket.sizingMode
     && current.settings.orderTicket.riskSizingPolicy === incoming.settings.orderTicket.riskSizingPolicy
     && current.settings.orderTicket.riskAmount === incoming.settings.orderTicket.riskAmount
+    && current.settings.journal.commissionPerContractSide === incoming.settings.journal.commissionPerContractSide
     ? current.settings
     : incoming.settings;
 

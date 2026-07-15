@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { daySummary, demoJournalTrades, journalCalendarDates, journalDate, journalMetrics, monthSummary } from "./journal";
-import type { JournalScope, JournalTrade } from "../types";
+import { daySummary, demoJournalTrades, journalCalendarDates, journalDate, journalMetrics, journalTimelineEvents, monthSummary } from "./journal";
+import type { JournalEvent, JournalScope, JournalTrade } from "../types";
 
 const scope: JournalScope = { environment: "sim", accountId: "a", accountLabel: "SIM ••01" };
 const trades: JournalTrade[] = [
@@ -41,5 +41,23 @@ describe("journal analytics", () => {
     const fixtureScope: JournalScope = { environment: "sim", accountId: "SIM-DEMO-4821", accountLabel: "SIM ··4821" };
     const now = new Date();
     expect(monthSummary(fixtureScope, now.getFullYear(), now.getMonth() + 1, fixtureTrades).metrics.trades).toBe(2);
+  });
+
+  it("shows one logical adjustment for request, confirmation, and broker echo events", () => {
+    const events: JournalEvent[] = [
+      { id: "broker", brokerOrderId: "stop-1", eventType: "stop-move", occurredAt: "2026-07-16T02:07:20Z", source: "broker-stream", status: "confirmed", oldPrice: 7612.5, newPrice: 7610.75 },
+      { id: "fill", eventType: "fill", occurredAt: "2026-07-16T02:07:30Z", source: "broker-stream", status: "confirmed", quantity: 1, price: 7617.75 },
+      { id: "requested", brokerOrderId: "stop-1", eventType: "stop-move", occurredAt: "2026-07-16T02:08:00Z", source: "northstar", status: "requested", oldPrice: 7612.5, newPrice: 7610.75 },
+      { id: "confirmed", brokerOrderId: "stop-1", eventType: "stop-move", occurredAt: "2026-07-16T02:08:01Z", source: "northstar", status: "confirmed", oldPrice: 7612.5, newPrice: 7610.75 },
+    ];
+    expect(journalTimelineEvents(events).map((event) => event.id)).toEqual(["fill", "confirmed"]);
+  });
+
+  it("keeps identical price transitions when they happen in separate adjustment windows", () => {
+    const events: JournalEvent[] = [
+      { id: "first", brokerOrderId: "target-1", eventType: "target-move", occurredAt: "2026-07-16T02:00:00Z", source: "northstar", status: "confirmed", oldPrice: 7629, newPrice: 7627 },
+      { id: "later", brokerOrderId: "target-1", eventType: "target-move", occurredAt: "2026-07-16T02:10:00Z", source: "northstar", status: "confirmed", oldPrice: 7629, newPrice: 7627 },
+    ];
+    expect(journalTimelineEvents(events)).toHaveLength(2);
   });
 });
