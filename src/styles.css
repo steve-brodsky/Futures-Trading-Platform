@@ -219,6 +219,18 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .field input, .order-ticket select { width: 100%; height: 36px; border: 1px solid #2a3442; border-radius: 5px; color: #dce2ea; background: #11161d; padding: 0 10px; font: 500 11px DM Mono, monospace; }
 .field input.invalid { border-color: var(--red); }
 .field.compact { margin: 11px 0; }
+.sizing-field { gap: 7px; }
+.sizing-mode { height: 28px; display: grid; grid-template-columns: 1fr 1fr; padding: 2px; border: 1px solid #2a3442; border-radius: 5px; background: #10151c; }
+.sizing-mode button { min-width: 0; border: 0; border-radius: 3px; color: #758294; background: transparent; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, background .15s, box-shadow .15s; }
+.sizing-mode button:hover { color: #b9c3cf; }
+.sizing-mode button.active { color: var(--cyan); background: rgba(55,213,232,.09); box-shadow: inset 0 0 0 1px rgba(55,213,232,.22); }
+.sizing-mode button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.risk-sizing-control { min-width: 0; display: grid; grid-template-columns: minmax(92px, 1fr) auto; align-items: center; gap: 9px; }
+.risk-sizing-control label { position: relative; min-width: 0; }
+.risk-sizing-control label > span { position: absolute; z-index: 1; top: 50%; left: 10px; color: #738195; font: 600 10px DM Mono, monospace; transform: translateY(-50%); pointer-events: none; }
+.risk-sizing-control input { padding-left: 23px; }
+.risk-sizing-control output { max-width: 122px; color: #8f9bab; font: 550 8px/1.35 DM Mono, monospace; text-align: right; }
+.risk-sizing-control output.insufficient { color: var(--amber); }
 .take-profit-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
 .stop-loss-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
 .stop-loss-control button { height: 36px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 5px; color: #8d98a8; background: #151b23; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }

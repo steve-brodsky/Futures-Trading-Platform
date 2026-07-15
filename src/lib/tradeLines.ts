@@ -114,7 +114,7 @@ export function buildProjectedTradeLines(projection?: OrderProjection): TradeLin
   if (!projection) return [];
   const lines: TradeLineModel[] = [];
   const side = projection.side ?? "Buy";
-  const quantity = projection.quantity != null && Number.isFinite(projection.quantity) && projection.quantity > 0
+  const quantity = projection.quantity != null && Number.isFinite(projection.quantity) && projection.quantity >= 0
     ? Math.abs(projection.quantity)
     : 1;
   if (projection.takeProfit != null && Number.isFinite(projection.takeProfit) && projection.takeProfit > 0) {

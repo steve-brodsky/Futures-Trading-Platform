@@ -17,7 +17,7 @@ import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
-import { calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
+import { calculateContractsForRisk, calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { quoteDayChangePercent } from "./lib/quotes";
@@ -57,7 +57,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts" } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -1913,7 +1913,7 @@ export default function App() {
       {!isDetached && <aside className={`right-panel ${workspace.rightPanelOpen ? "open" : "collapsed"}`} aria-labelledby="order-panel-title">
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>
         {workspace.rightPanelOpen && <div id="order-panel-content" className="right-panel-content">
-          <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />
+          <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />
         </div>}
       </aside>}
 
@@ -2165,11 +2165,12 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   </section>;
 }
 
-function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, settings, contracts, tradeContract, contractStatus, contractLookupError, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, resetEpoch, onTradeContractChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; bars: Bar[]; timeframe: Timeframe; settings: OrderTicketSettings; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; resetEpoch: number; onTradeContractChange: (symbol?: string) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {
+function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, settings, contracts, tradeContract, contractStatus, contractLookupError, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, resetEpoch, onTradeContractChange, onSettingsChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; bars: Bar[]; timeframe: Timeframe; settings: OrderTicketSettings; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; resetEpoch: number; onTradeContractChange: (symbol?: string) => void; onSettingsChange: (patch: Partial<OrderTicketSettings>) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {
   const symbol = tradeSymbol ?? chartSymbol;
   const continuous = isContinuousFuture(chartSymbol);
   const [side, setSide] = useState<"Buy" | "Sell">("Buy");
   const [quantity, setQuantity] = useState(1);
+  const [riskInput, setRiskInput] = useState(settings.riskAmount == null ? "" : String(settings.riskAmount));
   const [duration, setDuration] = useState<"DAY" | "GTC">("DAY");
   const [takeProfit, setTakeProfit] = useState("");
   const [stopLoss, setStopLoss] = useState("");
@@ -2179,6 +2180,7 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
   const rSelectorRef = useRef<HTMLDivElement>(null);
   const rMenuRef = useRef<HTMLDivElement>(null);
   const rButtonRef = useRef<HTMLButtonElement>(null);
+  const riskInputFocusedRef = useRef(false);
   const selectedR = orderProjection?.rMultiple;
 
   const projectionPrice = (value: string) => {
@@ -2186,7 +2188,21 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
     const price = Number(value);
     return Number.isFinite(price) && price > 0 ? price : undefined;
   };
-  const publishProjection = (nextTakeProfit: string, nextStopLoss: string, nextSide = side, nextQuantity = quantity, nextR: OrderRMultiple | null = selectedR ?? null) => onProjectionChange({
+  const parsedRiskAmount = riskInput.trim() === "" ? undefined : Number(riskInput);
+  const riskAmount = parsedRiskAmount != null && Number.isFinite(parsedRiskAmount) && parsedRiskAmount > 0 ? parsedRiskAmount : undefined;
+  const takeProfitPrice = Number(takeProfit);
+  const stopLossPrice = Number(stopLoss);
+  const entryPrice = side === "Buy" ? quote.ask : quote.bid;
+  const tickValue = symbol.minMove * symbol.pointValue;
+  function resolvedQuantity(nextSide = side, nextStopLoss = stopLoss, mode = settings.sizingMode, nextRiskAmount = riskAmount) {
+    if (mode === "contracts") return quantity;
+    const nextEntryPrice = nextSide === "Buy" ? quote.ask : quote.bid;
+    return calculateContractsForRisk(nextRiskAmount, nextEntryPrice, Number(nextStopLoss), nextSide, symbol.minMove, tickValue) ?? 0;
+  }
+  const calculatedRiskQuantity = calculateContractsForRisk(riskAmount, entryPrice, stopLossPrice, side, symbol.minMove, tickValue);
+  const riskQuantity = calculatedRiskQuantity ?? 0;
+  const effectiveQuantity = settings.sizingMode === "risk" ? riskQuantity : quantity;
+  const publishProjection = (nextTakeProfit: string, nextStopLoss: string, nextSide = side, nextQuantity = resolvedQuantity(nextSide, nextStopLoss), nextR: OrderRMultiple | null = selectedR ?? null) => onProjectionChange({
     takeProfit: projectionPrice(nextTakeProfit),
     stopLoss: projectionPrice(nextStopLoss),
     side: nextSide,
@@ -2215,6 +2231,11 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
   }, [symbol.symbol, side, resetEpoch]);
 
   useEffect(() => {
+    if (riskInputFocusedRef.current) return;
+    setRiskInput(settings.riskAmount == null ? "" : String(settings.riskAmount));
+  }, [settings.riskAmount]);
+
+  useEffect(() => {
     if (orderProjection?.takeProfit != null && orderProjection.takeProfit !== projectionPrice(takeProfit)) {
       setTakeProfit(String(orderProjection.takeProfit));
     }
@@ -2223,9 +2244,17 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
     }
   }, [orderProjection?.takeProfit, orderProjection?.stopLoss]);
 
-  const takeProfitPrice = Number(takeProfit);
-  const stopLossPrice = Number(stopLoss);
-  const entryPrice = side === "Buy" ? quote.ask : quote.bid;
+  useEffect(() => {
+    if (!orderProjection || orderProjection.quantity === effectiveQuantity) return;
+    onProjectionChange({
+      takeProfit: orderProjection.takeProfit,
+      stopLoss: orderProjection.stopLoss,
+      side: orderProjection.side,
+      quantity: effectiveQuantity,
+      rMultiple: orderProjection.rMultiple,
+    });
+  }, [effectiveQuantity, orderProjection?.quantity]);
+
   const swingStopPrice = calculateSwingStop({
     bars,
     side,
@@ -2287,7 +2316,7 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
     const nextTakeProfit = String(target);
     setRMenuOpen(false);
     setTakeProfit(nextTakeProfit);
-    publishProjection(nextTakeProfit, stopLoss, side, quantity, rMultiple);
+    publishProjection(nextTakeProfit, stopLoss, side, effectiveQuantity, rMultiple);
   };
 
   const handleRMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -2316,25 +2345,55 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
   };
 
   function draft(): OrderDraft {
-    return { accountId: account?.id ?? "", symbol: tradeSymbol?.symbol ?? "", side, type: "Market", quantity, duration, takeProfit: takeProfitPrice, stopLoss: stopLossPrice };
+    return { accountId: account?.id ?? "", symbol: tradeSymbol?.symbol ?? "", side, type: "Market", quantity: effectiveQuantity, duration, takeProfit: takeProfitPrice, stopLoss: stopLossPrice };
   }
 
   const marketUnavailable = !tradeSymbol || quote.last <= 0 || quote.halted || quote.delayed || !quote.receivedAt || Date.now() - quote.receivedAt > 5_000;
-  const tickValue = symbol.minMove * symbol.pointValue;
-  const estimatedRisk = stopLossValid ? estimateOrderRisk(entryPrice, stopLossPrice, side, quantity, symbol.minMove, tickValue) : null;
+  const perContractRisk = stopLossValid ? estimateOrderRisk(entryPrice, stopLossPrice, side, 1, symbol.minMove, tickValue) : null;
+  const estimatedRisk = stopLossValid && effectiveQuantity > 0 ? estimateOrderRisk(entryPrice, stopLossPrice, side, effectiveQuantity, symbol.minMove, tickValue) : null;
   const selectedEligibility = entryEligibility[side === "Buy" ? "long" : "short"];
-  const orderDisabled = busy || !account || Boolean(contractStatus) || marketUnavailable || !takeProfitValid || !stopLossValid || estimatedRisk == null || !selectedEligibility.allowed;
+  const orderDisabled = busy || !account || Boolean(contractStatus) || marketUnavailable || effectiveQuantity < 1 || !takeProfitValid || !stopLossValid || estimatedRisk == null || !selectedEligibility.allowed;
   const orderLabel = contractStatus ?? (marketUnavailable ? "Contract market data unavailable"
     : !selectedEligibility.allowed ? `${side === "Buy" ? "Long" : "Short"} entry blocked`
     : `${confirmOrders ? "Review" : "Place"} ${side} market order`);
   const manualMissing = tradeContract && !contracts.some((contract) => contract.symbol === tradeContract);
+  const riskSizingStatus = riskInput.trim() === "" ? "Enter risk amount"
+    : riskAmount == null ? "Enter a positive amount"
+    : !stopLoss.trim() ? "Set stop loss"
+    : !Number.isFinite(entryPrice) || entryPrice <= 0 ? "Waiting for live price"
+    : !stopLossValid ? `Stop must be ${side === "Buy" ? "below ask" : "above bid"}`
+    : calculatedRiskQuantity == null ? "Unable to calculate"
+    : calculatedRiskQuantity === 0 && perContractRisk != null ? `1 contract risks $${perContractRisk.toFixed(2)}`
+    : `${calculatedRiskQuantity} contract${calculatedRiskQuantity === 1 ? "" : "s"}`;
+  const selectSizingMode = (sizingMode: OrderTicketSettings["sizingMode"]) => {
+    if (sizingMode === settings.sizingMode) return;
+    onSettingsChange({ sizingMode });
+    publishProjection(takeProfit, stopLoss, side, resolvedQuantity(side, stopLoss, sizingMode));
+  };
+  const updateRiskAmount = (value: string) => {
+    setRiskInput(value);
+    const parsed = value.trim() === "" ? undefined : Number(value);
+    const nextRiskAmount = parsed != null && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+    onSettingsChange({ riskAmount: nextRiskAmount });
+    if (settings.sizingMode === "risk") {
+      publishProjection(takeProfit, stopLoss, side, resolvedQuantity(side, stopLoss, "risk", nextRiskAmount));
+    }
+  };
   return <div className="order-ticket">
     <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
     {continuous && <label className="trade-contract-field"><span><strong>Trade contract</strong><small>Chart {chartSymbol.symbol}</small></span><select aria-label="Trade contract" value={tradeContract ?? "__auto__"} onChange={(event) => onTradeContractChange(event.target.value === "__auto__" ? undefined : event.target.value)}><option value="__auto__">Auto · {chartSymbol.underlying ?? "Unavailable"}</option>{manualMissing && <option value={tradeContract}>{tradeContract} · Saved selection</option>}{contracts.map((contract) => <option key={contract.symbol} value={contract.symbol}>{contract.symbol} · {formatContractExpiration(contract.expiration)}</option>)}</select>{contractStatus && <small className="negative">{contractStatus}</small>}{!contractStatus && contractLookupError && <small className="negative">Contract list unavailable; the current selection is unchanged.</small>}</label>}
     <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => { setSide("Sell"); publishProjection(takeProfit, stopLoss, "Sell"); }}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => { setSide("Buy"); publishProjection(takeProfit, stopLoss, "Buy"); }}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
-    <label className="field compact"><span>Contracts</span><div className="stepper"><button onClick={() => { const next = Math.max(1, quantity - 1); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Minus size={14} /></button><input type="number" min="1" value={quantity} onChange={(event) => { const next = Math.max(1, Number(event.target.value)); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }} /><button onClick={() => { const next = quantity + 1; setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Plus size={14} /></button></div></label>
+    <div className="field compact sizing-field">
+      <div className="sizing-mode" role="group" aria-label="Position sizing method">
+        <button type="button" className={settings.sizingMode === "contracts" ? "active" : ""} aria-pressed={settings.sizingMode === "contracts"} onClick={() => selectSizingMode("contracts")}>Contracts</button>
+        <button type="button" className={settings.sizingMode === "risk" ? "active" : ""} aria-pressed={settings.sizingMode === "risk"} onClick={() => selectSizingMode("risk")}>Risk $</button>
+      </div>
+      {settings.sizingMode === "contracts"
+        ? <div className="stepper"><button type="button" aria-label="Decrease contracts" onClick={() => { const next = Math.max(1, quantity - 1); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Minus size={14} /></button><input aria-label="Contracts" type="number" min="1" step="1" value={quantity} onChange={(event) => { const next = Math.max(1, Math.floor(Number(event.target.value) || 1)); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }} /><button type="button" aria-label="Increase contracts" onClick={() => { const next = quantity + 1; setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Plus size={14} /></button></div>
+        : <div className="risk-sizing-control"><label><span>$</span><input aria-label="Risk amount in dollars" type="number" min="0.01" step="0.01" inputMode="decimal" placeholder="0.00" value={riskInput} onFocus={() => { riskInputFocusedRef.current = true; }} onBlur={() => { riskInputFocusedRef.current = false; setRiskInput(riskAmount == null ? "" : String(riskAmount)); }} onChange={(event) => updateRiskAmount(event.target.value)} /></label><output className={calculatedRiskQuantity === 0 ? "insufficient" : ""} aria-live="polite">{riskSizingStatus}</output></div>}
+    </div>
     <div className="section-label"><span>Exits</span><small>Server-side bracket</small></div>
-    <div className="field compact"><span>Take profit price</span><div className="take-profit-control"><input aria-label="Take profit price" className={takeProfitValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={takeProfit} onChange={(event) => { const value = event.target.value; setRMenuOpen(false); setTakeProfit(value); publishProjection(value, stopLoss, side, quantity, null); }} /><div ref={rSelectorRef} className="r-selector"><button ref={rButtonRef} type="button" className={selectedR == null ? "r-selector-button" : "r-selector-button active"} aria-label="Set take profit by risk multiple" aria-haspopup="menu" aria-expanded={rMenuOpen} aria-controls="r-multiple-menu" disabled={!rSelectorEnabled} onClick={() => setRMenuOpen((open) => !open)} onKeyDown={(event) => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setRMenuOpen(true); } }}>{selectedR == null ? "R" : `${selectedR}R`}<ChevronDown size={11} /></button>{rMenuOpen && <div ref={rMenuRef} id="r-multiple-menu" className="r-multiple-menu" role="menu" aria-label="Take profit risk multiple" onKeyDown={handleRMenuKeyDown}>{orderRMultiples.map((rMultiple) => <button key={rMultiple} type="button" role="menuitemradio" aria-checked={selectedR === rMultiple} className={selectedR === rMultiple ? "selected" : ""} onClick={() => selectRMultiple(rMultiple)}>{rMultiple}R</button>)}</div>}</div></div></div>
+    <div className="field compact"><span>Take profit price</span><div className="take-profit-control"><input aria-label="Take profit price" className={takeProfitValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={takeProfit} onChange={(event) => { const value = event.target.value; setRMenuOpen(false); setTakeProfit(value); publishProjection(value, stopLoss, side, effectiveQuantity, null); }} /><div ref={rSelectorRef} className="r-selector"><button ref={rButtonRef} type="button" className={selectedR == null ? "r-selector-button" : "r-selector-button active"} aria-label="Set take profit by risk multiple" aria-haspopup="menu" aria-expanded={rMenuOpen} aria-controls="r-multiple-menu" disabled={!rSelectorEnabled} onClick={() => setRMenuOpen((open) => !open)} onKeyDown={(event) => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setRMenuOpen(true); } }}>{selectedR == null ? "R" : `${selectedR}R`}<ChevronDown size={11} /></button>{rMenuOpen && <div ref={rMenuRef} id="r-multiple-menu" className="r-multiple-menu" role="menu" aria-label="Take profit risk multiple" onKeyDown={handleRMenuKeyDown}>{orderRMultiples.map((rMultiple) => <button key={rMultiple} type="button" role="menuitemradio" aria-checked={selectedR === rMultiple} className={selectedR === rMultiple ? "selected" : ""} onClick={() => selectRMultiple(rMultiple)}>{rMultiple}R</button>)}</div>}</div></div></div>
     <div className="field compact"><span>Stop loss price</span><div className="stop-loss-control"><input aria-label="Stop loss price" className={stopLossValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={stopLoss} onChange={(event) => updateProjectedStop(event.target.value)} /><button type="button" disabled={swingStopPrice == null} aria-label={`Set stop ${side === "Buy" ? "below the latest swing low" : "above the latest swing high"}`} title={swingStopPrice == null ? `No confirmed ${settings.swingStopPivotBars}-bar swing is available on the ${timeframe} chart` : `Set ${settings.swingStopOffsetTicks} tick${settings.swingStopOffsetTicks === 1 ? "" : "s"} beyond the latest confirmed ${timeframe} swing`} onClick={() => { if (swingStopPrice != null) updateProjectedStop(String(swingStopPrice)); }}>Swing</button></div></div>
     <div className="section-label"><span>Time in force</span></div>
     <select value={duration} onChange={(e) => setDuration(e.target.value as "DAY" | "GTC")}><option value="DAY">DAY</option><option value="GTC">GTC</option></select>

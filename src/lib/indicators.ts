@@ -67,9 +67,22 @@ export function calculateTakeProfitAtR(entryPrice: number, stopPrice: number, si
   return target > 0 && direction * (target - entryPrice) > 0 ? target : null;
 }
 
-export function estimateOrderRisk(entryPrice: number, stopPrice: number, side: "Buy" | "Sell", quantity: number, minMove: number, tickValue: number): number | null {
-  if (![entryPrice, stopPrice, quantity, minMove, tickValue].every(Number.isFinite) || entryPrice <= 0 || stopPrice <= 0 || quantity < 1 || minMove <= 0 || tickValue <= 0) return null;
+function orderRiskPerContract(entryPrice: number, stopPrice: number, side: "Buy" | "Sell", minMove: number, tickValue: number): number | null {
+  if (![entryPrice, stopPrice, minMove, tickValue].every(Number.isFinite) || entryPrice <= 0 || stopPrice <= 0 || minMove <= 0 || tickValue <= 0) return null;
   const priceRisk = side === "Buy" ? entryPrice - stopPrice : stopPrice - entryPrice;
   if (priceRisk <= 0) return null;
-  return Number(((priceRisk / minMove) * tickValue * quantity).toFixed(2));
+  return (priceRisk / minMove) * tickValue;
+}
+
+export function estimateOrderRisk(entryPrice: number, stopPrice: number, side: "Buy" | "Sell", quantity: number, minMove: number, tickValue: number): number | null {
+  if (!Number.isFinite(quantity) || quantity < 1) return null;
+  const perContractRisk = orderRiskPerContract(entryPrice, stopPrice, side, minMove, tickValue);
+  return perContractRisk == null ? null : Number((perContractRisk * quantity).toFixed(2));
+}
+
+export function calculateContractsForRisk(riskAmount: number | undefined, entryPrice: number, stopPrice: number, side: "Buy" | "Sell", minMove: number, tickValue: number): number | null {
+  if (riskAmount == null || !Number.isFinite(riskAmount) || riskAmount <= 0) return null;
+  const perContractRisk = orderRiskPerContract(entryPrice, stopPrice, side, minMove, tickValue);
+  if (perContractRisk == null || perContractRisk <= 0) return null;
+  return Math.min(Math.floor(riskAmount / perContractRisk), 0xffff_ffff);
 }

@@ -12,7 +12,7 @@ const fallback: WorkspaceState = {
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts" } },
 };
 
 describe("chart workspace", () => {
@@ -86,19 +86,36 @@ describe("chart workspace", () => {
 
   it("defaults, preserves, and clamps swing-stop settings", () => {
     const legacy = normalizeChartWorkspace({ ...fallback, settings: { chartLabels: fallback.settings.chartLabels } }, fallback);
-    expect(legacy.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 1 });
+    expect(legacy.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskAmount: undefined });
 
     const saved = normalizeChartWorkspace({
       ...fallback,
       settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 12.6 } },
     }, fallback);
-    expect(saved.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 13 });
+    expect(saved.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 13, sizingMode: "contracts", riskAmount: undefined });
 
     const clamped = normalizeChartWorkspace({
       ...fallback,
       settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 4, swingStopOffsetTicks: 500 } },
     }, fallback);
-    expect(clamped.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 100 });
+    expect(clamped.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 100, sizingMode: "contracts", riskAmount: undefined });
+  });
+
+  it("defaults, preserves, and validates risk-sizing preferences", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } } }, fallback);
+    expect(legacy.settings.orderTicket).toMatchObject({ sizingMode: "contracts", riskAmount: undefined });
+
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, orderTicket: { ...fallback.settings.orderTicket, sizingMode: "risk", riskAmount: 275.5 } },
+    }, fallback);
+    expect(saved.settings.orderTicket).toMatchObject({ sizingMode: "risk", riskAmount: 275.5 });
+
+    const invalid = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, orderTicket: { ...fallback.settings.orderTicket, sizingMode: "other", riskAmount: -5 } },
+    }, fallback);
+    expect(invalid.settings.orderTicket).toMatchObject({ sizingMode: "contracts", riskAmount: undefined });
   });
 
   it("accepts changed global settings from a workspace broadcast", () => {
@@ -118,10 +135,10 @@ describe("chart workspace", () => {
     const broadcast = normalizeChartWorkspace({
       ...current,
       revision: 2,
-      settings: { ...current.settings, orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 4 } },
+      settings: { ...current.settings, orderTicket: { ...current.settings.orderTicket, swingStopPivotBars: 3, swingStopOffsetTicks: 4, sizingMode: "risk", riskAmount: 150 } },
     }, fallback);
     const result = stabilizeChartWorkspace(current, broadcast);
-    expect(result.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 4 });
+    expect(result.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 4, sizingMode: "risk", riskAmount: 150 });
     expect(result.settings).not.toBe(current.settings);
   });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Bar } from "../types";
-import { calculateTakeProfitAtR, ema, estimateOrderRisk, nySessionVwap, roundToTick, sma, validateTick } from "./indicators";
+import { calculateContractsForRisk, calculateTakeProfitAtR, ema, estimateOrderRisk, nySessionVwap, roundToTick, sma, validateTick } from "./indicators";
 
 const sessionBar = (iso: string, high: number, low: number, close: number, volume: number): Bar => ({
   time: Date.parse(iso) / 1000, open: close, high, low, close, volume,
@@ -18,6 +18,23 @@ describe("indicator math", () => {
     expect(estimateOrderRisk(6250, 6247, "Buy", 2, 0.25, 1.25)).toBe(30);
     expect(estimateOrderRisk(6250, 6253, "Sell", 2, 0.25, 1.25)).toBe(30);
     expect(estimateOrderRisk(6250, 6251, "Buy", 1, 0.25, 1.25)).toBeNull();
+  });
+
+  it("sizes whole contracts without exceeding a risk budget", () => {
+    expect(calculateContractsForRisk(30, 6250, 6247, "Buy", 0.25, 1.25)).toBe(2);
+    expect(calculateContractsForRisk(29.99, 6250, 6247, "Buy", 0.25, 1.25)).toBe(1);
+    expect(calculateContractsForRisk(47, 6250, 6253, "Sell", 0.25, 1.25)).toBe(3);
+    expect(calculateContractsForRisk(14.99, 6250, 6253, "Sell", 0.25, 1.25)).toBe(0);
+    expect(calculateContractsForRisk(100, 100, 99.99, "Buy", 0.01, 1.004)).toBe(99);
+  });
+
+  it("rejects invalid risk-sizing inputs and stop direction", () => {
+    expect(calculateContractsForRisk(undefined, 6250, 6247, "Buy", 0.25, 1.25)).toBeNull();
+    expect(calculateContractsForRisk(0, 6250, 6247, "Buy", 0.25, 1.25)).toBeNull();
+    expect(calculateContractsForRisk(Number.NaN, 6250, 6247, "Buy", 0.25, 1.25)).toBeNull();
+    expect(calculateContractsForRisk(100, 6250, 6251, "Buy", 0.25, 1.25)).toBeNull();
+    expect(calculateContractsForRisk(100, 6250, 6247, "Buy", 0, 1.25)).toBeNull();
+    expect(calculateContractsForRisk(100, 6250, 6247, "Buy", 0.25, 0)).toBeNull();
   });
 
   it.each([

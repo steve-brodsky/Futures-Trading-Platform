@@ -275,6 +275,8 @@ export interface ChartLabelSettings {
 export interface OrderTicketSettings {
   swingStopPivotBars: 2 | 3;
   swingStopOffsetTicks: number;
+  sizingMode: "contracts" | "risk";
+  riskAmount?: number;
 }
 
 export interface WorkspaceSettings {

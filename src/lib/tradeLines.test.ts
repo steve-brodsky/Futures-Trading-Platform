@@ -195,6 +195,12 @@ describe("chart trade lines", () => {
     });
   });
 
+  it("keeps an unavailable risk-sized quantity at zero on projected exits", () => {
+    const lines = buildProjectedTradeLines({ takeProfit: 110, stopLoss: 95, side: "Buy", quantity: 0 });
+    expect(lines.map((line) => line.quantity)).toEqual([0, 0]);
+    expect(buildTradeLineMetrics(lines, 5, 100)).toEqual(new Map());
+  });
+
   it("formats every visibility mode and missing risk without negative zero", () => {
     const profit = { dollarAmount: 100, rMultiple: 2 };
     expect(formatTradeLineMetrics(profit, { showDollarAmount: true, showRMultiple: true })).toBe("+$100.00 · +2R");
