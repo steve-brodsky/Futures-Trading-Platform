@@ -202,6 +202,9 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
         sizingMode: savedOrderTicket?.sizingMode === "risk" || savedOrderTicket?.sizingMode === "contracts"
           ? savedOrderTicket.sizingMode
           : fallback.settings.orderTicket.sizingMode,
+        riskSizingPolicy: savedOrderTicket?.riskSizingPolicy === "minimum-one" || savedOrderTicket?.riskSizingPolicy === "strict"
+          ? savedOrderTicket.riskSizingPolicy
+          : fallback.settings.orderTicket.riskSizingPolicy,
         riskAmount: typeof savedOrderTicket?.riskAmount === "number" && Number.isFinite(savedOrderTicket.riskAmount) && savedOrderTicket.riskAmount > 0
           ? savedOrderTicket.riskAmount
           : undefined,
@@ -295,6 +298,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && current.settings.orderTicket.swingStopPivotBars === incoming.settings.orderTicket.swingStopPivotBars
     && current.settings.orderTicket.swingStopOffsetTicks === incoming.settings.orderTicket.swingStopOffsetTicks
     && current.settings.orderTicket.sizingMode === incoming.settings.orderTicket.sizingMode
+    && current.settings.orderTicket.riskSizingPolicy === incoming.settings.orderTicket.riskSizingPolicy
     && current.settings.orderTicket.riskAmount === incoming.settings.orderTicket.riskAmount
     ? current.settings
     : incoming.settings;

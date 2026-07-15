@@ -80,9 +80,9 @@ export function estimateOrderRisk(entryPrice: number, stopPrice: number, side: "
   return perContractRisk == null ? null : Number((perContractRisk * quantity).toFixed(2));
 }
 
-export function calculateContractsForRisk(riskAmount: number | undefined, entryPrice: number, stopPrice: number, side: "Buy" | "Sell", minMove: number, tickValue: number): number | null {
+export function calculateContractsForRisk(riskAmount: number | undefined, entryPrice: number, stopPrice: number, side: "Buy" | "Sell", minMove: number, tickValue: number, minimumQuantity: 0 | 1 = 0): number | null {
   if (riskAmount == null || !Number.isFinite(riskAmount) || riskAmount <= 0) return null;
   const perContractRisk = orderRiskPerContract(entryPrice, stopPrice, side, minMove, tickValue);
   if (perContractRisk == null || perContractRisk <= 0) return null;
-  return Math.min(Math.floor(riskAmount / perContractRisk), 0xffff_ffff);
+  return Math.min(Math.max(minimumQuantity, Math.floor(riskAmount / perContractRisk)), 0xffff_ffff);
 }

@@ -276,6 +276,7 @@ export interface OrderTicketSettings {
   swingStopPivotBars: 2 | 3;
   swingStopOffsetTicks: number;
   sizingMode: "contracts" | "risk";
+  riskSizingPolicy: "strict" | "minimum-one";
   riskAmount?: number;
 }
 

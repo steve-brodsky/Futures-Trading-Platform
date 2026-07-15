@@ -25,11 +25,13 @@ describe("indicator math", () => {
     expect(calculateContractsForRisk(29.99, 6250, 6247, "Buy", 0.25, 1.25)).toBe(1);
     expect(calculateContractsForRisk(47, 6250, 6253, "Sell", 0.25, 1.25)).toBe(3);
     expect(calculateContractsForRisk(14.99, 6250, 6253, "Sell", 0.25, 1.25)).toBe(0);
+    expect(calculateContractsForRisk(14.99, 6250, 6253, "Sell", 0.25, 1.25, 1)).toBe(1);
     expect(calculateContractsForRisk(100, 100, 99.99, "Buy", 0.01, 1.004)).toBe(99);
   });
 
   it("rejects invalid risk-sizing inputs and stop direction", () => {
     expect(calculateContractsForRisk(undefined, 6250, 6247, "Buy", 0.25, 1.25)).toBeNull();
+    expect(calculateContractsForRisk(undefined, 6250, 6247, "Buy", 0.25, 1.25, 1)).toBeNull();
     expect(calculateContractsForRisk(0, 6250, 6247, "Buy", 0.25, 1.25)).toBeNull();
     expect(calculateContractsForRisk(Number.NaN, 6250, 6247, "Buy", 0.25, 1.25)).toBeNull();
     expect(calculateContractsForRisk(100, 6250, 6251, "Buy", 0.25, 1.25)).toBeNull();

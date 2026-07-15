@@ -230,7 +230,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .risk-sizing-control label > span { position: absolute; z-index: 1; top: 50%; left: 10px; color: #738195; font: 600 10px DM Mono, monospace; transform: translateY(-50%); pointer-events: none; }
 .risk-sizing-control input { padding-left: 23px; }
 .risk-sizing-control output { max-width: 122px; color: #8f9bab; font: 550 8px/1.35 DM Mono, monospace; text-align: right; }
-.risk-sizing-control output.insufficient { color: var(--amber); }
+.risk-sizing-control output.insufficient, .risk-sizing-control output.over-risk { color: var(--amber); }
 .take-profit-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
 .stop-loss-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
 .stop-loss-control button { height: 36px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 5px; color: #8d98a8; background: #151b23; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
