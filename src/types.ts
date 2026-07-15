@@ -280,12 +280,22 @@ export interface BarSnapshotEvent {
   environment: TradingEnvironment;
   symbol: string;
   timeframe: Timeframe;
+  generation: number;
   bars: Bar[];
 }
 
 export interface BarUpdateEvent extends Omit<BarSnapshotEvent, "bars"> { bar: Bar; }
 export interface QuoteUpdateEvent { subscriptionId: string; environment: TradingEnvironment; quote: Quote; }
-export interface StreamStateEvent { subscriptionId: string; environment: TradingEnvironment; channel: "bars" | "quotes"; state: StreamConnectionState; message?: string; }
+export interface StreamStateEvent {
+  subscriptionId: string;
+  environment: TradingEnvironment;
+  channel: "bars" | "quotes";
+  state: StreamConnectionState;
+  message?: string;
+  symbol?: string;
+  timeframe?: Timeframe;
+  generation?: number;
+}
 export interface PositionsSnapshotEvent { accountId: string; positions: Position[]; }
 export interface PositionUpdateEvent { accountId: string; position: Position; }
 export interface OrdersSnapshotEvent { accountId: string; orders: OrderUpdate[]; }

@@ -207,6 +207,7 @@ pub struct BarSnapshotEvent {
     pub environment: TradingEnvironment,
     pub symbol: String,
     pub timeframe: String,
+    pub generation: u64,
     pub bars: Vec<Bar>,
 }
 
@@ -217,6 +218,7 @@ pub struct BarUpdateEvent {
     pub environment: TradingEnvironment,
     pub symbol: String,
     pub timeframe: String,
+    pub generation: u64,
     pub bar: Bar,
 }
 
@@ -236,6 +238,9 @@ pub struct StreamStateEvent {
     pub channel: String,
     pub state: String,
     pub message: Option<String>,
+    pub symbol: Option<String>,
+    pub timeframe: Option<String>,
+    pub generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

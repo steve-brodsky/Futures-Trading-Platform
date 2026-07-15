@@ -66,12 +66,41 @@ pub struct NativeState {
 struct BarStreamRegistry {
     streams: HashMap<String, SharedBarStream>,
     subscription_keys: HashMap<String, String>,
+    subscription_generations: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct BarSubscriber {
+    consumer: String,
+    generation: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SharedBarStreamStatus {
+    state: String,
+    message: Option<String>,
 }
 
 struct SharedBarStream {
-    subscribers: Arc<RwLock<HashMap<String, String>>>,
+    subscribers: Arc<RwLock<HashMap<String, BarSubscriber>>>,
+    status: Arc<RwLock<SharedBarStreamStatus>>,
     task: tauri::async_runtime::JoinHandle<()>,
-    generation: u64,
+    cleanup_generation: u64,
+}
+
+impl BarStreamRegistry {
+    fn accept_generation(&mut self, subscription_id: &str, generation: u64) -> bool {
+        if self
+            .subscription_generations
+            .get(subscription_id)
+            .is_some_and(|latest| generation < *latest)
+        {
+            return false;
+        }
+        self.subscription_generations
+            .insert(subscription_id.to_string(), generation);
+        true
+    }
 }
 
 fn bar_stream_key(environment: &TradingEnvironment, symbol: &str, timeframe: &str) -> String {
@@ -309,6 +338,7 @@ async fn start_bar_stream(
     symbol: String,
     timeframe: String,
     consumer: String,
+    generation: u64,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
     TradeStation::bar_stream_path(&symbol, &timeframe)?;
@@ -321,14 +351,17 @@ async fn start_bar_stream(
     let mut cleanup_keys = Vec::new();
     {
         let mut registry = registry_handle.lock().await;
+        if !registry.accept_generation(&subscription_id, generation) {
+            return Ok(());
+        }
         if let Some(previous_key) = registry.subscription_keys.get(&subscription_id).cloned() {
             if previous_key != key {
                 if let Some(previous) = registry.streams.get_mut(&previous_key) {
                     if let Ok(mut subscribers) = previous.subscribers.write() {
                         subscribers.remove(&subscription_id);
                     }
-                    previous.generation = previous.generation.wrapping_add(1);
-                    cleanup_keys.push((previous_key, previous.generation));
+                    previous.cleanup_generation = previous.cleanup_generation.wrapping_add(1);
+                    cleanup_keys.push((previous_key, previous.cleanup_generation));
                 }
             }
         }
@@ -337,26 +370,60 @@ async fn start_bar_stream(
             .insert(subscription_id.clone(), key.clone());
         if let Some(shared) = registry.streams.get_mut(&key) {
             if let Ok(mut subscribers) = shared.subscribers.write() {
-                subscribers.insert(subscription_id, consumer);
+                subscribers.insert(
+                    subscription_id.clone(),
+                    BarSubscriber {
+                        consumer,
+                        generation,
+                    },
+                );
             }
-            shared.generation = shared.generation.wrapping_add(1);
+            shared.cleanup_generation = shared.cleanup_generation.wrapping_add(1);
+            if let Ok(status) = shared.status.read() {
+                // Emit while holding the status read lock. A concurrent state
+                // transition must follow this replay, so it cannot be
+                // overwritten by a stale late-subscriber status.
+                emit_stream_state(
+                    &app,
+                    &subscription_id,
+                    &environment,
+                    "bars",
+                    &status.state,
+                    status.message.clone(),
+                    Some(&symbol),
+                    Some(&timeframe),
+                    Some(generation),
+                );
+            }
         } else {
-            let subscribers = Arc::new(RwLock::new(HashMap::from([(subscription_id, consumer)])));
+            let subscribers = Arc::new(RwLock::new(HashMap::from([(
+                subscription_id.clone(),
+                BarSubscriber {
+                    consumer,
+                    generation,
+                },
+            )])));
+            let status = Arc::new(RwLock::new(SharedBarStreamStatus {
+                state: "connecting".into(),
+                message: None,
+            }));
             let task = tauri::async_runtime::spawn(run_bar_stream(
-                app,
+                app.clone(),
                 state.api.clone(),
                 state.db_path.clone(),
                 subscribers.clone(),
-                environment,
-                symbol,
-                timeframe,
+                status.clone(),
+                environment.clone(),
+                symbol.clone(),
+                timeframe.clone(),
             ));
             registry.streams.insert(
                 key,
                 SharedBarStream {
                     subscribers,
+                    status,
                     task,
-                    generation: 0,
+                    cleanup_generation: 0,
                 },
             );
         }
@@ -370,11 +437,15 @@ async fn start_bar_stream(
 #[tauri::command(rename_all = "camelCase")]
 async fn stop_bar_stream(
     subscription_id: String,
+    generation: u64,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
     let registry_handle = state.bar_streams.clone();
     let cleanup = {
         let mut registry = registry_handle.lock().await;
+        if !registry.accept_generation(&subscription_id, generation) {
+            return Ok(());
+        }
         let Some(key) = registry.subscription_keys.remove(&subscription_id) else {
             return Ok(());
         };
@@ -382,8 +453,8 @@ async fn stop_bar_stream(
             if let Ok(mut subscribers) = shared.subscribers.write() {
                 subscribers.remove(&subscription_id);
             }
-            shared.generation = shared.generation.wrapping_add(1);
-            (key, shared.generation)
+            shared.cleanup_generation = shared.cleanup_generation.wrapping_add(1);
+            (key, shared.cleanup_generation)
         })
     };
     if let Some((key, generation)) = cleanup {
@@ -401,7 +472,7 @@ fn schedule_bar_stream_cleanup(
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let mut registry = registry.lock().await;
         let should_remove = registry.streams.get(&key).is_some_and(|shared| {
-            shared.generation == generation
+            shared.cleanup_generation == generation
                 && shared
                     .subscribers
                     .read()
@@ -931,6 +1002,9 @@ fn emit_stream_state(
     channel: &str,
     state: &str,
     message: Option<String>,
+    symbol: Option<&str>,
+    timeframe: Option<&str>,
+    generation: Option<u64>,
 ) {
     let _ = app.emit(
         "stream-state",
@@ -940,23 +1014,37 @@ fn emit_stream_state(
             channel: channel.into(),
             state: state.into(),
             message,
+            symbol: symbol.map(str::to_owned),
+            timeframe: timeframe.map(str::to_owned),
+            generation,
         },
     );
 }
 
-fn bar_subscriber_ids(subscribers: &Arc<RwLock<HashMap<String, String>>>) -> Vec<String> {
+fn bar_subscribers(
+    subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
+) -> Vec<(String, BarSubscriber)> {
     subscribers
         .read()
-        .map(|subscribers| subscribers.keys().cloned().collect())
+        .map(|subscribers| {
+            subscribers
+                .iter()
+                .map(|(id, subscriber)| (id.clone(), subscriber.clone()))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn bar_stream_priority(
-    subscribers: &Arc<RwLock<HashMap<String, String>>>,
+    subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
 ) -> tradestation::RequestPriority {
     if subscribers
         .read()
-        .map(|subscribers| subscribers.values().any(|consumer| consumer == "chart"))
+        .map(|subscribers| {
+            subscribers
+                .values()
+                .any(|subscriber| subscriber.consumer == "chart")
+        })
         .unwrap_or(false)
     {
         tradestation::RequestPriority::Realtime
@@ -967,12 +1055,19 @@ fn bar_stream_priority(
 
 fn emit_shared_stream_state(
     app: &tauri::AppHandle,
-    subscribers: &Arc<RwLock<HashMap<String, String>>>,
+    subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
+    status: &Arc<RwLock<SharedBarStreamStatus>>,
     environment: &TradingEnvironment,
+    symbol: &str,
+    timeframe: &str,
     state: &str,
     message: Option<String>,
 ) {
-    for subscription_id in bar_subscriber_ids(subscribers) {
+    if let Ok(mut current) = status.write() {
+        current.state = state.into();
+        current.message = message.clone();
+    }
+    for (subscription_id, subscriber) in bar_subscribers(subscribers) {
         emit_stream_state(
             app,
             &subscription_id,
@@ -980,19 +1075,22 @@ fn emit_shared_stream_state(
             "bars",
             state,
             message.clone(),
+            Some(symbol),
+            Some(timeframe),
+            Some(subscriber.generation),
         );
     }
 }
 
 fn emit_bar_snapshot(
     app: &tauri::AppHandle,
-    subscribers: &Arc<RwLock<HashMap<String, String>>>,
+    subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
     environment: &TradingEnvironment,
     symbol: &str,
     timeframe: &str,
     bars: &[Bar],
 ) {
-    for subscription_id in bar_subscriber_ids(subscribers) {
+    for (subscription_id, subscriber) in bar_subscribers(subscribers) {
         let _ = app.emit(
             "bar-snapshot",
             BarSnapshotEvent {
@@ -1000,6 +1098,7 @@ fn emit_bar_snapshot(
                 environment: environment.clone(),
                 symbol: symbol.into(),
                 timeframe: timeframe.into(),
+                generation: subscriber.generation,
                 bars: bars.to_vec(),
             },
         );
@@ -1008,13 +1107,13 @@ fn emit_bar_snapshot(
 
 fn emit_bar_update(
     app: &tauri::AppHandle,
-    subscribers: &Arc<RwLock<HashMap<String, String>>>,
+    subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
     environment: &TradingEnvironment,
     symbol: &str,
     timeframe: &str,
     bar: &Bar,
 ) {
-    for subscription_id in bar_subscriber_ids(subscribers) {
+    for (subscription_id, subscriber) in bar_subscribers(subscribers) {
         let _ = app.emit(
             "bar-update",
             BarUpdateEvent {
@@ -1022,6 +1121,7 @@ fn emit_bar_update(
                 environment: environment.clone(),
                 symbol: symbol.into(),
                 timeframe: timeframe.into(),
+                generation: subscriber.generation,
                 bar: bar.clone(),
             },
         );
@@ -1087,11 +1187,23 @@ fn reconnect_bars_back(
         .clamp(2, configured)
 }
 
+fn stream_provider_error(value: &Value) -> Option<String> {
+    let error = value.get("Error").and_then(Value::as_str);
+    let message = value.get("Message").and_then(Value::as_str);
+    match (error, message) {
+        (Some(error), Some(message)) => Some(format!("TradeStation {error}: {message}")),
+        (Some(error), None) => Some(format!("TradeStation stream error: {error}")),
+        (None, Some(message)) => Some(format!("TradeStation stream error: {message}")),
+        (None, None) => None,
+    }
+}
+
 async fn run_bar_stream(
     app: tauri::AppHandle,
     api: TradeStation,
     db_path: PathBuf,
-    subscribers: Arc<RwLock<HashMap<String, String>>>,
+    subscribers: Arc<RwLock<HashMap<String, BarSubscriber>>>,
+    status: Arc<RwLock<SharedBarStreamStatus>>,
     environment: TradingEnvironment,
     symbol: String,
     timeframe: String,
@@ -1101,7 +1213,10 @@ async fn run_bar_stream(
         emit_shared_stream_state(
             &app,
             &subscribers,
+            &status,
             &environment,
+            &symbol,
+            &timeframe,
             if attempt == 0 {
                 "connecting"
             } else {
@@ -1117,7 +1232,10 @@ async fn run_bar_stream(
                     emit_shared_stream_state(
                         &app,
                         &subscribers,
+                        &status,
                         &environment,
+                        &symbol,
+                        &timeframe,
                         "disconnected",
                         Some(error.to_string()),
                     );
@@ -1131,22 +1249,47 @@ async fn run_bar_stream(
             .await
         {
             Ok(response) => {
-                emit_shared_stream_state(&app, &subscribers, &environment, "streaming", None);
+                emit_shared_stream_state(
+                    &app,
+                    &subscribers,
+                    &status,
+                    &environment,
+                    &symbol,
+                    &timeframe,
+                    "streaming",
+                    None,
+                );
                 let mut bytes = response.bytes_stream();
                 let mut buffer = Vec::new();
                 let mut snapshot = Vec::new();
                 let mut snapshot_complete = false;
-                let mut go_away = false;
+                let mut terminate_stream = false;
+                let mut termination_message = None;
                 while let Some(chunk) = bytes.next().await {
                     let chunk = match chunk {
                         Ok(chunk) => chunk,
-                        Err(_) => break,
+                        Err(error) => {
+                            termination_message =
+                                Some(format!("TradeStation bar stream transport error: {error}"));
+                            break;
+                        }
                     };
                     let values = match decode_stream_values(&mut buffer, &chunk) {
                         Ok(values) => values,
-                        Err(_) => break,
+                        Err(error) => {
+                            termination_message = Some(format!(
+                                "TradeStation bar stream returned invalid data: {error}"
+                            ));
+                            break;
+                        }
                     };
                     for value in values {
+                        if terminate_stream {
+                            if let Some(message) = stream_provider_error(&value) {
+                                termination_message = Some(message);
+                            }
+                            continue;
+                        }
                         match value.get("StreamStatus").and_then(Value::as_str) {
                             Some("EndSnapshot") => {
                                 snapshot.sort_by_key(|bar: &Bar| bar.time);
@@ -1169,12 +1312,19 @@ async fn run_bar_stream(
                                 snapshot_complete = true;
                             }
                             Some("GoAway") => {
-                                go_away = true;
-                                break;
+                                terminate_stream = true;
+                                termination_message = Some(
+                                    "TradeStation requested a stream restart; reconnecting".into(),
+                                );
                             }
                             Some("ERROR") => {
-                                go_away = true;
-                                break;
+                                terminate_stream = true;
+                                termination_message = stream_provider_error(&value).or_else(|| {
+                                    Some(
+                                        "TradeStation reported a bar stream error; reconnecting"
+                                            .into(),
+                                    )
+                                });
                             }
                             _ => {
                                 if let Some(bar) = tradestation::bar_from_value(&value, &timeframe)
@@ -1226,7 +1376,7 @@ async fn run_bar_stream(
                             }
                         }
                     }
-                    if go_away {
+                    if terminate_stream {
                         break;
                     }
                 }
@@ -1252,9 +1402,13 @@ async fn run_bar_stream(
                 emit_shared_stream_state(
                     &app,
                     &subscribers,
+                    &status,
                     &environment,
+                    &symbol,
+                    &timeframe,
                     "reconnecting",
-                    Some("TradeStation ended the stream; reconnecting".into()),
+                    termination_message
+                        .or_else(|| Some("TradeStation ended the bar stream; reconnecting".into())),
                 );
                 if connected_at.elapsed() >= std::time::Duration::from_secs(30) {
                     attempt = 0;
@@ -1268,7 +1422,10 @@ async fn run_bar_stream(
                 emit_shared_stream_state(
                     &app,
                     &subscribers,
+                    &status,
                     &environment,
+                    &symbol,
+                    &timeframe,
                     if rate_limited {
                         "rate-limited"
                     } else {
@@ -1324,6 +1481,9 @@ async fn run_quote_stream(
                 "reconnecting"
             },
             None,
+            None,
+            None,
+            None,
         );
         let connected_at = std::time::Instant::now();
         let mut retry_delay = None;
@@ -1338,6 +1498,9 @@ async fn run_quote_stream(
                     &environment,
                     "quotes",
                     "streaming",
+                    None,
+                    None,
+                    None,
                     None,
                 );
                 let mut bytes = response.bytes_stream();
@@ -1378,6 +1541,9 @@ async fn run_quote_stream(
                     "quotes",
                     "reconnecting",
                     Some("TradeStation ended the stream; reconnecting".into()),
+                    None,
+                    None,
+                    None,
                 );
                 if connected_at.elapsed() >= std::time::Duration::from_secs(30) {
                     attempt = 0;
@@ -1399,6 +1565,9 @@ async fn run_quote_stream(
                         "reconnecting"
                     },
                     Some(error.to_string()),
+                    None,
+                    None,
+                    None,
                 );
             }
         }
@@ -1565,19 +1734,55 @@ mod stream_tests {
         );
         let subscribers = Arc::new(RwLock::new(HashMap::from([(
             "alert".into(),
-            "ema-alert".into(),
+            BarSubscriber {
+                consumer: "ema-alert".into(),
+                generation: 1,
+            },
         )])));
         assert_eq!(
             bar_stream_priority(&subscribers),
             tradestation::RequestPriority::Background
         );
-        subscribers
-            .write()
-            .unwrap()
-            .insert("chart".into(), "chart".into());
+        subscribers.write().unwrap().insert(
+            "chart".into(),
+            BarSubscriber {
+                consumer: "chart".into(),
+                generation: 2,
+            },
+        );
         assert_eq!(
             bar_stream_priority(&subscribers),
             tradestation::RequestPriority::Realtime
+        );
+    }
+
+    #[test]
+    fn bar_subscription_generations_reject_out_of_order_commands() {
+        let mut registry = BarStreamRegistry::default();
+        assert!(registry.accept_generation("chart-1", 100));
+        assert!(!registry.accept_generation("chart-1", 99));
+        assert!(registry.accept_generation("chart-1", 101));
+        assert_eq!(registry.subscription_generations["chart-1"], 101);
+
+        // A late stop from the first selection and a late start from the
+        // second selection cannot replace the final A -> B -> C choice.
+        assert!(!registry.accept_generation("chart-1", 100));
+        assert!(!registry.accept_generation("chart-1", 99));
+    }
+
+    #[test]
+    fn provider_stream_errors_preserve_actionable_details() {
+        assert_eq!(
+            stream_provider_error(&serde_json::json!({
+                "Error": "DualLogon",
+                "Message": "Another market-data session is active"
+            }))
+            .as_deref(),
+            Some("TradeStation DualLogon: Another market-data session is active")
+        );
+        assert_eq!(
+            stream_provider_error(&serde_json::json!({ "Error": "TooManyRequests" })).as_deref(),
+            Some("TradeStation stream error: TooManyRequests")
         );
     }
 

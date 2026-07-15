@@ -68,11 +68,11 @@ export const api = {
     if (isTauri) return native("get_bar_range", { symbol, timeframe, first, last });
     return (await this.bars(symbol, timeframe)).filter((bar) => bar.time >= first && bar.time < last);
   },
-  async startBarStream(subscriptionId: string, symbol: string, timeframe: Timeframe, consumer: BarStreamConsumer): Promise<void> {
-    if (isTauri) await native("start_bar_stream", { subscriptionId, symbol, timeframe, consumer });
+  async startBarStream(subscriptionId: string, symbol: string, timeframe: Timeframe, consumer: BarStreamConsumer, generation: number): Promise<void> {
+    if (isTauri) await native("start_bar_stream", { subscriptionId, symbol, timeframe, consumer, generation });
   },
-  async stopBarStream(subscriptionId: string): Promise<void> {
-    if (isTauri) await native("stop_bar_stream", { subscriptionId });
+  async stopBarStream(subscriptionId: string, generation: number): Promise<void> {
+    if (isTauri) await native("stop_bar_stream", { subscriptionId, generation });
   },
   async startQuoteStream(subscriptionId: string, symbols: string[]): Promise<void> {
     if (isTauri) await native("start_quote_stream", { subscriptionId, symbols });

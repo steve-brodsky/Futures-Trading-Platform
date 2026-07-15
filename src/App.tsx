@@ -27,6 +27,7 @@ import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculate
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
 import { reorderWatchlist } from "./lib/watchlist";
+import { acceptsBarEvent, isBarStateEvent } from "./lib/streamEvents";
 import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
@@ -58,9 +59,25 @@ interface TabMarketState {
   hasOlder: boolean;
   loadingOlder: boolean;
   streamState: StreamConnectionState;
+  streamMessage?: string;
+  generation?: number;
 }
 
 interface StripBounds { windowId: string; left: number; top: number; right: number; bottom: number; }
+
+interface WindowMarketSyncEvent {
+  environment: TradingEnvironment;
+  markets: Array<{ tabId: string; symbol: string; timeframe: Timeframe; market: TabMarketState }>;
+  quotes: Record<string, Quote>;
+}
+
+interface BarSubscription {
+  subscriptionId: string;
+  symbol: string;
+  timeframe: Timeframe;
+  epoch: string;
+  generation: number;
+}
 
 type ReviewState =
   | { kind: "entry"; draft: OrderDraft; preview: OrderPreview; sourceTabId: string; chartSymbol: string }
@@ -144,6 +161,7 @@ export default function App() {
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
   const environment = workspace.environment;
   const [tabMarkets, setTabMarkets] = useState<Record<string, TabMarketState>>({});
+  const tabMarketsRef = useRef(tabMarkets);
   const [vwapMarkets, setVwapMarkets] = useState<Record<string, VwapMarketState>>({});
   const vwapMarketsRef = useRef(vwapMarkets);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -157,6 +175,7 @@ export default function App() {
   const [brokerageStreamStates, setBrokerageStreamStates] = useState<Record<"positions" | "orders", StreamConnectionState>>({ positions: api.isNative ? "disconnected" : "streaming", orders: api.isNative ? "disconnected" : "streaming" });
   const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
+  const quotesRef = useRef(quotes);
   const [orderProjection, setOrderProjection] = useState<(OrderProjection & { tradeSymbol?: string }) | null>(null);
   const [orderTicketResetEpochs, setOrderTicketResetEpochs] = useState<Record<string, number>>({});
   const [tradeDetails, setTradeDetails] = useState<Record<string, SymbolMeta>>({});
@@ -194,14 +213,15 @@ export default function App() {
   const closingPositionTimersRef = useRef(new Map<string, number>());
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
   const [currentTime, setCurrentTime] = useState(() => Date.now());
-  const subscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; timeframe: Timeframe; epoch: string }>());
-  const alertSubscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; timeframe: Timeframe; epoch: string }>());
+  const subscriptionsRef = useRef(new Map<string, BarSubscription>());
+  const alertSubscriptionsRef = useRef(new Map<string, BarSubscription>());
   const alertBarsRef = useRef(new Map<string, Bar[]>());
   const alertSidesRef = useRef(new Map<string, EmaCrossSide>());
   const alertLoadedEpochRef = useRef(new Map<string, string>());
   const alertDesiredRef = useRef(new Set<string>());
   const alertDataEpochRef = useRef("");
-  const vwapSubscriptionsRef = useRef(new Map<string, { subscriptionId: string; symbol: string; epoch: string }>());
+  const vwapSubscriptionsRef = useRef(new Map<string, Omit<BarSubscription, "timeframe">>());
+  const barSubscriptionGenerationRef = useRef(Date.now() * 1000);
   const vwapSymbolsRef = useRef(new Set<string>());
   const vwapRangeTimersRef = useRef(new Map<string, number>());
   const vwapDataEpochRef = useRef("");
@@ -221,7 +241,9 @@ export default function App() {
     : activeTab.symbol;
 
   workspaceRef.current = workspace;
+  tabMarketsRef.current = tabMarkets;
   vwapMarketsRef.current = vwapMarkets;
+  quotesRef.current = quotes;
 
   const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
     ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
@@ -311,6 +333,37 @@ export default function App() {
     });
   }
 
+  function nextBarSubscriptionGeneration(): number {
+    barSubscriptionGenerationRef.current += 1;
+    return barSubscriptionGenerationRef.current;
+  }
+
+  function marketSyncForWindow(windowId: string): WindowMarketSyncEvent {
+    const target = workspaceRef.current.windows.find((item) => item.id === windowId);
+    const tabs = (target?.tabIds ?? [])
+      .map((tabId) => workspaceRef.current.tabs.find((tab) => tab.id === tabId))
+      .filter((tab): tab is ChartTabState => Boolean(tab));
+    return {
+      environment: environmentRef.current,
+      markets: tabs.map((tab) => ({
+        tabId: tab.id,
+        symbol: tab.symbol.symbol,
+        timeframe: tab.timeframe,
+        market: tabMarketsRef.current[tab.id] ?? {
+          bars: [],
+          hasOlder: true,
+          loadingOlder: false,
+          streamState: api.isNative ? "connecting" : "streaming",
+          generation: subscriptionsRef.current.get(tab.id)?.generation,
+        },
+      })),
+      quotes: Object.fromEntries(tabs.flatMap((tab) => {
+        const quote = quotesRef.current[tab.symbol.symbol];
+        return quote ? [[tab.symbol.symbol, quote] as const] : [];
+      })),
+    };
+  }
+
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
       const normalized = normalizeChartWorkspace(saved, defaultWorkspace);
@@ -337,8 +390,10 @@ export default function App() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
-        if (payload.environment === environmentRef.current && workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) {
-          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], payload.bars) } }));
+        const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
+        const expectedGeneration = currentWindowId === MAIN_WINDOW_ID ? subscriptionsRef.current.get(payload.subscriptionId)?.generation : undefined;
+        if (acceptsBarEvent(tab, environmentRef.current, payload, expectedGeneration)) {
+          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], payload.bars), generation: payload.generation } }));
         }
         if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], payload.bars) } }));
@@ -346,8 +401,10 @@ export default function App() {
         if (payload.environment === environmentRef.current) primeAlertMarket(payload.symbol, payload.timeframe, payload.bars, false);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
-        if (workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId)) {
-          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting", bars: [] }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], [payload.bar]) } }));
+        const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
+        const expectedGeneration = currentWindowId === MAIN_WINDOW_ID ? subscriptionsRef.current.get(payload.subscriptionId)?.generation : undefined;
+        if (acceptsBarEvent(tab, environmentRef.current, payload, expectedGeneration)) {
+          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting", bars: [] }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], [payload.bar]), generation: payload.generation } }));
         }
         if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], [payload.bar]) } }));
@@ -359,8 +416,19 @@ export default function App() {
         setQuotes((current) => ({ ...current, [payload.quote.symbol]: { ...payload.quote, receivedAt: Date.now() } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<StreamStateEvent>("stream-state", ({ payload }) => {
-        if (!workspaceRef.current.tabs.some((tab) => tab.id === payload.subscriptionId) || payload.channel !== "bars") return;
-        setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: payload.state } }));
+        if (!isBarStateEvent(payload)) return;
+        const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
+        const expectedGeneration = currentWindowId === MAIN_WINDOW_ID ? subscriptionsRef.current.get(payload.subscriptionId)?.generation : undefined;
+        if (!acceptsBarEvent(tab, environmentRef.current, payload, expectedGeneration)) return;
+        setTabMarkets((current) => ({
+          ...current,
+          [payload.subscriptionId]: {
+            ...(current[payload.subscriptionId] ?? { bars: [], hasOlder: true, loadingOlder: false }),
+            streamState: payload.state,
+            streamMessage: payload.message,
+            generation: payload.generation,
+          },
+        }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<PositionsSnapshotEvent>("positions-snapshot", ({ payload }) => {
         if (payload.accountId !== selectedAccountIdRef.current) return;
@@ -427,7 +495,30 @@ export default function App() {
       syncWorkspaceToOpenWindows(next);
     }).then((unlisten) => cleanups.push(unlisten));
     listen<{ windowId: string }>("workspace-window-ready", ({ payload }) => {
-      if (currentWindowId === MAIN_WINDOW_ID) emitTo(payload.windowId, "workspace-sync", workspaceRef.current).catch(() => undefined);
+      if (currentWindowId !== MAIN_WINDOW_ID) return;
+      void (async () => {
+        await emitTo(payload.windowId, "workspace-sync", workspaceRef.current).catch(() => undefined);
+        await emitTo(payload.windowId, "window-market-sync", marketSyncForWindow(payload.windowId)).catch(() => undefined);
+      })();
+    }).then((unlisten) => cleanups.push(unlisten));
+    listen<WindowMarketSyncEvent>("window-market-sync", ({ payload }) => {
+      if (currentWindowId === MAIN_WINDOW_ID || payload.environment !== environmentRef.current) return;
+      setTabMarkets((current) => {
+        const next = { ...current };
+        payload.markets.forEach(({ tabId, symbol, timeframe, market }) => {
+          const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
+          if (!tab || tab.symbol.symbol !== symbol || tab.timeframe !== timeframe) return;
+          const existing = current[tabId];
+          const liveStateIsNewer = existing?.generation != null && existing.generation === market.generation;
+          next[tabId] = {
+            ...market,
+            ...(liveStateIsNewer ? { streamState: existing.streamState, streamMessage: existing.streamMessage } : {}),
+            bars: mergeBars(existing?.bars ?? [], market.bars),
+          };
+        });
+        return next;
+      });
+      setQuotes((current) => ({ ...current, ...payload.quotes }));
     }).then((unlisten) => cleanups.push(unlisten));
     listen<StripBounds>("chart-strip-bounds", ({ payload }) => stripBoundsRef.current.set(payload.windowId, payload)).then((unlisten) => cleanups.push(unlisten));
     listen<{ tabId: string; range: { from: number; to: number } }>("chart-viewport", ({ payload }) => viewRangesRef.current.set(payload.tabId, payload.range)).then((unlisten) => cleanups.push(unlisten));
@@ -574,21 +665,29 @@ export default function App() {
     subscriptionsRef.current.forEach((subscription, tabId) => {
       const tab = workspace.tabs.find((item) => item.id === tabId);
       if (!activeIds.has(tabId) || !tab || subscription.symbol !== tab.symbol.symbol || subscription.timeframe !== tab.timeframe || subscription.epoch !== epoch) {
-        if (api.isNative) api.stopBarStream(subscription.subscriptionId);
+        if (api.isNative) void api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration());
         subscriptionsRef.current.delete(tabId);
       }
     });
     workspace.tabs.forEach((tab) => {
       if (subscriptionsRef.current.has(tab.id)) return;
       const subscriptionId = tab.id;
-      subscriptionsRef.current.set(tab.id, { subscriptionId, symbol: tab.symbol.symbol, timeframe: tab.timeframe, epoch });
-      setTabMarkets((current) => ({ ...current, [tab.id]: { bars: [], hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming" } }));
+      const generation = nextBarSubscriptionGeneration();
+      subscriptionsRef.current.set(tab.id, { subscriptionId, symbol: tab.symbol.symbol, timeframe: tab.timeframe, epoch, generation });
+      setTabMarkets((current) => ({ ...current, [tab.id]: { bars: [], hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming", generation } }));
       if (!api.isNative) {
-        api.bars(tab.symbol.symbol, tab.timeframe).then((nextBars) => setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "streaming" }), bars: nextBars } }))).catch((error) => showToast(String(error)));
+        api.bars(tab.symbol.symbol, tab.timeframe).then((nextBars) => {
+          if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
+          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "streaming" }), bars: nextBars, generation } }));
+        }).catch((error) => showToast(String(error)));
       } else if (authenticated) {
-        api.cachedBars(tab.symbol.symbol, tab.timeframe).then((cached) => setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(cached, current[tab.id]?.bars ?? []) } }))).catch(() => undefined);
-        api.startBarStream(subscriptionId, tab.symbol.symbol, tab.timeframe, "chart").catch((error) => {
-          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: "disconnected" } }));
+        api.cachedBars(tab.symbol.symbol, tab.timeframe).then((cached) => {
+          if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
+          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(cached, current[tab.id]?.bars ?? []), generation } }));
+        }).catch(() => undefined);
+        api.startBarStream(subscriptionId, tab.symbol.symbol, tab.timeframe, "chart", generation).catch((error) => {
+          if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
+          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: "disconnected", streamMessage: String(error), generation } }));
           showToast(String(error));
         });
       }
@@ -615,7 +714,7 @@ export default function App() {
 
     alertSubscriptionsRef.current.forEach((subscription, key) => {
       if (uncoveredKeys.has(key) && subscription.epoch === epoch) return;
-      if (api.isNative) void api.stopBarStream(subscription.subscriptionId);
+      if (api.isNative) void api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration());
       alertSubscriptionsRef.current.delete(key);
     });
     alertBarsRef.current.forEach((_, key) => {
@@ -642,9 +741,10 @@ export default function App() {
     uncovered.forEach((market) => {
       if (alertSubscriptionsRef.current.has(market.key) || !api.isNative || !authenticated) return;
       const subscriptionId = `ema-alert:${encodeURIComponent(market.symbol)}:${market.timeframe}`;
-      alertSubscriptionsRef.current.set(market.key, { subscriptionId, symbol: market.symbol, timeframe: market.timeframe, epoch });
-      api.startBarStream(subscriptionId, market.symbol, market.timeframe, "ema-alert").catch((error) => {
-        if (alertSubscriptionsRef.current.get(market.key)?.epoch !== epoch) return;
+      const generation = nextBarSubscriptionGeneration();
+      alertSubscriptionsRef.current.set(market.key, { subscriptionId, symbol: market.symbol, timeframe: market.timeframe, epoch, generation });
+      api.startBarStream(subscriptionId, market.symbol, market.timeframe, "ema-alert", generation).catch((error) => {
+        if (alertSubscriptionsRef.current.get(market.key)?.generation !== generation) return;
         alertSubscriptionsRef.current.delete(market.key);
         const message = `EMA alert data unavailable for ${market.symbol} ${market.timeframe}: ${String(error)}`;
         showToast(message);
@@ -667,7 +767,7 @@ export default function App() {
 
     vwapSubscriptionsRef.current.forEach((subscription, symbol) => {
       if (!desired.has(symbol) || sharedOneMinute.has(symbol) || subscription.epoch !== epoch) {
-        if (api.isNative) void api.stopBarStream(subscription.subscriptionId);
+        if (api.isNative) void api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration());
         vwapSubscriptionsRef.current.delete(symbol);
       }
     });
@@ -675,7 +775,8 @@ export default function App() {
     desired.forEach((symbol) => {
       if (sharedOneMinute.has(symbol) || vwapSubscriptionsRef.current.has(symbol)) return;
       const subscriptionId = `ny-session-vwap:${symbol}`;
-      vwapSubscriptionsRef.current.set(symbol, { subscriptionId, symbol, epoch });
+      const generation = nextBarSubscriptionGeneration();
+      vwapSubscriptionsRef.current.set(symbol, { subscriptionId, symbol, epoch, generation });
       const mergeSource = (incoming: Bar[]) => {
         if (vwapSubscriptionsRef.current.get(symbol)?.epoch !== epoch) return;
         setVwapMarkets((current) => ({
@@ -687,8 +788,8 @@ export default function App() {
         api.bars(symbol, "1m").then(mergeSource).catch(() => undefined);
       } else if (authenticated) {
         api.cachedBars(symbol, "1m").then(mergeSource).catch(() => undefined);
-        api.startBarStream(subscriptionId, symbol, "1m", "vwap").catch((error) => {
-          if (vwapSubscriptionsRef.current.get(symbol)?.epoch !== epoch) return;
+        api.startBarStream(subscriptionId, symbol, "1m", "vwap", generation).catch((error) => {
+          if (vwapSubscriptionsRef.current.get(symbol)?.generation !== generation) return;
           vwapSubscriptionsRef.current.delete(symbol);
           setVwapMarkets((current) => ({
             ...current,
@@ -714,16 +815,23 @@ export default function App() {
 
   useEffect(() => {
     if (!workspaceLoaded || tabMarkets[activeTab.id]?.bars.length) return;
+    const tabId = activeTab.id;
+    const symbol = activeTab.symbol.symbol;
+    const timeframe = activeTab.timeframe;
     const load = api.isNative ? api.cachedBars(activeTab.symbol.symbol, activeTab.timeframe) : api.bars(activeTab.symbol.symbol, activeTab.timeframe);
-    load.then((loadedBars) => setTabMarkets((current) => ({ ...current, [activeTab.id]: { ...(current[activeTab.id] ?? { hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming" }), bars: mergeBars(loadedBars, current[activeTab.id]?.bars ?? []) } }))).catch(() => undefined);
+    load.then((loadedBars) => {
+      const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === tabId);
+      if (!currentTab || currentTab.symbol.symbol !== symbol || currentTab.timeframe !== timeframe) return;
+      setTabMarkets((current) => ({ ...current, [tabId]: { ...(current[tabId] ?? { hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming" }), bars: mergeBars(loadedBars, current[tabId]?.bars ?? []) } }));
+    }).catch(() => undefined);
   }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe]);
 
   useEffect(() => () => {
     vwapRangeTimersRef.current.forEach((timer) => window.clearTimeout(timer));
     if (currentWindowId === MAIN_WINDOW_ID) {
-      subscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId));
-      alertSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId));
-      vwapSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId));
+      subscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration()));
+      alertSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration()));
+      vwapSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration()));
     }
   }, []);
 
@@ -1538,7 +1646,7 @@ export default function App() {
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
       {!isDetached && <button className={`environment-badge ${environment}`} onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
-      <button className={`connection-chip ${market.streamState}`} onClick={() => setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
+      <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
     <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} totalTabs={workspace.tabs.length} windowId={currentWindowId} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); emit("chart-strip-bounds", bounds); }} />
