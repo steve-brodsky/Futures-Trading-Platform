@@ -84,6 +84,7 @@ struct SharedBarStreamStatus {
 struct SharedBarStream {
     subscribers: Arc<RwLock<HashMap<String, BarSubscriber>>>,
     status: Arc<RwLock<SharedBarStreamStatus>>,
+    latest_bars: Arc<RwLock<Vec<Bar>>>,
     task: tauri::async_runtime::JoinHandle<()>,
     cleanup_generation: u64,
 }
@@ -347,8 +348,20 @@ async fn start_bar_stream(
     }
     let environment = state.api.environment().await;
     let key = bar_stream_key(&environment, &symbol, &timeframe);
+    let retained_limit = tradestation::history_spec(&timeframe)
+        .map(|(_, _, bars_back)| bars_back)
+        .unwrap_or(10_000);
+    let cached_bars = storage::load_bars(
+        &state.db_path,
+        environment.key(),
+        &symbol,
+        &timeframe,
+        retained_limit,
+    )
+    .unwrap_or_default();
     let registry_handle = state.bar_streams.clone();
     let mut cleanup_keys = Vec::new();
+    let mut late_replay: Option<(Arc<RwLock<SharedBarStreamStatus>>, Arc<RwLock<Vec<Bar>>>)> = None;
     {
         let mut registry = registry_handle.lock().await;
         if !registry.accept_generation(&subscription_id, generation) {
@@ -379,22 +392,7 @@ async fn start_bar_stream(
                 );
             }
             shared.cleanup_generation = shared.cleanup_generation.wrapping_add(1);
-            if let Ok(status) = shared.status.read() {
-                // Emit while holding the status read lock. A concurrent state
-                // transition must follow this replay, so it cannot be
-                // overwritten by a stale late-subscriber status.
-                emit_stream_state(
-                    &app,
-                    &subscription_id,
-                    &environment,
-                    "bars",
-                    &status.state,
-                    status.message.clone(),
-                    Some(&symbol),
-                    Some(&timeframe),
-                    Some(generation),
-                );
-            }
+            late_replay = Some((shared.status.clone(), shared.latest_bars.clone()));
         } else {
             let subscribers = Arc::new(RwLock::new(HashMap::from([(
                 subscription_id.clone(),
@@ -407,12 +405,15 @@ async fn start_bar_stream(
                 state: "connecting".into(),
                 message: None,
             }));
+            let latest_bars = Arc::new(RwLock::new(cached_bars));
             let task = tauri::async_runtime::spawn(run_bar_stream(
                 app.clone(),
                 state.api.clone(),
                 state.db_path.clone(),
                 subscribers.clone(),
                 status.clone(),
+                latest_bars.clone(),
+                retained_limit,
                 environment.clone(),
                 symbol.clone(),
                 timeframe.clone(),
@@ -422,6 +423,7 @@ async fn start_bar_stream(
                 SharedBarStream {
                     subscribers,
                     status,
+                    latest_bars,
                     task,
                     cleanup_generation: 0,
                 },
@@ -430,6 +432,38 @@ async fn start_bar_stream(
     }
     for (cleanup_key, generation) in cleanup_keys {
         schedule_bar_stream_cleanup(registry_handle.clone(), cleanup_key, generation);
+    }
+    if let Some((status, bars)) = late_replay {
+        if let Ok(bars) = bars.read() {
+            // Live updates take the write lock before emitting, so holding
+            // this read lock keeps the bootstrap snapshot ahead of them.
+            if !bars.is_empty() {
+                emit_bar_snapshot_to(
+                    &app,
+                    &subscription_id,
+                    &environment,
+                    &symbol,
+                    &timeframe,
+                    generation,
+                    &bars,
+                );
+            }
+        }
+        if let Ok(status) = status.read() {
+            // Holding the status read lock guarantees that a concurrent state
+            // transition is emitted after this late-subscriber replay.
+            emit_stream_state(
+                &app,
+                &subscription_id,
+                &environment,
+                "bars",
+                &status.state,
+                status.message.clone(),
+                Some(&symbol),
+                Some(&timeframe),
+                Some(generation),
+            );
+        }
     }
     Ok(())
 }
@@ -1091,18 +1125,64 @@ fn emit_bar_snapshot(
     bars: &[Bar],
 ) {
     for (subscription_id, subscriber) in bar_subscribers(subscribers) {
-        let _ = app.emit(
-            "bar-snapshot",
-            BarSnapshotEvent {
-                subscription_id,
-                environment: environment.clone(),
-                symbol: symbol.into(),
-                timeframe: timeframe.into(),
-                generation: subscriber.generation,
-                bars: bars.to_vec(),
-            },
+        emit_bar_snapshot_to(
+            app,
+            &subscription_id,
+            environment,
+            symbol,
+            timeframe,
+            subscriber.generation,
+            bars,
         );
     }
+}
+
+fn emit_bar_snapshot_to(
+    app: &tauri::AppHandle,
+    subscription_id: &str,
+    environment: &TradingEnvironment,
+    symbol: &str,
+    timeframe: &str,
+    generation: u64,
+    bars: &[Bar],
+) {
+    let _ = app.emit(
+        "bar-snapshot",
+        BarSnapshotEvent {
+            subscription_id: subscription_id.into(),
+            environment: environment.clone(),
+            symbol: symbol.into(),
+            timeframe: timeframe.into(),
+            generation,
+            bars: bars.to_vec(),
+        },
+    );
+}
+
+fn merge_retained_bars(retained: &mut Vec<Bar>, incoming: &[Bar], limit: usize) {
+    for bar in incoming {
+        match retained.binary_search_by_key(&bar.time, |item| item.time) {
+            Ok(index) => retained[index] = bar.clone(),
+            Err(index) => retained.insert(index, bar.clone()),
+        }
+    }
+    if retained.len() > limit {
+        retained.drain(..retained.len() - limit);
+    }
+}
+
+fn retain_bar_snapshot(
+    latest_bars: &Arc<RwLock<Vec<Bar>>>,
+    incoming: &[Bar],
+    limit: usize,
+) -> Vec<Bar> {
+    latest_bars
+        .write()
+        .map(|mut retained| {
+            merge_retained_bars(&mut retained, incoming, limit);
+            retained.clone()
+        })
+        .unwrap_or_else(|_| incoming.to_vec())
 }
 
 fn emit_bar_update(
@@ -1204,6 +1284,8 @@ async fn run_bar_stream(
     db_path: PathBuf,
     subscribers: Arc<RwLock<HashMap<String, BarSubscriber>>>,
     status: Arc<RwLock<SharedBarStreamStatus>>,
+    latest_bars: Arc<RwLock<Vec<Bar>>>,
+    retained_limit: usize,
     environment: TradingEnvironment,
     symbol: String,
     timeframe: String,
@@ -1301,13 +1383,15 @@ async fn run_bar_stream(
                                     &timeframe,
                                     &snapshot,
                                 );
+                                let retained =
+                                    retain_bar_snapshot(&latest_bars, &snapshot, retained_limit);
                                 emit_bar_snapshot(
                                     &app,
                                     &subscribers,
                                     &environment,
                                     &symbol,
                                     &timeframe,
-                                    &snapshot,
+                                    &retained,
                                 );
                                 snapshot_complete = true;
                             }
@@ -1337,6 +1421,11 @@ async fn run_bar_stream(
                                             &timeframe,
                                             std::slice::from_ref(&bar),
                                         );
+                                        let _ = retain_bar_snapshot(
+                                            &latest_bars,
+                                            std::slice::from_ref(&bar),
+                                            retained_limit,
+                                        );
                                         emit_bar_update(
                                             &app,
                                             &subscribers,
@@ -1361,13 +1450,18 @@ async fn run_bar_stream(
                                                 &timeframe,
                                                 &snapshot,
                                             );
+                                            let retained = retain_bar_snapshot(
+                                                &latest_bars,
+                                                &snapshot,
+                                                retained_limit,
+                                            );
                                             emit_bar_snapshot(
                                                 &app,
                                                 &subscribers,
                                                 &environment,
                                                 &symbol,
                                                 &timeframe,
-                                                &snapshot,
+                                                &retained,
                                             );
                                             snapshot_complete = true;
                                         }
@@ -1390,13 +1484,14 @@ async fn run_bar_stream(
                         &timeframe,
                         &snapshot,
                     );
+                    let retained = retain_bar_snapshot(&latest_bars, &snapshot, retained_limit);
                     emit_bar_snapshot(
                         &app,
                         &subscribers,
                         &environment,
                         &symbol,
                         &timeframe,
-                        &snapshot,
+                        &retained,
                     );
                 }
                 emit_shared_stream_state(
@@ -1768,6 +1863,30 @@ mod stream_tests {
         // second selection cannot replace the final A -> B -> C choice.
         assert!(!registry.accept_generation("chart-1", 100));
         assert!(!registry.accept_generation("chart-1", 99));
+    }
+
+    #[test]
+    fn retained_bar_snapshots_are_sorted_replaced_and_capped() {
+        let bar = |time: i64, close: f64| Bar {
+            time,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: close,
+            realtime: true,
+        };
+        let mut retained = vec![bar(100, 1.0), bar(200, 2.0)];
+        merge_retained_bars(
+            &mut retained,
+            &[bar(200, 20.0), bar(300, 3.0), bar(50, 0.5)],
+            3,
+        );
+        assert_eq!(
+            retained.iter().map(|item| item.time).collect::<Vec<_>>(),
+            vec![100, 200, 300]
+        );
+        assert_eq!(retained[1].close, 20.0);
     }
 
     #[test]

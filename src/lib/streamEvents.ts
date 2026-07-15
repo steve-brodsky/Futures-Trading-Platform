@@ -8,6 +8,34 @@ export interface BarEventIdentity {
   generation: number;
 }
 
+export interface BarMarketIdentity {
+  symbol: string;
+  timeframe: Timeframe;
+}
+
+export function isSameBarMarket(
+  market: BarMarketIdentity | undefined,
+  symbol: string,
+  timeframe: Timeframe,
+): boolean {
+  return market?.symbol === symbol && market.timeframe === timeframe;
+}
+
+/**
+ * Detached windows do not own the native subscription, so they use a
+ * generation high-water mark. While a market replacement is pending, the
+ * next accepted event must advance that generation; afterwards events from
+ * the current generation continue to be accepted.
+ */
+export function acceptsDetachedBarGeneration(
+  generation: number,
+  latestGeneration: number | undefined,
+  awaitingReplacement: boolean,
+): boolean {
+  if (latestGeneration == null) return true;
+  return awaitingReplacement ? generation > latestGeneration : generation >= latestGeneration;
+}
+
 export function acceptsBarEvent(
   tab: Pick<ChartTabState, "id" | "symbol" | "timeframe"> | undefined,
   environment: TradingEnvironment,

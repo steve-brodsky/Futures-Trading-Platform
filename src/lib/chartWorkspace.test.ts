@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
 import { defaultEma200Alert } from "./emaAlerts";
-import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, tabInsertionIndex } from "./chartWorkspace";
+import { claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, detachedSourceWindowToClose, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
 
 const fallback: WorkspaceState = {
   revision: 0,
@@ -145,6 +145,25 @@ describe("chart workspace", () => {
     const result = moveTab(workspace, "copy", "main", 0);
     expect(result.windows).toHaveLength(1);
     expect(result.windows[0].tabIds).toEqual(["copy", "chart-1"]);
+  });
+
+  it("identifies the detached source window before moving its final tab", () => {
+    const workspace = { ...fallback, tabs: [fallback.tabs[0], cloneChartTab(fallback.tabs[0], "copy")], windows: [{ ...fallback.windows[0] }, { id: "chart-window-detached", detached: true, tabIds: ["copy"], activeTabId: "copy" }] };
+    expect(detachedSourceWindowToClose(workspace, "copy", "main")).toBe("chart-window-detached");
+    expect(detachedSourceWindowToClose(workspace, "copy", "chart-window-detached")).toBeUndefined();
+  });
+
+  it("claims each detached window creation once until the claim is released", () => {
+    const pending = new Set<string>();
+    expect(claimDetachedWindowCreation(pending, "chart-window-a")).toBe(true);
+    expect(claimDetachedWindowCreation(pending, "chart-window-a")).toBe(false);
+    pending.delete("chart-window-a");
+    expect(claimDetachedWindowCreation(pending, "chart-window-a")).toBe(true);
+  });
+
+  it("finds only native detached windows missing from the workspace", () => {
+    const windows = [{ ...fallback.windows[0] }, { id: "chart-window-live", detached: true, tabIds: ["chart-1"], activeTabId: "chart-1" }];
+    expect(staleDetachedWindowIds(["main", "chart-window-live", "chart-window-stale", "settings"], windows)).toEqual(["chart-window-stale"]);
   });
 
   it("removes a detached tab from the main strip instead of duplicating it", () => {

@@ -27,8 +27,8 @@ import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculate
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
 import { reorderWatchlist } from "./lib/watchlist";
-import { acceptsBarEvent, isBarStateEvent } from "./lib/streamEvents";
-import { clampWindowGeometry, cloneChartTab, closeDetachedWindow, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, tabInsertionIndex } from "./lib/chartWorkspace";
+import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
+import { claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, detachedSourceWindowToClose, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
@@ -55,12 +55,26 @@ const defaultWorkspace: WorkspaceState = {
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
 
 interface TabMarketState {
+  symbol: string;
+  timeframe: Timeframe;
   bars: Bar[];
   hasOlder: boolean;
   loadingOlder: boolean;
   streamState: StreamConnectionState;
   streamMessage?: string;
   generation?: number;
+}
+
+function emptyTabMarket(symbol: string, timeframe: Timeframe, generation?: number): TabMarketState {
+  return {
+    symbol,
+    timeframe,
+    bars: [],
+    hasOlder: true,
+    loadingOlder: false,
+    streamState: api.isNative ? "connecting" : "streaming",
+    generation,
+  };
 }
 
 interface StripBounds { windowId: string; left: number; top: number; right: number; bottom: number; }
@@ -214,6 +228,10 @@ export default function App() {
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
   const [currentTime, setCurrentTime] = useState(() => Date.now());
   const subscriptionsRef = useRef(new Map<string, BarSubscription>());
+  const latestDetachedGenerationRef = useRef(new Map<string, number>());
+  const awaitingDetachedGenerationRef = useRef(new Set<string>());
+  const tabMarketEnvironmentRef = useRef(environment);
+  const detachedWindowCreationsRef = useRef(new Set<string>());
   const alertSubscriptionsRef = useRef(new Map<string, BarSubscription>());
   const alertBarsRef = useRef(new Map<string, Bar[]>());
   const alertSidesRef = useRef(new Map<string, EmaCrossSide>());
@@ -232,7 +250,10 @@ export default function App() {
   const isDetached = currentWindowId !== MAIN_WINDOW_ID;
   const hasWindowTabs = windowState.tabIds.length > 0;
   const activeTab = workspace.tabs.find((item) => item.id === windowState?.activeTabId) ?? workspace.tabs[0];
-  const market = tabMarkets[activeTab.id] ?? { bars: [], hasOlder: true, loadingOlder: false, streamState: api.isNative ? "disconnected" : "streaming" };
+  const activeMarket = tabMarkets[activeTab.id];
+  const market = isSameBarMarket(activeMarket, activeTab.symbol.symbol, activeTab.timeframe)
+    ? activeMarket
+    : emptyTabMarket(activeTab.symbol.symbol, activeTab.timeframe);
   const bars = market.bars;
   const activeContinuous = isContinuousFuture(activeTab.symbol);
   const activeTradeSymbol = resolveTradeSymbol(activeTab);
@@ -338,6 +359,38 @@ export default function App() {
     return barSubscriptionGenerationRef.current;
   }
 
+  function markDetachedMarketReplacements(current: WorkspaceState, next: WorkspaceState) {
+    if (currentWindowId === MAIN_WINDOW_ID) return;
+    const currentTabs = new Map(current.tabs.map((tab) => [tab.id, tab]));
+    next.tabs.forEach((tab) => {
+      const prior = currentTabs.get(tab.id);
+      if (!prior || prior.symbol.symbol === tab.symbol.symbol && prior.timeframe === tab.timeframe) return;
+      const currentGeneration = tabMarketsRef.current[tab.id]?.generation;
+      const latestGeneration = latestDetachedGenerationRef.current.get(tab.id);
+      const highWater = currentGeneration == null
+        ? latestGeneration
+        : latestGeneration == null ? currentGeneration : Math.max(currentGeneration, latestGeneration);
+      if (highWater != null) latestDetachedGenerationRef.current.set(tab.id, highWater);
+      awaitingDetachedGenerationRef.current.add(tab.id);
+    });
+  }
+
+  function acceptsWindowBarEvent(tab: ChartTabState | undefined, payload: BarSnapshotEvent | BarUpdateEvent | (StreamStateEvent & { symbol: string; timeframe: Timeframe; generation: number })): boolean {
+    if (!acceptsBarEvent(tab, environmentRef.current, payload)) return false;
+    if (currentWindowId === MAIN_WINDOW_ID) {
+      const expectedGeneration = subscriptionsRef.current.get(payload.subscriptionId)?.generation;
+      return expectedGeneration != null && payload.generation === expectedGeneration;
+    }
+    const latestGeneration = latestDetachedGenerationRef.current.get(payload.subscriptionId);
+    const awaitingReplacement = awaitingDetachedGenerationRef.current.has(payload.subscriptionId);
+    if (!acceptsDetachedBarGeneration(payload.generation, latestGeneration, awaitingReplacement)) return false;
+    if (latestGeneration == null || payload.generation > latestGeneration) {
+      latestDetachedGenerationRef.current.set(payload.subscriptionId, payload.generation);
+    }
+    awaitingDetachedGenerationRef.current.delete(payload.subscriptionId);
+    return true;
+  }
+
   function marketSyncForWindow(windowId: string): WindowMarketSyncEvent {
     const target = workspaceRef.current.windows.find((item) => item.id === windowId);
     const tabs = (target?.tabIds ?? [])
@@ -349,13 +402,9 @@ export default function App() {
         tabId: tab.id,
         symbol: tab.symbol.symbol,
         timeframe: tab.timeframe,
-        market: tabMarketsRef.current[tab.id] ?? {
-          bars: [],
-          hasOlder: true,
-          loadingOlder: false,
-          streamState: api.isNative ? "connecting" : "streaming",
-          generation: subscriptionsRef.current.get(tab.id)?.generation,
-        },
+        market: isSameBarMarket(tabMarketsRef.current[tab.id], tab.symbol.symbol, tab.timeframe)
+          ? tabMarketsRef.current[tab.id]
+          : emptyTabMarket(tab.symbol.symbol, tab.timeframe, subscriptionsRef.current.get(tab.id)?.generation),
       })),
       quotes: Object.fromEntries(tabs.flatMap((tab) => {
         const quote = quotesRef.current[tab.symbol.symbol];
@@ -391,9 +440,14 @@ export default function App() {
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
-        const expectedGeneration = currentWindowId === MAIN_WINDOW_ID ? subscriptionsRef.current.get(payload.subscriptionId)?.generation : undefined;
-        if (acceptsBarEvent(tab, environmentRef.current, payload, expectedGeneration)) {
-          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], payload.bars), generation: payload.generation } }));
+        if (acceptsWindowBarEvent(tab, payload)) {
+          setTabMarkets((current) => {
+            const existing = current[payload.subscriptionId];
+            const base = isSameBarMarket(existing, payload.symbol, payload.timeframe)
+              ? existing
+              : emptyTabMarket(payload.symbol, payload.timeframe);
+            return { ...current, [payload.subscriptionId]: { ...base, bars: mergeBars(base.bars, payload.bars), generation: payload.generation } };
+          });
         }
         if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], payload.bars) } }));
@@ -402,9 +456,14 @@ export default function App() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
-        const expectedGeneration = currentWindowId === MAIN_WINDOW_ID ? subscriptionsRef.current.get(payload.subscriptionId)?.generation : undefined;
-        if (acceptsBarEvent(tab, environmentRef.current, payload, expectedGeneration)) {
-          setTabMarkets((current) => ({ ...current, [payload.subscriptionId]: { ...(current[payload.subscriptionId] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting", bars: [] }), bars: mergeBars(current[payload.subscriptionId]?.bars ?? [], [payload.bar]), generation: payload.generation } }));
+        if (acceptsWindowBarEvent(tab, payload)) {
+          setTabMarkets((current) => {
+            const existing = current[payload.subscriptionId];
+            const base = isSameBarMarket(existing, payload.symbol, payload.timeframe)
+              ? existing
+              : emptyTabMarket(payload.symbol, payload.timeframe);
+            return { ...current, [payload.subscriptionId]: { ...base, bars: mergeBars(base.bars, [payload.bar]), generation: payload.generation } };
+          });
         }
         if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], [payload.bar]) } }));
@@ -418,12 +477,13 @@ export default function App() {
       listen<StreamStateEvent>("stream-state", ({ payload }) => {
         if (!isBarStateEvent(payload)) return;
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
-        const expectedGeneration = currentWindowId === MAIN_WINDOW_ID ? subscriptionsRef.current.get(payload.subscriptionId)?.generation : undefined;
-        if (!acceptsBarEvent(tab, environmentRef.current, payload, expectedGeneration)) return;
+        if (!acceptsWindowBarEvent(tab, payload)) return;
         setTabMarkets((current) => ({
           ...current,
           [payload.subscriptionId]: {
-            ...(current[payload.subscriptionId] ?? { bars: [], hasOlder: true, loadingOlder: false }),
+            ...(isSameBarMarket(current[payload.subscriptionId], payload.symbol, payload.timeframe)
+              ? current[payload.subscriptionId]
+              : emptyTabMarket(payload.symbol, payload.timeframe)),
             streamState: payload.state,
             streamMessage: payload.message,
             generation: payload.generation,
@@ -483,6 +543,7 @@ export default function App() {
     listen<WorkspaceState>("workspace-sync", ({ payload }) => {
       if (payload.revision <= workspaceRef.current.revision) return;
       const next = stabilizeChartWorkspace(workspaceRef.current, normalizeChartWorkspace(payload, defaultWorkspace));
+      markDetachedMarketReplacements(workspaceRef.current, next);
       workspaceRef.current = next;
       setWorkspace(next);
     }).then((unlisten) => cleanups.push(unlisten));
@@ -507,13 +568,21 @@ export default function App() {
         const next = { ...current };
         payload.markets.forEach(({ tabId, symbol, timeframe, market }) => {
           const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
-          if (!tab || tab.symbol.symbol !== symbol || tab.timeframe !== timeframe) return;
+          if (!tab || tab.symbol.symbol !== symbol || tab.timeframe !== timeframe || !isSameBarMarket(market, symbol, timeframe)) return;
+          if (market.generation != null) {
+            const latestGeneration = latestDetachedGenerationRef.current.get(tabId);
+            const awaitingReplacement = awaitingDetachedGenerationRef.current.has(tabId);
+            if (!acceptsDetachedBarGeneration(market.generation, latestGeneration, awaitingReplacement)) return;
+            if (latestGeneration == null || market.generation > latestGeneration) latestDetachedGenerationRef.current.set(tabId, market.generation);
+            awaitingDetachedGenerationRef.current.delete(tabId);
+          }
           const existing = current[tabId];
-          const liveStateIsNewer = existing?.generation != null && existing.generation === market.generation;
+          const matchingExisting = isSameBarMarket(existing, symbol, timeframe) ? existing : undefined;
+          const liveStateIsNewer = matchingExisting?.generation != null && matchingExisting.generation === market.generation;
           next[tabId] = {
             ...market,
-            ...(liveStateIsNewer ? { streamState: existing.streamState, streamMessage: existing.streamMessage } : {}),
-            bars: mergeBars(existing?.bars ?? [], market.bars),
+            ...(liveStateIsNewer ? { streamState: matchingExisting.streamState, streamMessage: matchingExisting.streamMessage } : {}),
+            bars: mergeBars(matchingExisting?.bars ?? [], market.bars),
           };
         });
         return next;
@@ -659,6 +728,37 @@ export default function App() {
   }, [selectedAccount?.id, authenticated, environment]);
 
   useEffect(() => {
+    if (!workspaceLoaded) return;
+    const environmentChanged = tabMarketEnvironmentRef.current !== environment;
+    tabMarketEnvironmentRef.current = environment;
+    const activeIds = new Set(workspace.tabs.map((tab) => tab.id));
+    setTabMarkets((current) => {
+      let changed = Object.keys(current).some((tabId) => !activeIds.has(tabId));
+      const next: Record<string, TabMarketState> = {};
+      workspace.tabs.forEach((tab) => {
+        const existing = current[tab.id];
+        if (!environmentChanged && isSameBarMarket(existing, tab.symbol.symbol, tab.timeframe)) {
+          next[tab.id] = existing;
+          return;
+        }
+        changed ||= existing != null;
+        const latestGeneration = latestDetachedGenerationRef.current.get(tab.id);
+        const highWater = existing?.generation == null
+          ? latestGeneration
+          : latestGeneration == null ? existing.generation : Math.max(existing.generation, latestGeneration);
+        if (currentWindowId !== MAIN_WINDOW_ID && highWater != null) {
+          latestDetachedGenerationRef.current.set(tab.id, highWater);
+          awaitingDetachedGenerationRef.current.add(tab.id);
+        }
+        next[tab.id] = emptyTabMarket(tab.symbol.symbol, tab.timeframe, currentWindowId === MAIN_WINDOW_ID ? undefined : highWater);
+      });
+      latestDetachedGenerationRef.current.forEach((_, tabId) => { if (!activeIds.has(tabId)) latestDetachedGenerationRef.current.delete(tabId); });
+      awaitingDetachedGenerationRef.current.forEach((tabId) => { if (!activeIds.has(tabId)) awaitingDetachedGenerationRef.current.delete(tabId); });
+      return changed ? next : current;
+    });
+  }, [tabStreamKey, environment, workspaceLoaded]);
+
+  useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
     const epoch = `${authEpoch}:${environment}:${authenticated}`;
     const activeIds = new Set(workspace.tabs.map((tab) => tab.id));
@@ -674,20 +774,23 @@ export default function App() {
       const subscriptionId = tab.id;
       const generation = nextBarSubscriptionGeneration();
       subscriptionsRef.current.set(tab.id, { subscriptionId, symbol: tab.symbol.symbol, timeframe: tab.timeframe, epoch, generation });
-      setTabMarkets((current) => ({ ...current, [tab.id]: { bars: [], hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming", generation } }));
+      setTabMarkets((current) => ({ ...current, [tab.id]: emptyTabMarket(tab.symbol.symbol, tab.timeframe, generation) }));
       if (!api.isNative) {
         api.bars(tab.symbol.symbol, tab.timeframe).then((nextBars) => {
           if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
-          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "streaming" }), bars: nextBars, generation } }));
+          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(isSameBarMarket(current[tab.id], tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.symbol, tab.timeframe)), bars: nextBars, generation } }));
         }).catch((error) => showToast(String(error)));
       } else if (authenticated) {
         api.cachedBars(tab.symbol.symbol, tab.timeframe).then((cached) => {
           if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
-          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { hasOlder: true, loadingOlder: false, streamState: "connecting" }), bars: mergeBars(cached, current[tab.id]?.bars ?? []), generation } }));
+          setTabMarkets((current) => {
+            const existing = isSameBarMarket(current[tab.id], tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.symbol, tab.timeframe);
+            return { ...current, [tab.id]: { ...existing, bars: mergeBars(cached, existing.bars), generation } };
+          });
         }).catch(() => undefined);
         api.startBarStream(subscriptionId, tab.symbol.symbol, tab.timeframe, "chart", generation).catch((error) => {
           if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
-          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(current[tab.id] ?? { bars: [], hasOlder: true, loadingOlder: false }), streamState: "disconnected", streamMessage: String(error), generation } }));
+          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(isSameBarMarket(current[tab.id], tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.symbol, tab.timeframe)), streamState: "disconnected", streamMessage: String(error), generation } }));
           showToast(String(error));
         });
       }
@@ -814,7 +917,7 @@ export default function App() {
   }, [vwapSymbolsKey]);
 
   useEffect(() => {
-    if (!workspaceLoaded || tabMarkets[activeTab.id]?.bars.length) return;
+    if (!workspaceLoaded || isSameBarMarket(tabMarkets[activeTab.id], activeTab.symbol.symbol, activeTab.timeframe) && tabMarkets[activeTab.id].bars.length) return;
     const tabId = activeTab.id;
     const symbol = activeTab.symbol.symbol;
     const timeframe = activeTab.timeframe;
@@ -822,7 +925,10 @@ export default function App() {
     load.then((loadedBars) => {
       const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === tabId);
       if (!currentTab || currentTab.symbol.symbol !== symbol || currentTab.timeframe !== timeframe) return;
-      setTabMarkets((current) => ({ ...current, [tabId]: { ...(current[tabId] ?? { hasOlder: true, loadingOlder: false, streamState: api.isNative ? "connecting" : "streaming" }), bars: mergeBars(loadedBars, current[tabId]?.bars ?? []) } }));
+      setTabMarkets((current) => {
+        const existing = isSameBarMarket(current[tabId], symbol, timeframe) ? current[tabId] : emptyTabMarket(symbol, timeframe);
+        return { ...current, [tabId]: { ...existing, bars: mergeBars(loadedBars, existing.bars) } };
+      });
     }).catch(() => undefined);
   }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe]);
 
@@ -978,13 +1084,24 @@ export default function App() {
   async function loadOlder() {
     if (!api.isNative || market.loadingOlder || !market.hasOlder || !bars.length) return;
     const tabId = activeTab.id;
+    const symbol = activeTab.symbol.symbol;
+    const timeframe = activeTab.timeframe;
     const before = bars[0].time;
     setTabMarkets((current) => ({ ...current, [tabId]: { ...market, loadingOlder: true } }));
     try {
-      const older = await api.olderBars(activeTab.symbol.symbol, activeTab.timeframe, before);
-      setTabMarkets((current) => ({ ...current, [tabId]: { ...(current[tabId] ?? market), hasOlder: older.length > 0, bars: older.length ? mergeBars(older, current[tabId]?.bars ?? []) : current[tabId]?.bars ?? [] } }));
+      const older = await api.olderBars(symbol, timeframe, before);
+      const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === tabId);
+      if (!currentTab || currentTab.symbol.symbol !== symbol || currentTab.timeframe !== timeframe) return;
+      setTabMarkets((current) => {
+        const existing = isSameBarMarket(current[tabId], symbol, timeframe) ? current[tabId] : emptyTabMarket(symbol, timeframe);
+        return { ...current, [tabId]: { ...existing, hasOlder: older.length > 0, bars: older.length ? mergeBars(older, existing.bars) : existing.bars } };
+      });
     } catch (error) { showToast(String(error)); }
-    finally { setTabMarkets((current) => ({ ...current, [tabId]: { ...(current[tabId] ?? market), loadingOlder: false } })); }
+    finally {
+      setTabMarkets((current) => isSameBarMarket(current[tabId], symbol, timeframe)
+        ? { ...current, [tabId]: { ...current[tabId], loadingOlder: false } }
+        : current);
+    }
   }
 
   useEffect(() => {
@@ -1091,6 +1208,7 @@ export default function App() {
       const next = currentWindowId === MAIN_WINDOW_ID
         ? { ...update(current), revision: Math.max(current.revision + 1, Date.now()) }
         : update(current);
+      markDetachedMarketReplacements(current, next);
       workspaceRef.current = next;
       if (currentWindowId === MAIN_WINDOW_ID) syncWorkspaceToOpenWindows(next);
       else emitTo(MAIN_WINDOW_ID, "workspace-proposal", next).catch(() => undefined);
@@ -1164,7 +1282,8 @@ export default function App() {
 
   async function closeTab(tabId: string) {
     if (workspace.tabs.length === 1) return;
-    let removedWindow: string | undefined;
+    const ownerBefore = workspaceRef.current.windows.find((item) => item.tabIds.includes(tabId));
+    const removedWindow = ownerBefore?.id !== MAIN_WINDOW_ID && ownerBefore?.tabIds.length === 1 ? ownerBefore.id : undefined;
     commitWorkspace((current) => {
       const next = structuredClone(current);
       next.tabs = next.tabs.filter((tab) => tab.id !== tabId);
@@ -1174,14 +1293,15 @@ export default function App() {
       owner.tabIds.splice(index, 1);
       if (!owner.tabIds.length) {
         if (owner.id !== MAIN_WINDOW_ID) {
-          removedWindow = owner.id;
           next.windows = next.windows.filter((item) => item.id !== owner.id);
         }
       }
       if (!owner.tabIds.includes(owner.activeTabId)) owner.activeTabId = owner.tabIds[Math.min(index, owner.tabIds.length - 1)] ?? "";
       return next;
     });
-    if (removedWindow && api.isNative) (await WebviewWindow.getByLabel(removedWindow))?.destroy();
+    if (removedWindow && api.isNative && currentWindowId === MAIN_WINDOW_ID) {
+      (await WebviewWindow.getByLabel(removedWindow))?.destroy();
+    }
   }
 
   function reorderTab(tabId: string, targetIndex: number) {
@@ -1189,8 +1309,20 @@ export default function App() {
   }
 
   async function ensureDetachedWindow(state: ChartWindowState) {
-    if (!api.isNative || !state.detached || await WebviewWindow.getByLabel(state.id)) return;
-    const monitors = await availableMonitors();
+    if (!api.isNative || !state.detached || !claimDetachedWindowCreation(detachedWindowCreationsRef.current, state.id)) return;
+    const existing = await WebviewWindow.getByLabel(state.id).catch(() => null);
+    if (existing) {
+      detachedWindowCreationsRef.current.delete(state.id);
+      return;
+    }
+    let monitors;
+    try {
+      monitors = await availableMonitors();
+    } catch (error) {
+      detachedWindowCreationsRef.current.delete(state.id);
+      showToast(`Could not inspect displays for detached chart: ${String(error)}`);
+      return;
+    }
     const screens = monitors.map((monitor) => ({ x: monitor.position.x / monitor.scaleFactor, y: monitor.position.y / monitor.scaleFactor, width: monitor.size.width / monitor.scaleFactor, height: monitor.size.height / monitor.scaleFactor }));
     const physicalScreens = monitors.map((monitor) => ({ x: monitor.workArea.position.x, y: monitor.workArea.position.y, width: monitor.workArea.size.width, height: monitor.workArea.size.height }));
     const savedPhysical = savedPhysicalWindowGeometry(state);
@@ -1214,24 +1346,36 @@ export default function App() {
       minHeight: 520,
       resizable: true,
       decorations: true,
-      visible: !physicalGeometry,
+      visible: false,
     });
     view.once("tauri://created", async () => {
-      if (physicalGeometry) {
-        try {
+      detachedWindowCreationsRef.current.delete(state.id);
+      const liveState = workspaceRef.current.windows.find((item) => item.id === state.id && item.detached);
+      if (!liveState) {
+        await view.destroy().catch(() => undefined);
+        return;
+      }
+      try {
+        if (physicalGeometry) {
           await view.setSize(new PhysicalSize(physicalGeometry.width, physicalGeometry.height));
           await view.setPosition(new PhysicalPosition(physicalGeometry.x, physicalGeometry.y));
-        } finally {
-          await view.show();
         }
+        await view.show();
+      } catch (error) {
+        await view.destroy().catch(() => undefined);
+        showToast(`Could not show detached chart: ${String(error)}`);
+        return;
       }
-      await emitTo(state.id, "workspace-sync", workspaceRef.current);
-      state.tabIds.forEach((tabId) => {
+      await emitTo(state.id, "workspace-sync", workspaceRef.current).catch(() => undefined);
+      liveState.tabIds.forEach((tabId) => {
         const range = viewRangesRef.current.get(tabId);
         if (range) emit("chart-viewport", { tabId, range });
       });
     });
-    view.once("tauri://error", ({ payload }) => showToast(`Could not detach chart: ${String(payload)}`));
+    view.once("tauri://error", ({ payload }) => {
+      detachedWindowCreationsRef.current.delete(state.id);
+      showToast(`Could not detach chart: ${String(payload)}`);
+    });
   }
 
   async function detachTab(tabId: string) {
@@ -1249,8 +1393,12 @@ export default function App() {
       next = moveTab(next, tabId, windowId, 0);
       return next;
     });
-    if (detachedState) await ensureDetachedWindow(detachedState);
-    if (source.id !== MAIN_WINDOW_ID && source.tabIds.length === 1) (await WebviewWindow.getByLabel(source.id))?.destroy();
+    // Detached windows only propose workspace changes. The main window is the
+    // sole native-window creator and will also reconcile the emptied source.
+    if (detachedState && currentWindowId === MAIN_WINDOW_ID) await ensureDetachedWindow(detachedState);
+    if (currentWindowId === MAIN_WINDOW_ID && source.id !== MAIN_WINDOW_ID && source.tabIds.length === 1) {
+      (await WebviewWindow.getByLabel(source.id))?.destroy();
+    }
   }
 
   async function finishTabDrag(tabId: string) {
@@ -1261,17 +1409,20 @@ export default function App() {
     const targetWindow = workspaceRef.current.windows.find((item) => item.id === targetBounds.windowId);
     if (!targetWindow) return detachTab(tabId);
     const index = tabInsertionIndex(point.x, targetBounds.left, targetBounds.right, targetWindow.tabIds.length);
-    const source = workspaceRef.current.windows.find((item) => item.tabIds.includes(tabId));
-    const sourceId = source?.id;
+    const sourceWindowToClose = detachedSourceWindowToClose(workspaceRef.current, tabId, targetBounds.windowId);
     commitWorkspace((current) => moveTab(current, tabId, targetBounds.windowId, index));
-    if (sourceId && sourceId !== MAIN_WINDOW_ID && sourceId !== targetBounds.windowId && workspaceRef.current.windows.find((item) => item.id === sourceId)?.tabIds.length === 1) {
-      (await WebviewWindow.getByLabel(sourceId))?.destroy();
+    if (sourceWindowToClose && currentWindowId === MAIN_WINDOW_ID) {
+      (await WebviewWindow.getByLabel(sourceWindowToClose))?.destroy();
     }
   }
 
   useEffect(() => {
     if (!workspaceLoaded || !api.isNative || currentWindowId !== MAIN_WINDOW_ID) return;
-    workspace.windows.filter((item) => item.detached).forEach((item) => ensureDetachedWindow(item));
+    workspace.windows.filter((item) => item.detached).forEach((item) => void ensureDetachedWindow(item));
+    void getAllWindows().then((windows) => {
+      const staleIds = new Set(staleDetachedWindowIds(windows.map((item) => item.label), workspace.windows));
+      return Promise.all(windows.filter((item) => staleIds.has(item.label)).map((item) => item.destroy().catch(() => undefined)));
+    }).catch(() => undefined);
   }, [workspaceLoaded, workspace.windows]);
 
   useEffect(() => {
@@ -1359,8 +1510,11 @@ export default function App() {
         if (!bounds || !source || !target) return;
         const insertion = tabInsertionIndex(point.x, bounds.left, bounds.right, target.tabIds.length);
         const movingIds = [...source.tabIds];
-        commitWorkspace((workspace) => movingIds.reduce((next, tabId, offset) => moveTab(next, tabId, target.id, insertion + offset), workspace));
+        const next = movingIds.reduce((workspace, tabId, offset) => moveTab(workspace, tabId, target.id, insertion + offset), workspaceRef.current);
+        workspaceRef.current = next;
+        setWorkspace(next);
         closing = true;
+        await emitTo(MAIN_WINDOW_ID, "workspace-proposal", next).catch(() => undefined);
         await current.destroy();
       }, 450);
     };

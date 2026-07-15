@@ -10,6 +10,22 @@ export const MAIN_WINDOW_ID = "main";
 
 export interface ScreenRect { x: number; y: number; width: number; height: number; }
 
+export function claimDetachedWindowCreation(pending: Set<string>, windowId: string): boolean {
+  if (pending.has(windowId)) return false;
+  pending.add(windowId);
+  return true;
+}
+
+export function staleDetachedWindowIds(nativeWindowIds: Iterable<string>, windows: ChartWindowState[]): string[] {
+  const desired = new Set(windows.filter((window) => window.detached).map((window) => window.id));
+  return [...nativeWindowIds].filter((windowId) => windowId.startsWith("chart-window-") && !desired.has(windowId));
+}
+
+export function detachedSourceWindowToClose(workspace: WorkspaceState, tabId: string, targetWindowId: string): string | undefined {
+  const source = workspace.windows.find((window) => window.tabIds.includes(tabId));
+  return source && source.detached && source.id !== targetWindowId && source.tabIds.length === 1 ? source.id : undefined;
+}
+
 export function savedPhysicalWindowGeometry(window: ChartWindowState): ScreenRect | undefined {
   const values = [window.physicalX, window.physicalY, window.physicalWidth, window.physicalHeight];
   if (!values.every((value) => typeof value === "number" && Number.isFinite(value))) return undefined;
