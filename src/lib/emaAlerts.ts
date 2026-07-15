@@ -69,11 +69,56 @@ export function uncoveredAlertMarkets(tabs: ChartTabState[]): AlertMarketRequire
 export type EmaCrossSide = "above" | "below";
 export type EmaCrossDirection = "above" | "below";
 
+export interface Ema200TabMarket {
+  symbol: string;
+  timeframe: Timeframe;
+  bars: Bar[];
+}
+
+export interface Ema200TabPositionCacheEntry extends Ema200TabMarket {
+  position?: EmaCrossSide;
+}
+
 export interface EmaCrossEvaluation {
   side?: EmaCrossSide;
   direction?: EmaCrossDirection;
   price?: number;
   ema?: number;
+}
+
+export function ema200Position(bars: Bar[]): EmaCrossSide | undefined {
+  return evaluateEma200Cross(bars).side;
+}
+
+export function deriveEma200TabPositions(
+  tabs: Array<Pick<ChartTabState, "id" | "symbol" | "timeframe">>,
+  markets: Record<string, Ema200TabMarket | undefined>,
+  enabled: boolean,
+  cache: Map<string, Ema200TabPositionCacheEntry>,
+): Partial<Record<string, EmaCrossSide>> {
+  if (!enabled) {
+    cache.clear();
+    return {};
+  }
+  const activeIds = new Set(tabs.map((tab) => tab.id));
+  const positions: Partial<Record<string, EmaCrossSide>> = {};
+  tabs.forEach((tab) => {
+    const market = markets[tab.id];
+    if (market?.symbol !== tab.symbol.symbol || market.timeframe !== tab.timeframe) {
+      cache.delete(tab.id);
+      return;
+    }
+    const cached = cache.get(tab.id);
+    const position = cached?.symbol === market.symbol
+      && cached.timeframe === market.timeframe
+      && cached.bars === market.bars
+      ? cached.position
+      : ema200Position(market.bars);
+    cache.set(tab.id, { symbol: market.symbol, timeframe: market.timeframe, bars: market.bars, position });
+    if (position) positions[tab.id] = position;
+  });
+  cache.forEach((_, tabId) => { if (!activeIds.has(tabId)) cache.delete(tabId); });
+  return positions;
 }
 
 export function evaluateEma200Cross(bars: Bar[], previousSide?: EmaCrossSide): EmaCrossEvaluation {

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import type { Bar, ChartTabState, Timeframe } from "../types";
 import {
   defaultEma200Alert,
+  deriveEma200TabPositions,
   desiredAlertMarkets,
+  ema200Position,
   evaluateEma200Cross,
   normalizeEma200Alert,
   uncoveredAlertMarkets,
@@ -55,6 +57,13 @@ describe("EMA 200 alert configuration", () => {
 });
 
 describe("EMA 200 crossing evaluation", () => {
+  it("classifies tab position only when price is clearly above or below EMA 200", () => {
+    expect(ema200Position(bars().slice(0, 199))).toBeUndefined();
+    expect(ema200Position(bars(101))).toBe("above");
+    expect(ema200Position(bars(99))).toBe("below");
+    expect(ema200Position(bars(100))).toBeUndefined();
+  });
+
   it("waits for enough history and arms silently on its first valid value", () => {
     expect(evaluateEma200Cross(bars().slice(0, 199))).toEqual({ side: undefined });
     const armed = evaluateEma200Cross(bars());
@@ -73,6 +82,31 @@ describe("EMA 200 crossing evaluation", () => {
     const touched = evaluateEma200Cross(bars(100), "above");
     expect(touched).toMatchObject({ side: "above", direction: undefined, price: 100 });
     expect(touched.ema).toBeCloseTo(100);
+  });
+
+  it("does not reuse tab status across market changes and skips disabled calculations", () => {
+    const chart = tab("one", "MES", "1m", []);
+    const cache = new Map();
+    const aboveBars = bars(101);
+    const belowBars = bars(99);
+
+    expect(deriveEma200TabPositions([chart], {
+      one: { symbol: "MES", timeframe: "1m", bars: aboveBars },
+    }, true, cache)).toEqual({ one: "above" });
+
+    chart.timeframe = "5m";
+    expect(deriveEma200TabPositions([chart], {
+      one: { symbol: "MES", timeframe: "1m", bars: aboveBars },
+    }, true, cache)).toEqual({});
+    expect(cache.size).toBe(0);
+    expect(deriveEma200TabPositions([chart], {
+      one: { symbol: "MES", timeframe: "5m", bars: belowBars },
+    }, true, cache)).toEqual({ one: "below" });
+
+    expect(deriveEma200TabPositions([chart], {
+      one: { symbol: "MES", timeframe: "5m", bars: belowBars },
+    }, false, cache)).toEqual({});
+    expect(cache.size).toBe(0);
   });
 });
 

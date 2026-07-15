@@ -243,6 +243,7 @@ export interface ChartWindowState {
 }
 
 export interface ChartLabelSettings {
+  showEma200TabDots: boolean;
   showDollarAmount: boolean;
   showRMultiple: boolean;
   fontSize: number;

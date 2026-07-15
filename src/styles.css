@@ -73,6 +73,9 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .chart-tab-label { min-width: 0; height: 100%; flex: 1; display: flex; align-items: center; gap: 5px; padding: 0 5px 0 9px; border: 0; background: transparent; color: inherit; font: 500 10px DM Mono, monospace; cursor: pointer; }
 .chart-tab-label strong { overflow: hidden; text-overflow: ellipsis; }
 .chart-tab-label span { color: var(--muted); }
+.chart-tab-label .chart-tab-ema-dot { width: 6px; height: 6px; flex: 0 0 6px; margin-left: 1px; border-radius: 50%; }
+.chart-tab-label .chart-tab-ema-dot.above { color: var(--green); background: var(--green); box-shadow: 0 0 6px var(--green); }
+.chart-tab-label .chart-tab-ema-dot.below { color: var(--red); background: var(--red); box-shadow: 0 0 6px var(--red); }
 .chart-tab-close, .chart-tab-add { width: 25px; height: 25px; display: grid; place-items: center; align-self: center; padding: 0; border: 0; border-radius: 4px; color: #738093; background: transparent; cursor: pointer; }
 .chart-tab-close:hover, .chart-tab-add:hover { color: #eef3f8; background: #242d39; }
 .chart-tab-close:disabled, .chart-tab-add:disabled { opacity: .3; cursor: default; }

@@ -16,7 +16,7 @@ import { api } from "./lib/bridge";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
-import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type EmaCrossSide } from "./lib/emaAlerts";
+import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
 import { calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
@@ -49,7 +49,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
-  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -232,6 +232,7 @@ export default function App() {
   const awaitingDetachedGenerationRef = useRef(new Set<string>());
   const tabMarketEnvironmentRef = useRef(environment);
   const detachedWindowCreationsRef = useRef(new Set<string>());
+  const ema200TabCacheRef = useRef(new Map<string, Ema200TabPositionCacheEntry>());
   const alertSubscriptionsRef = useRef(new Map<string, BarSubscription>());
   const alertBarsRef = useRef(new Map<string, Bar[]>());
   const alertSidesRef = useRef(new Map<string, EmaCrossSide>());
@@ -282,6 +283,12 @@ export default function App() {
   const tradeDetailSymbolsKey = [...new Set(workspace.tabs.filter((tab) => isContinuousFuture(tab.symbol)).map(resolveTradeSymbol).filter((symbol): symbol is string => Boolean(symbol)))].sort().join("|");
   const quoteSymbolsKey = quoteSubscriptionSymbols(workspace).join("|");
   const vwapSymbolsKey = nySessionVwapSymbols(workspace.tabs).join("|");
+  const ema200Positions = useMemo(() => deriveEma200TabPositions(
+    workspace.tabs,
+    tabMarkets,
+    workspace.settings.chartLabels.showEma200TabDots,
+    ema200TabCacheRef.current,
+  ), [workspace.tabs, workspace.settings.chartLabels.showEma200TabDots, tabMarkets]);
   alertDesiredRef.current = new Set(alertMarkets.map((market) => market.key));
   vwapSymbolsRef.current = new Set(vwapSymbolsKey.split("|").filter(Boolean));
   vwapDataEpochRef.current = `${environment}:${authEpoch}`;
@@ -1803,7 +1810,7 @@ export default function App() {
       <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
-    <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} totalTabs={workspace.tabs.length} windowId={currentWindowId} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); emit("chart-strip-bounds", bounds); }} />
+    <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); emit("chart-strip-bounds", bounds); }} />
 
     <nav className={`toolbar ${hasWindowTabs ? "" : "empty"}`} aria-label="Chart toolbar">
       <button className="symbol-control" onClick={() => setSearchOpen(true)}><Search size={16} /><strong>{activeTab.symbol.symbol}</strong><span>{activeTab.symbol.exchange}</span><ChevronDown size={14} /></button>
@@ -1870,7 +1877,7 @@ export default function App() {
 
     {settingsOpen && <Modal title="Settings" onClose={() => setSettingsOpen(false)} width={540}><div className="settings-content">
       <WatchlistSettings workspace={workspace} onChange={(watchlist) => updateWorkspace({ watchlist })} onNotify={showToast} />
-      <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Position labels</h3><p>Choose which performance values appear beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
+      <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Chart display</h3><p>Configure tab signals and the values shown beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>EMA 200 tab status</strong><small>Green above EMA 200, red below</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showEma200TabDots} onChange={(event) => updateChartLabelSettings({ showEma200TabDots: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure how the order ticket finds and offsets projected swing stops.</p></header><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
     </div></Modal>}
@@ -1885,11 +1892,12 @@ export default function App() {
   </main>;
 }
 
-function ChartTabStrip({ tabs, activeTabId, totalTabs, windowId, onSelect, onAdd, onClose, onReorder, onDragEnd, onBounds }: {
+function ChartTabStrip({ tabs, activeTabId, totalTabs, windowId, ema200Positions, onSelect, onAdd, onClose, onReorder, onDragEnd, onBounds }: {
   tabs: ChartTabState[];
   activeTabId: string;
   totalTabs: number;
   windowId: string;
+  ema200Positions: Partial<Record<string, EmaCrossSide>>;
   onSelect: (tabId: string) => void;
   onAdd: () => void;
   onClose: (tabId: string) => void;
@@ -1943,12 +1951,12 @@ function ChartTabStrip({ tabs, activeTabId, totalTabs, windowId, onSelect, onAdd
         droppedRef.current = false;
         setDropIndex(undefined);
       }}>
-        <button className="chart-tab-label" tabIndex={tab.id === activeTabId ? 0 : -1} onClick={() => onSelect(tab.id)} onKeyDown={(event) => {
+        <button className="chart-tab-label" aria-label={`${tab.symbol.symbol} ${tab.timeframe} chart${ema200Positions[tab.id] ? `, price ${ema200Positions[tab.id]} EMA 200` : ""}`} tabIndex={tab.id === activeTabId ? 0 : -1} onClick={() => onSelect(tab.id)} onKeyDown={(event) => {
           const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
           if (!direction) return;
           event.preventDefault();
           onSelect(tabs[(index + direction + tabs.length) % tabs.length].id);
-        }}><strong>{tab.symbol.symbol}</strong><span>·</span><span>{tab.timeframe}</span></button>
+        }}><strong>{tab.symbol.symbol}</strong><span>·</span><span>{tab.timeframe}</span>{ema200Positions[tab.id] && <span className={`chart-tab-ema-dot ${ema200Positions[tab.id]}`} role="img" aria-label={`Price ${ema200Positions[tab.id]} EMA 200`} title={`Price ${ema200Positions[tab.id]} EMA 200`} />}</button>
         <button className="chart-tab-close" aria-label={`Close ${tab.symbol.symbol} ${tab.timeframe} chart`} disabled={totalTabs === 1} onClick={() => onClose(tab.id)}><X size={12} /></button>
       </div>)}
       {dropIndex === tabs.length && <span className="tab-drop-end" />}

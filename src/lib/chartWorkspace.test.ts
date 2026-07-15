@@ -11,7 +11,7 @@ const fallback: WorkspaceState = {
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
-  settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } },
 };
 
 describe("chart workspace", () => {
@@ -63,17 +63,17 @@ describe("chart workspace", () => {
 
   it("defaults legacy chart-label settings and preserves explicit preferences", () => {
     const legacy = normalizeChartWorkspace({ ...fallback, settings: undefined }, fallback);
-    expect(legacy.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: true, fontSize: 11 });
+    expect(legacy.settings.chartLabels).toEqual({ showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 });
 
     const saved = normalizeChartWorkspace({
       ...fallback,
-      settings: { chartLabels: { showDollarAmount: false, showRMultiple: true, fontSize: 14 } },
+      settings: { chartLabels: { showEma200TabDots: false, showDollarAmount: false, showRMultiple: true, fontSize: 14 } },
     }, fallback);
-    expect(saved.settings.chartLabels).toEqual({ showDollarAmount: false, showRMultiple: true, fontSize: 14 });
+    expect(saved.settings.chartLabels).toEqual({ showEma200TabDots: false, showDollarAmount: false, showRMultiple: true, fontSize: 14 });
 
     const clamped = normalizeChartWorkspace({
       ...fallback,
-      settings: { chartLabels: { showDollarAmount: true, showRMultiple: true, fontSize: 50 } },
+      settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 50 } },
     }, fallback);
     expect(clamped.settings.chartLabels.fontSize).toBe(16);
   });
@@ -105,10 +105,10 @@ describe("chart workspace", () => {
     const broadcast = normalizeChartWorkspace({
       ...current,
       revision: 2,
-      settings: { chartLabels: { showDollarAmount: true, showRMultiple: false, fontSize: 13 } },
+      settings: { chartLabels: { showEma200TabDots: false, showDollarAmount: true, showRMultiple: false, fontSize: 13 } },
     }, fallback);
     const result = stabilizeChartWorkspace(current, broadcast);
-    expect(result.settings.chartLabels).toEqual({ showDollarAmount: true, showRMultiple: false, fontSize: 13 });
+    expect(result.settings.chartLabels).toEqual({ showEma200TabDots: false, showDollarAmount: true, showRMultiple: false, fontSize: 13 });
     expect(result.settings).not.toBe(current.settings);
   });
 

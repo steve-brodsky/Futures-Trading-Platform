@@ -165,6 +165,9 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     entryRules: normalizeEntryRules(value.entryRules),
     settings: {
       chartLabels: {
+        showEma200TabDots: typeof savedChartLabels?.showEma200TabDots === "boolean"
+          ? savedChartLabels.showEma200TabDots
+          : fallback.settings.chartLabels.showEma200TabDots,
         showDollarAmount: typeof savedChartLabels?.showDollarAmount === "boolean"
           ? savedChartLabels.showDollarAmount
           : fallback.settings.chartLabels.showDollarAmount,
@@ -256,7 +259,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && sameEntryRuleNode(current.entryRules.short, incoming.entryRules.short)
     ? current.entryRules
     : incoming.entryRules;
-  const settings = current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
+  const settings = current.settings.chartLabels.showEma200TabDots === incoming.settings.chartLabels.showEma200TabDots
+    && current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
     && current.settings.chartLabels.showRMultiple === incoming.settings.chartLabels.showRMultiple
     && current.settings.chartLabels.fontSize === incoming.settings.chartLabels.fontSize
     && current.settings.orderTicket.swingStopPivotBars === incoming.settings.orderTicket.swingStopPivotBars
