@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
 import { defaultEma200Alert } from "./emaAlerts";
+import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
 import { claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, detachedSourceWindowToClose, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
 
 const fallback: WorkspaceState = {
   revision: 0,
   environment: "sim",
-  tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
+  tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
@@ -136,8 +137,21 @@ describe("chart workspace", () => {
     const clone = cloneChartTab(source, "copy");
     clone.indicators[0].color = "#000";
     clone.ema200Alert["1m"].enabled = true;
+    clone.renkoSettings.brickSizeTicks = 20;
     expect(source.indicators[0].color).toBe("#fff");
     expect(source.ema200Alert["1m"].enabled).toBe(false);
+    expect(source.renkoSettings.brickSizeTicks).toBe(4);
+  });
+
+  it("defaults and clamps synthetic chart settings", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, tabs: [{ ...fallback.tabs[0], renkoSettings: undefined, pointAndFigureSettings: undefined }] }, fallback);
+    expect(legacy.tabs[0].renkoSettings).toEqual({ brickSizeTicks: 4, priceSource: "close", reversalBricks: 2 });
+    expect(legacy.tabs[0].pointAndFigureSettings).toEqual({ boxSizeTicks: 4, priceSource: "close", reversalBoxes: 3 });
+
+    const saved = normalizeChartWorkspace({ ...fallback, tabs: [{ ...fallback.tabs[0], chartKind: "point-and-figure", renkoSettings: { brickSizeTicks: 50_000, priceSource: "high-low", reversalBricks: 1 }, pointAndFigureSettings: { boxSizeTicks: 0, priceSource: "high-low", reversalBoxes: 99 } }] }, fallback);
+    expect(saved.tabs[0].chartKind).toBe("point-and-figure");
+    expect(saved.tabs[0].renkoSettings).toEqual({ brickSizeTicks: 10_000, priceSource: "high-low", reversalBricks: 1 });
+    expect(saved.tabs[0].pointAndFigureSettings).toEqual({ boxSizeTicks: 1, priceSource: "high-low", reversalBoxes: 10 });
   });
 
   it("moves tabs between windows and removes an empty detached window", () => {

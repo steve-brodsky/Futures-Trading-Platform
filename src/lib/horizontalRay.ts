@@ -15,11 +15,14 @@ export class HorizontalRayPrimitive implements ISeriesPrimitive<Time> {
   private series: ISeriesApi<any> | null = null;
   private requestUpdate?: () => void;
   private drawings: Drawing[] = [];
-  private times: number[] = [];
+  private times: Array<{ plotTime: number; sourceTime: number }> = [];
   private readonly renderer: IPrimitivePaneRenderer = { draw: (target) => {
     if (!this.chart || !this.series) return;
     const scale = this.chart.timeScale();
-    const coordinates = this.drawings.map((drawing) => ({ drawing, x: scale.timeToCoordinate(nearestChartTime(drawing.points[0].time, this.times) as Time), y: this.series!.priceToCoordinate(drawing.points[0].price) }));
+    const coordinates = this.drawings.map((drawing) => {
+      const nearest = this.times.reduce<{ plotTime: number; sourceTime: number } | null>((best, item) => !best || Math.abs(item.sourceTime - drawing.points[0].time) < Math.abs(best.sourceTime - drawing.points[0].time) ? item : best, null);
+      return { drawing, x: nearest ? scale.timeToCoordinate(nearest.plotTime as Time) : null, y: this.series!.priceToCoordinate(drawing.points[0].price) };
+    });
     target.useMediaCoordinateSpace(({ context, mediaSize }) => {
       coordinates.forEach(({ drawing, x, y }) => {
         if (x == null || y == null || y < 0 || y > mediaSize.height) return;
@@ -33,5 +36,6 @@ export class HorizontalRayPrimitive implements ISeriesPrimitive<Time> {
   detached() { this.chart = null; this.series = null; this.requestUpdate = undefined; }
   paneViews() { return [this.view]; }
   setDrawings(drawings: Drawing[]) { this.drawings = drawings; this.requestUpdate?.(); }
-  setTimes(times: number[]) { this.times = times; this.requestUpdate?.(); }
+  setTimes(times: number[]) { this.setTimePoints(times.map((time) => ({ plotTime: time, sourceTime: time }))); }
+  setTimePoints(times: Array<{ plotTime: number; sourceTime: number }>) { this.times = times; this.requestUpdate?.(); }
 }

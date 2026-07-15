@@ -4,6 +4,7 @@ import { cloneEma200Alert, normalizeEma200Alert, sameEma200Alert } from "./emaAl
 import { quoteSubscriptionSymbols } from "./futuresContracts";
 import { normalizeWatchlist } from "./watchlist";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
+import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./priceBasedCharts";
 
 export const MAX_CHART_TABS = 6;
 export const MAIN_WINDOW_ID = "main";
@@ -67,7 +68,15 @@ export function tabInsertionIndex(pointerX: number, stripLeft: number, stripRigh
 type LegacyWorkspace = Partial<WorkspaceState> & Partial<Omit<ChartTabState, "id">> & { bottomTab?: string };
 
 export function cloneChartTab(tab: ChartTabState, id: string): ChartTabState {
-  return { ...tab, id, symbol: { ...tab.symbol }, indicators: tab.indicators.map((indicator) => ({ ...indicator })), ema200Alert: cloneEma200Alert(tab.ema200Alert) };
+  return {
+    ...tab,
+    id,
+    symbol: { ...tab.symbol },
+    indicators: tab.indicators.map((indicator) => ({ ...indicator })),
+    ema200Alert: cloneEma200Alert(tab.ema200Alert),
+    renkoSettings: { ...tab.renkoSettings },
+    pointAndFigureSettings: { ...tab.pointAndFigureSettings },
+  };
 }
 
 export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState): WorkspaceState {
@@ -80,6 +89,8 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       symbol: value.symbol ?? fallbackTab.symbol,
       timeframe: value.timeframe ?? fallbackTab.timeframe,
       chartKind: value.chartKind ?? fallbackTab.chartKind,
+      renkoSettings: value.renkoSettings ?? fallbackTab.renkoSettings,
+      pointAndFigureSettings: value.pointAndFigureSettings ?? fallbackTab.pointAndFigureSettings,
       indicators: value.indicators ?? fallbackTab.indicators,
       ema200Alert: normalizeEma200Alert(value.ema200Alert),
       chartTimezone: value.chartTimezone ?? fallbackTab.chartTimezone,
@@ -98,6 +109,9 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       symbol: { ...(tab.symbol ?? fallbackTab.symbol) },
       indicators: normalizeIndicators(tab.indicators).map((indicator) => ({ ...indicator })),
       ema200Alert: normalizeEma200Alert(tab.ema200Alert),
+      chartKind: ["candles", "line", "area", "renko", "point-and-figure"].includes(tab.chartKind) ? tab.chartKind : fallbackTab.chartKind,
+      renkoSettings: normalizeRenkoSettings(tab.renkoSettings),
+      pointAndFigureSettings: normalizePointAndFigureSettings(tab.pointAndFigureSettings),
       chartTimezone: tab.chartTimezone ?? "exchange",
       magnetEnabled: normalizeMagnetEnabled(tab.magnetEnabled),
       tradeContract: typeof tab.tradeContract === "string" && tab.tradeContract.trim() && !tab.tradeContract.trim().startsWith("@")
@@ -228,6 +242,12 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     const ema200Alert = sameEma200Alert(prior.ema200Alert, tab.ema200Alert) ? prior.ema200Alert : tab.ema200Alert;
     return symbol === prior.symbol && indicators === prior.indicators && ema200Alert === prior.ema200Alert
       && prior.timeframe === tab.timeframe && prior.chartKind === tab.chartKind
+      && prior.renkoSettings.brickSizeTicks === tab.renkoSettings.brickSizeTicks
+      && prior.renkoSettings.priceSource === tab.renkoSettings.priceSource
+      && prior.renkoSettings.reversalBricks === tab.renkoSettings.reversalBricks
+      && prior.pointAndFigureSettings.boxSizeTicks === tab.pointAndFigureSettings.boxSizeTicks
+      && prior.pointAndFigureSettings.priceSource === tab.pointAndFigureSettings.priceSource
+      && prior.pointAndFigureSettings.reversalBoxes === tab.pointAndFigureSettings.reversalBoxes
       && prior.chartTimezone === tab.chartTimezone && prior.magnetEnabled === tab.magnetEnabled
       && prior.tradeContract === tab.tradeContract
       ? prior

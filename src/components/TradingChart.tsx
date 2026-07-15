@@ -1,23 +1,27 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, X } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type Time,
 } from "lightweight-charts";
-import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, Drawing, IndicatorConfig, OrderUpdate, Position, Timeframe } from "../types";
+import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, Drawing, IndicatorConfig, OrderUpdate, PointAndFigureSettings, Position, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
-import { HorizontalRayPrimitive, nearestChartTime } from "../lib/horizontalRay";
+import { HorizontalRayPrimitive } from "../lib/horizontalRay";
 import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, formatTradeLineMetrics, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, type OrderProjection, type ProjectedExitField } from "../lib/tradeLines";
 import { NySessionVwapPrimitive } from "../lib/nySessionVwapPrimitive";
+import { buildPointAndFigure, buildRenko, type PointAndFigureColumn, type RenkoBrick } from "../lib/priceBasedCharts";
+import { PointAndFigureSeries, type PointAndFigureSeriesData } from "../lib/pointAndFigureSeries";
 
 interface Props {
   bars: Bar[];
   vwapBars: Bar[];
   kind: ChartKind;
+  renkoSettings: RenkoSettings;
+  pointAndFigureSettings: PointAndFigureSettings;
   magnetEnabled: boolean;
   symbol: string;
   tradeSymbol?: string;
@@ -59,7 +63,9 @@ const pricePrecision = (minMove: number) => {
   return text.includes(".") ? text.length - text.indexOf(".") - 1 : 0;
 };
 
-export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+type DisplayItem = Bar | RenkoBrick | PointAndFigureColumn;
+
+export function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -71,7 +77,11 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
   const sessionShadingRef = useRef<SessionShading | null>(null);
   const vwapPrimitiveRef = useRef<NySessionVwapPrimitive | null>(null);
   const previousBars = useRef<Bar[]>([]);
+  const previousPlotPoints = useRef<Array<{ plotTime: number; sourceTime: number }>>([]);
   const barsRef = useRef(bars);
+  const displayItemsRef = useRef<Map<number, DisplayItem>>(new Map());
+  const sourceTimeByPlotTimeRef = useRef<Map<number, number>>(new Map());
+  const plotPointsRef = useRef<Array<{ plotTime: number; sourceTime: number }>>([]);
   const magnetEnabledRef = useRef(magnetEnabled);
   const activeToolRef = useRef(activeTool);
   const drawingsRef = useRef(drawings);
@@ -79,7 +89,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
   const loadOlderRef = useRef(onLoadOlder);
   const visibleRangeChangeRef = useRef(onVisibleRangeChange);
   const firstData = useRef(true);
-  const [hovered, setHovered] = useState<Bar | null>(null);
+  const [hovered, setHovered] = useState<DisplayItem | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [chartGeneration, setChartGeneration] = useState(0);
   const [drawingMenu, setDrawingMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -93,10 +103,22 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
   const draggingProjectionRef = useRef<typeof draggingProjection>(null);
   const syncTradeLabelsRef = useRef<() => void>(() => undefined);
   const movingDrawingIdRef = useRef<string | null>(null);
+  const isSynthetic = kind === "renko" || kind === "point-and-figure";
+  const renkoBricks = useMemo(() => kind === "renko" ? buildRenko(bars, minMove, renkoSettings) : [], [bars, kind, minMove, renkoSettings]);
+  const pointAndFigureColumns = useMemo(() => kind === "point-and-figure" ? buildPointAndFigure(bars, minMove, pointAndFigureSettings) : [], [bars, kind, minMove, pointAndFigureSettings]);
+  const displayItems = useMemo<DisplayItem[]>(() => kind === "renko" ? renkoBricks : kind === "point-and-figure" ? pointAndFigureColumns : bars, [bars, kind, renkoBricks, pointAndFigureColumns]);
+  const displayTimes = useMemo(() => displayItems.map((item) => "plotTime" in item ? item.plotTime : item.time), [displayItems]);
+  const displayCloses = useMemo(() => displayItems.map((item) => item.close), [displayItems]);
+  const displayMap = useMemo(() => new Map(displayItems.map((item) => ["plotTime" in item ? item.plotTime : item.time, item])), [displayItems]);
+  const sourceTimeMap = useMemo(() => new Map(displayItems.map((item) => ["plotTime" in item ? item.plotTime : item.time, "sourceTime" in item ? item.sourceTime : item.time])), [displayItems]);
+  const plotPoints = useMemo(() => displayItems.map((item) => ({ plotTime: "plotTime" in item ? item.plotTime : item.time, sourceTime: "sourceTime" in item ? item.sourceTime : item.time })), [displayItems]);
   const liveBar = bars.at(-1);
-  const latest = hovered ?? liveBar ?? null;
-  const change = latest ? latest.close - latest.open : 0;
-  const candleCountdownTone = kind === "candles" && liveBar ? liveBar.close >= liveBar.open ? "up" : "down" : kind;
+  const syntheticLatest = kind === "renko" ? renkoBricks.at(-1) : kind === "point-and-figure" ? pointAndFigureColumns.at(-1) : undefined;
+  const latest = hovered ?? syntheticLatest ?? liveBar ?? null;
+  const latestOpen = latest && "open" in latest ? latest.open : latest?.low ?? 0;
+  const change = latest ? latest.close - latestOpen : 0;
+  const candleCountdownTone = (kind === "candles" || isSynthetic) && liveBar ? liveBar.close >= liveBar.open ? "up" : "down" : kind;
+  const syntheticLive = Boolean(syntheticLatest && "provisional" in syntheticLatest && syntheticLatest.provisional);
   const tradeLines = [...buildTradeLines(tradeSymbol, positions, orders), ...buildProjectedTradeLines(orderProjection)];
   const displayPrices = new Map(tradeLines.map((line) => [line.id,
     draggingOrder && draggingOrder.id === line.order?.id ? draggingOrder.price
@@ -106,6 +128,9 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
   const tradeLineMetrics = buildTradeLineMetrics(tradeLines.map((line) => ({ ...line, price: displayPrices.get(line.id) ?? line.price })), pointValue, currentPrice);
 
   barsRef.current = bars;
+  displayItemsRef.current = displayMap;
+  sourceTimeByPlotTimeRef.current = sourceTimeMap;
+  plotPointsRef.current = plotPoints;
   magnetEnabledRef.current = magnetEnabled;
   activeToolRef.current = activeTool;
   drawingsRef.current = drawings;
@@ -152,14 +177,17 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     const chart = createChart(host.current, {
       autoSize: true,
       layout: { background: { type: ColorType.Solid, color: "#0b0f17" }, textColor: "#778293", attributionLogo: true, panes: { separatorColor: "#202733", separatorHoverColor: "#334155", enableResize: true } },
-      localization: { locale: "en-US", timeFormatter: (time: Time) => formatChartTime(Number(time), zone, true) },
+      localization: { locale: "en-US", timeFormatter: (time: Time) => formatChartTime(sourceTimeByPlotTimeRef.current.get(Number(time)) ?? Number(time), zone, true) },
       grid: { vertLines: { color: "#18202d" }, horzLines: { color: "#18202d" } },
       rightPriceScale: { borderColor: "#232c39", scaleMargins: { top: 0.08, bottom: 0.22 }, minimumWidth: 72 },
       timeScale: {
         borderColor: "#232c39", timeVisible: true, secondsVisible: false, rightOffset: 8, barSpacing: 4.3, minBarSpacing: 1.5,
-        tickMarkFormatter: (time: Time) => intraday
-          ? formatChartTime(Number(time), zone)
-          : new Intl.DateTimeFormat("en-US", { timeZone: zone, month: "short", day: "2-digit" }).format(new Date(Number(time) * 1000)),
+        tickMarkFormatter: (time: Time) => {
+          const sourceTime = sourceTimeByPlotTimeRef.current.get(Number(time)) ?? Number(time);
+          return intraday
+            ? formatChartTime(sourceTime, zone)
+            : new Intl.DateTimeFormat("en-US", { timeZone: zone, month: "short", day: "2-digit" }).format(new Date(sourceTime * 1000));
+        },
       },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "#8291a6", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#263242" }, horzLine: { color: "#8291a6", width: 1, style: LineStyle.Dashed, labelBackgroundColor: "#263242" } },
       handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
@@ -171,12 +199,13 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     let priceSeries: ISeriesApi<any>;
     if (kind === "line") priceSeries = chart.addSeries(LineSeries, { color: "#34d6e9", lineWidth: 2, lastValueVisible: false, priceLineVisible: true, priceFormat });
     else if (kind === "area") priceSeries = chart.addSeries(AreaSeries, { lineColor: "#37d5e8", topColor: "rgba(55,213,232,.28)", bottomColor: "rgba(55,213,232,.01)", lineWidth: 2, lastValueVisible: false, priceLineVisible: true, priceFormat });
-    else priceSeries = chart.addSeries(CandlestickSeries, { upColor: "#16c79a", downColor: "#ef466f", borderVisible: false, wickUpColor: "#16c79a", wickDownColor: "#ef466f", lastValueVisible: false, priceLineVisible: true, priceFormat });
+    else if (kind === "point-and-figure") priceSeries = chart.addCustomSeries(new PointAndFigureSeries(), { upColor: "#16c79a", downColor: "#ef466f", lastValueVisible: false, priceLineVisible: true, priceFormat });
+    else priceSeries = chart.addSeries(CandlestickSeries, { upColor: "#16c79a", downColor: "#ef466f", borderVisible: kind === "renko", wickVisible: kind !== "renko", wickUpColor: "#16c79a", wickDownColor: "#ef466f", lastValueVisible: false, priceLineVisible: true, priceFormat });
     priceRef.current = priceSeries;
     const rayPrimitive = new HorizontalRayPrimitive();
     priceSeries.attachPrimitive(rayPrimitive);
     rayPrimitiveRef.current = rayPrimitive;
-    if (intraday) {
+    if (intraday && !isSynthetic) {
       const sessionShading = new SessionShading();
       priceSeries.attachPrimitive(sessionShading);
       sessionShadingRef.current = sessionShading;
@@ -185,22 +214,30 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       vwapPrimitiveRef.current = vwapPrimitive;
     }
 
-    const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume", lastValueVisible: false, priceLineVisible: false });
-    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-    volumeRef.current = volumeSeries;
+    if (!isSynthetic) {
+      const volumeSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume", lastValueVisible: false, priceLineVisible: false });
+      volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+      volumeRef.current = volumeSeries;
+    } else volumeRef.current = null;
 
     let settingCrosshair = false;
     chart.subscribeCrosshairMove((param) => {
       syncTradeLabelsRef.current();
       if (!param.time) return setHovered(null);
-      const bar = barsRef.current.find((item) => item.time === Number(param.time)) ?? null;
+      const bar = displayItemsRef.current.get(Number(param.time)) ?? null;
       setHovered(bar);
       if (settingCrosshair || !param.sourceEvent || !param.point) return;
       let snappedPrice: number | null = null;
-      if (magnetEnabledRef.current && kind === "candles" && bar) {
+      if (magnetEnabledRef.current && (kind === "candles" || kind === "renko") && bar) {
         const highY = priceSeries.priceToCoordinate(bar.high);
         const lowY = priceSeries.priceToCoordinate(bar.low);
         if (highY != null && lowY != null) snappedPrice = nearestCandleExtreme(param.point.y, highY, lowY, bar.high, bar.low);
+      } else if (magnetEnabledRef.current && kind === "point-and-figure" && bar && "boxes" in bar) {
+        const candidates = bar.boxes.flatMap((price) => {
+          const y = priceSeries.priceToCoordinate(price);
+          return y == null ? [] : [{ price, distance: Math.abs(param.point!.y - y) }];
+        });
+        snappedPrice = candidates.sort((left, right) => left.distance - right.distance)[0]?.price ?? null;
       } else {
         const hoveredPrice = priceSeries.coordinateToPrice(param.point.y);
         if (hoveredPrice != null) snappedPrice = roundToTick(hoveredPrice, minMove);
@@ -218,7 +255,8 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
           const y = priceSeries.priceToCoordinate(drawing.points[0].price);
           if (y == null || Math.abs(y - param.point!.y) > 6) return false;
           if (drawing.kind !== "horizontal-ray") return drawing.kind === "horizontal";
-          const x = chart.timeScale().timeToCoordinate(nearestChartTime(drawing.points[0].time, barsRef.current.map((bar) => bar.time)) as Time);
+          const nearest = plotPointsRef.current.reduce<{ plotTime: number; sourceTime: number } | null>((best, item) => !best || Math.abs(item.sourceTime - drawing.points[0].time) < Math.abs(best.sourceTime - drawing.points[0].time) ? item : best, null);
+          const x = nearest ? chart.timeScale().timeToCoordinate(asTime(nearest.plotTime)) : null;
           return x != null && param.point!.x >= x - 6;
         });
         const selected = hits.at(-1);
@@ -228,13 +266,20 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
         }
       }
       if (!param.time) { setDrawingMenu(null); return; }
-      const time = Number(param.time);
-      const bar = barsRef.current.find((item) => item.time === time) ?? null;
+      const plotTime = Number(param.time);
+      const time = sourceTimeByPlotTimeRef.current.get(plotTime) ?? plotTime;
+      const bar = displayItemsRef.current.get(plotTime) ?? null;
       let clickedPrice: number | null = null;
-      if (magnetEnabledRef.current && kind === "candles" && bar) {
+      if (magnetEnabledRef.current && (kind === "candles" || kind === "renko") && bar) {
         const highY = priceSeries.priceToCoordinate(bar.high);
         const lowY = priceSeries.priceToCoordinate(bar.low);
         if (highY != null && lowY != null) clickedPrice = nearestCandleExtreme(param.point.y, highY, lowY, bar.high, bar.low);
+      } else if (magnetEnabledRef.current && kind === "point-and-figure" && bar && "boxes" in bar) {
+        const candidates = bar.boxes.flatMap((price) => {
+          const y = priceSeries.priceToCoordinate(price);
+          return y == null ? [] : [{ price, distance: Math.abs(param.point!.y - y) }];
+        });
+        clickedPrice = candidates.sort((left, right) => left.distance - right.distance)[0]?.price ?? null;
       } else {
         const price = priceSeries.coordinateToPrice(param.point.y);
         if (price != null) clickedPrice = roundToTick(price, minMove);
@@ -263,6 +308,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     });
 
     previousBars.current = [];
+    previousPlotPoints.current = [];
     firstData.current = true;
     const syncLabels = () => syncTradeLabelsRef.current();
     const resizeObserver = new ResizeObserver(syncLabels);
@@ -276,9 +322,10 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       host.current?.removeEventListener("pointermove", syncLabels);
       chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null;
     };
-  }, [kind, symbol, exchange, minMove, timeframe, timezone]);
+  }, [kind, symbol, exchange, minMove, timeframe, timezone, renkoSettings.brickSizeTicks, renkoSettings.priceSource, renkoSettings.reversalBricks, pointAndFigureSettings.boxSizeTicks, pointAndFigureSettings.priceSource, pointAndFigureSettings.reversalBoxes]);
 
   useEffect(() => {
+    if (isSynthetic) { setCandleCountdown(""); return; }
     const latestOpenTime = bars.at(-1)?.time;
     const price = priceRef.current;
     if (!price || latestOpenTime == null) return;
@@ -288,7 +335,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     requestAnimationFrame(() => syncTradeLabelsRef.current());
     const timer = window.setInterval(updateCountdown, 1_000);
     return () => window.clearInterval(timer);
-  }, [bars.at(-1)?.time, timeframe, chartGeneration]);
+  }, [bars.at(-1)?.time, timeframe, chartGeneration, isSynthetic]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -303,7 +350,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       if (!visibleIds.has(item.config.id)) chart.removeSeries(item.series);
     });
 
-    const closes = barsRef.current.map((bar) => bar.close);
+    const closes = displayCloses;
     indicatorRefs.current = visible.map((config) => {
       const current = existing.get(config.id);
       const series = current?.series ?? chart.addSeries(LineSeries, {
@@ -316,15 +363,15 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
       });
       series.applyOptions({ color: config.color });
       const values = config.kind === "SMA" ? sma(closes, config.period) : ema(closes, config.period);
-      series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(barsRef.current[index].time), value }]));
+      series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(displayTimes[index]), value }]));
       return { config, series };
     });
-  }, [indicators, chartGeneration, minMove]);
+  }, [indicators, chartGeneration, minMove, displayItems]);
 
   useEffect(() => {
     const vwap = indicators.find((indicator) => indicator.kind === "VWAP" && indicator.visible);
-    vwapPrimitiveRef.current?.setData(vwap ? vwapBars : [], bars.map((bar) => bar.time), vwap?.color ?? "#a879ff", timeframe);
-  }, [bars, vwapBars, indicators, chartGeneration]);
+    vwapPrimitiveRef.current?.setData(!isSynthetic && vwap ? vwapBars : [], bars.map((bar) => bar.time), vwap?.color ?? "#a879ff", timeframe);
+  }, [bars, vwapBars, indicators, chartGeneration, isSynthetic]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -398,41 +445,58 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     const chart = chartRef.current;
     const price = priceRef.current;
     const volume = volumeRef.current;
-    if (!chart || !price || !volume || !bars.length) return;
+    if (!chart || !price || !bars.length) return;
     const prior = previousBars.current;
     const latestBar = bars[bars.length - 1];
     sessionShadingRef.current?.setTimes(bars.map((bar) => bar.time));
-    rayPrimitiveRef.current?.setTimes(bars.map((bar) => bar.time));
-    const realtimeOnly = prior.length > 0 && bars[0].time === prior[0].time && bars.length >= prior.length && bars.length <= prior.length + 1;
+    rayPrimitiveRef.current?.setTimePoints(plotPoints);
+    const realtimeOnly = !isSynthetic && prior.length > 0 && bars[0].time === prior[0].time && bars.length >= prior.length && bars.length <= prior.length + 1;
     if (realtimeOnly) {
       if (kind === "candles") price.update({ time: asTime(latestBar.time), open: latestBar.open, high: latestBar.high, low: latestBar.low, close: latestBar.close });
       else price.update({ time: asTime(latestBar.time), value: latestBar.close });
-      volume.update({ time: asTime(latestBar.time), value: latestBar.volume, color: latestBar.close >= latestBar.open ? "rgba(22,199,154,.35)" : "rgba(239,70,111,.35)" });
+      volume?.update({ time: asTime(latestBar.time), value: latestBar.volume, color: latestBar.close >= latestBar.open ? "rgba(22,199,154,.35)" : "rgba(239,70,111,.35)" });
     } else {
       const range = chart.timeScale().getVisibleLogicalRange();
-      const prepended = prior.length && bars[0].time < prior[0].time ? bars.length - prior.length : 0;
+      const priorAnchorIndex = range ? Math.max(0, Math.min(previousPlotPoints.current.length - 1, Math.floor(Number(range.from)))) : -1;
+      const priorAnchor = priorAnchorIndex >= 0 ? previousPlotPoints.current[priorAnchorIndex]?.sourceTime : undefined;
       if (kind === "candles") price.setData(bars.map((bar) => ({ time: asTime(bar.time), open: bar.open, high: bar.high, low: bar.low, close: bar.close })));
-      else price.setData(bars.map((bar) => ({ time: asTime(bar.time), value: bar.close })));
-      volume.setData(bars.map((bar) => ({ time: asTime(bar.time), value: bar.volume, color: bar.close >= bar.open ? "rgba(22,199,154,.35)" : "rgba(239,70,111,.35)" })));
-      if (range && prepended > 0) chart.timeScale().setVisibleLogicalRange({ from: range.from + prepended, to: range.to + prepended });
+      else if (kind === "line" || kind === "area") price.setData(bars.map((bar) => ({ time: asTime(bar.time), value: bar.close })));
+      else if (kind === "renko") price.setData(renkoBricks.map((brick) => ({
+        time: asTime(brick.plotTime), open: brick.open, high: brick.high, low: brick.low, close: brick.close,
+        color: brick.provisional ? (brick.direction === "up" ? "rgba(22,199,154,.48)" : "rgba(239,70,111,.48)") : brick.direction === "up" ? "#16c79a" : "#ef466f",
+        borderColor: brick.direction === "up" ? "#16c79a" : "#ef466f",
+        wickColor: "transparent",
+      })));
+      else price.setData(pointAndFigureColumns.map((column): PointAndFigureSeriesData => ({
+        time: asTime(column.plotTime), sourceTime: column.sourceTime, direction: column.direction, boxes: column.boxes,
+        high: column.high, low: column.low, close: column.close, boxSize: pointAndFigureSettings.boxSizeTicks * minMove,
+        provisional: column.provisional, color: column.direction === "x" ? "#16c79a" : "#ef466f",
+      })));
+      volume?.setData(bars.map((bar) => ({ time: asTime(bar.time), value: bar.volume, color: bar.close >= bar.open ? "rgba(22,199,154,.35)" : "rgba(239,70,111,.35)" })));
+      if (range && priorAnchor != null && plotPoints.length) {
+        const nextAnchorIndex = plotPoints.reduce((best, item, index) => Math.abs(item.sourceTime - priorAnchor) < Math.abs(plotPoints[best].sourceTime - priorAnchor) ? index : best, 0);
+        const shift = nextAnchorIndex - priorAnchorIndex;
+        if (shift) chart.timeScale().setVisibleLogicalRange({ from: range.from + shift, to: range.to + shift });
+      }
     }
 
-    const closes = bars.map((bar) => bar.close);
+    const closes = displayCloses;
     indicatorRefs.current.forEach(({ config, series }) => {
       const values = config.kind === "SMA" ? sma(closes, config.period) : ema(closes, config.period);
-      series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(bars[index].time), value }]));
+      series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(displayTimes[index]), value }]));
     });
     if (firstData.current) {
       chart.timeScale().setVisibleLogicalRange(initialVisibleRange
         ? { from: initialVisibleRange.from as any, to: initialVisibleRange.to as any }
-        : { from: Math.max(0, bars.length - 180) as any, to: (bars.length + 5) as any });
+        : { from: Math.max(0, displayItems.length - 180) as any, to: (displayItems.length + 5) as any });
       firstData.current = false;
     }
     const visibleRange = chart.timeScale().getVisibleLogicalRange();
-    setShowScrollToLatest(Boolean(visibleRange && Number(visibleRange.to) < bars.length - 1));
+    setShowScrollToLatest(Boolean(visibleRange && Number(visibleRange.to) < displayItems.length - 1));
     previousBars.current = bars;
+    previousPlotPoints.current = plotPoints;
     requestAnimationFrame(() => syncTradeLabelsRef.current());
-  }, [bars, kind, chartGeneration]);
+  }, [bars, kind, chartGeneration, displayItems, renkoBricks, pointAndFigureColumns, pointAndFigureSettings.boxSizeTicks, minMove]);
 
   const startOrderDrag = (event: ReactPointerEvent<HTMLDivElement>, order: OrderUpdate, price: number) => {
     if (replacingOrderIds.has(order.id)) return;
@@ -561,15 +625,19 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
     <section className="chart-stage" aria-label={`${symbol} chart`}>
       <div className="chart-heading">
         <div className="instrument-mark">{exchange}</div><strong>{description}</strong><span>·</span><span>{symbol}</span>
-        {latest && <div className="ohlc"><span>O <b>{latest.open.toFixed(2)}</b></span><span>H <b>{latest.high.toFixed(2)}</b></span><span>L <b>{latest.low.toFixed(2)}</b></span><span>C <b className={change >= 0 ? "positive" : "negative"}>{latest.close.toFixed(2)}</b></span></div>}
+        {kind === "point-and-figure" && latest && "boxes" in latest
+          ? <div className="ohlc synthetic-metrics"><span className={latest.direction === "x" ? "positive" : "negative"}>{latest.direction.toUpperCase()} COLUMN</span><span>H <b>{latest.high.toFixed(pricePrecision(minMove))}</b></span><span>L <b>{latest.low.toFixed(pricePrecision(minMove))}</b></span><span>{pointAndFigureSettings.boxSizeTicks}T × {pointAndFigureSettings.reversalBoxes}</span></div>
+          : latest && <div className="ohlc"><span>O <b>{latestOpen.toFixed(pricePrecision(minMove))}</b></span><span>H <b>{latest.high.toFixed(pricePrecision(minMove))}</b></span><span>L <b>{latest.low.toFixed(pricePrecision(minMove))}</b></span><span>C <b className={change >= 0 ? "positive" : "negative"}>{latest.close.toFixed(pricePrecision(minMove))}</b></span></div>}
+        {syntheticLive && <span className="synthetic-live">LIVE</span>}
       </div>
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />
-      {candleCountdownTop != null && candleCountdown && liveBar && <div
-        className={`current-price-label ${candleCountdownTone}`}
+      {isSynthetic && bars.length > 0 && displayItems.length === 0 && <div className="synthetic-empty"><strong>Not enough price movement</strong><span>Reduce the {kind === "renko" ? "brick" : "box"} size or load more history.</span></div>}
+      {candleCountdownTop != null && liveBar && (candleCountdown || isSynthetic) && <div
+        className={`current-price-label ${candleCountdownTone} ${isSynthetic ? "price-only" : ""}`}
         style={{ top: candleCountdownTop }}
-        aria-label={`Current price ${liveBar.close.toFixed(pricePrecision(minMove))}; candle closes in ${candleCountdown}`}
-      ><strong>{liveBar.close.toFixed(pricePrecision(minMove))}</strong><span>{candleCountdown}</span></div>}
+        aria-label={`Current price ${liveBar.close.toFixed(pricePrecision(minMove))}${candleCountdown ? `; candle closes in ${candleCountdown}` : ""}`}
+      ><strong>{liveBar.close.toFixed(pricePrecision(minMove))}</strong>{!isSynthetic && <span>{candleCountdown}</span>}</div>}
       {tradeLines.map((line) => {
         const top = tradeLineTops[line.id];
         if (top == null) return null;
@@ -616,7 +684,7 @@ export function TradingChart({ bars, vwapBars, kind, magnetEnabled, symbol, trad
           <button role="menuitem" className="danger" onClick={() => { onDeleteDrawing(selectedDrawing.id); setDrawingMenu(null); }}><Trash2 size={15} />Delete</button>
         </div>
       </>}
-      {showScrollToLatest && <button className="scroll-to-latest" type="button" aria-label="Scroll to latest candle" title="Scroll to latest candle" onClick={() => chartRef.current?.timeScale().scrollToRealTime()}><ChevronsRight size={18} /></button>}
+      {showScrollToLatest && <button className="scroll-to-latest" type="button" aria-label="Scroll to latest price" title="Scroll to latest price" onClick={() => chartRef.current?.timeScale().scrollToRealTime()}><ChevronsRight size={18} /></button>}
       <select className="timezone-select" aria-label="Chart timezone" value={timezone} onChange={(event) => onTimezoneChange(event.target.value as ChartTimezone)} title={`Chart timezone: ${resolveTimezone(timezone, exchange)}`}>
         {timezoneOptions.map((option) => <option key={option.value} value={option.value}>{option.value === timezone ? timezoneLabel(timezone, exchange) : option.label}</option>)}
       </select>

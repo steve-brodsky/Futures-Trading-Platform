@@ -9,6 +9,7 @@ import {
   normalizeEma200Alert,
   uncoveredAlertMarkets,
 } from "./emaAlerts";
+import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
 
 function bars(last = 101): Bar[] {
   return Array.from({ length: 200 }, (_, index) => ({
@@ -29,6 +30,8 @@ function tab(id: string, symbol: string, timeframe: Timeframe, enabled: Timefram
     symbol: { symbol, description: symbol, exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 },
     timeframe,
     chartKind: "candles",
+    renkoSettings: defaultRenkoSettings(),
+    pointAndFigureSettings: defaultPointAndFigureSettings(),
     indicators: [],
     ema200Alert,
     chartTimezone: "exchange",

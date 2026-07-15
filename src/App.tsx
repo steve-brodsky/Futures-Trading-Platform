@@ -26,13 +26,21 @@ import { calculateSwingStop } from "./lib/swingStop";
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
+import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndFigureSettings, normalizeRenkoSettings } from "./lib/priceBasedCharts";
 import { reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
 import { claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, detachedSourceWindowToClose, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
+const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
+  { kind: "candles", label: "Candles", description: "Time-based OHLC" },
+  { kind: "line", label: "Line", description: "Close price" },
+  { kind: "area", label: "Area", description: "Filled close price" },
+  { kind: "renko", label: "Renko", description: "Fixed price bricks" },
+  { kind: "point-and-figure", label: "Point & Figure", description: "X/O price columns" },
+];
 const newYorkClock = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
   hour: "2-digit",
@@ -45,7 +53,7 @@ const newYorkClock = new Intl.DateTimeFormat("en-US", {
 const defaultWorkspace: WorkspaceState = {
   revision: 0,
   environment: "sim",
-  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
+  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
@@ -200,6 +208,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [searchResults, setSearchResults] = useState<SymbolMeta[]>(futures);
   const [indicatorOpen, setIndicatorOpen] = useState(false);
+  const [chartStyleOpen, setChartStyleOpen] = useState(false);
   const [alertOpen, setAlertOpen] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -261,6 +270,13 @@ export default function App() {
   const activeTradeMeta = activeContinuous
     ? activeTradeSymbol ? tradeDetails[activeTradeSymbol] : undefined
     : activeTab.symbol;
+
+  useEffect(() => {
+    if (!chartStyleOpen) return;
+    const closeChartStyle = (event: KeyboardEvent) => { if (event.key === "Escape") setChartStyleOpen(false); };
+    window.addEventListener("keydown", closeChartStyle);
+    return () => window.removeEventListener("keydown", closeChartStyle);
+  }, [chartStyleOpen]);
 
   workspaceRef.current = workspace;
   tabMarketsRef.current = tabMarkets;
@@ -1063,19 +1079,19 @@ export default function App() {
   function requestVisibleVwap(range: { from: number; to: number }) {
     viewRangesRef.current.set(activeTab.id, range);
     emit("chart-viewport", { tabId: activeTab.id, range });
-    if (!isIntradayTimeframe(activeTab.timeframe) || !activeTab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible) || !bars.length) return;
+    if (activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure" || !isIntradayTimeframe(activeTab.timeframe) || !activeTab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible) || !bars.length) return;
     const firstIndex = Math.max(0, Math.min(bars.length - 1, Math.floor(range.from)));
     const lastIndex = Math.max(firstIndex, Math.min(bars.length - 1, Math.ceil(range.to)));
     queueVwapRange(activeTab.symbol.symbol, bars[firstIndex].time, bars[lastIndex].time + 60);
   }
 
   useEffect(() => {
-    if (!workspaceLoaded || !bars.length || !isIntradayTimeframe(activeTab.timeframe) || !activeTab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible)) return;
+    if (!workspaceLoaded || !bars.length || activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure" || !isIntradayTimeframe(activeTab.timeframe) || !activeTab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible)) return;
     const saved = viewRangesRef.current.get(activeTab.id);
     const firstIndex = saved ? Math.max(0, Math.min(bars.length - 1, Math.floor(saved.from))) : Math.max(0, bars.length - 180);
     const lastIndex = saved ? Math.max(firstIndex, Math.min(bars.length - 1, Math.ceil(saved.to))) : bars.length - 1;
     queueVwapRange(activeTab.symbol.symbol, bars[firstIndex].time, bars[lastIndex].time + 60);
-  }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe, activeTab.indicators, bars.length]);
+  }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe, activeTab.chartKind, activeTab.indicators, bars.length]);
 
   useEffect(() => {
     if (api.isNative || activeTab.timeframe !== "1m" || !vwapSymbolsRef.current.has(activeTab.symbol.symbol) || !bars.length) return;
@@ -1249,6 +1265,22 @@ export default function App() {
 
   function updateActiveTab(patch: Partial<ChartTabState>) {
     commitWorkspace((current) => ({ ...current, tabs: current.tabs.map((tab) => tab.id === activeTab.id ? { ...tab, ...patch } : tab) }));
+  }
+
+  function updateChartStyle(chartKind: ChartKind) {
+    viewRangesRef.current.delete(activeTab.id);
+    updateActiveTab({ chartKind });
+    if (chartKind !== "renko" && chartKind !== "point-and-figure") setChartStyleOpen(false);
+  }
+
+  function updateRenkoSettings(patch: Partial<ChartTabState["renkoSettings"]>) {
+    viewRangesRef.current.delete(activeTab.id);
+    updateActiveTab({ renkoSettings: normalizeRenkoSettings({ ...activeTab.renkoSettings, ...patch }) });
+  }
+
+  function updatePointAndFigureSettings(patch: Partial<ChartTabState["pointAndFigureSettings"]>) {
+    viewRangesRef.current.delete(activeTab.id);
+    updateActiveTab({ pointAndFigureSettings: normalizePointAndFigureSettings({ ...activeTab.pointAndFigureSettings, ...patch }) });
   }
 
   async function selectWatchlistSymbol(value: string) {
@@ -1817,18 +1849,35 @@ export default function App() {
       <div className="divider" />
       <div className="timeframe-group">{timeframes.map((tf) => <button key={tf} className={activeTab.timeframe === tf ? "active" : ""} onClick={() => updateActiveTab({ timeframe: tf })}>{tf}</button>)}</div>
       <div className="divider" />
-      <div className="chart-kinds">
-        <IconButton label="Candlestick chart" active={activeTab.chartKind === "candles"} onClick={() => updateActiveTab({ chartKind: "candles" })}><BarChart3 size={17} /></IconButton>
-        <IconButton label="Line chart" active={activeTab.chartKind === "line"} onClick={() => updateActiveTab({ chartKind: "line" })}><LineChart size={17} /></IconButton>
-        <IconButton label="Area chart" active={activeTab.chartKind === "area"} onClick={() => updateActiveTab({ chartKind: "area" })}><Activity size={17} /></IconButton>
+      <div className="toolbar-popover-anchor chart-style-anchor">
+        <button className={`text-tool-button chart-style-button ${chartStyleOpen ? "active" : ""}`} aria-haspopup="menu" aria-expanded={chartStyleOpen} onClick={() => { setIndicatorOpen(false); setAlertOpen(false); setChartStyleOpen((value) => !value); }}><ChartStyleGlyph kind={activeTab.chartKind} /><span>{chartStyles.find((style) => style.kind === activeTab.chartKind)?.label}</span><ChevronDown size={13} /></button>
+        {chartStyleOpen && <><button className="popover-backdrop" aria-label="Close chart style menu" onClick={() => setChartStyleOpen(false)} /><div className="popover chart-style-popover" role="menu" aria-label="Chart style">
+          <header><strong>Chart style</strong><span>Per tab</span></header>
+          <div className="chart-style-list">{chartStyles.map((style) => <button key={style.kind} role="menuitemradio" aria-checked={activeTab.chartKind === style.kind} className={activeTab.chartKind === style.kind ? "selected" : ""} onClick={() => updateChartStyle(style.kind)}><ChartStyleGlyph kind={style.kind} size={17} /><span><strong>{style.label}</strong><small>{style.description}</small></span><i /></button>)}</div>
+          {activeTab.chartKind === "renko" && <section className="synthetic-chart-settings" aria-label="Renko settings">
+            <div className="synthetic-settings-heading"><strong>Renko construction</strong><span>SMA/EMA use bricks</span></div>
+            <label><span>Brick size</span><div className="tick-input"><input type="number" min="1" max="10000" step="1" aria-label="Renko brick size in ticks" value={activeTab.renkoSettings.brickSizeTicks} onChange={(event) => updateRenkoSettings({ brickSizeTicks: Number(event.target.value) })} /><em>ticks</em></div><small>{(activeTab.renkoSettings.brickSizeTicks * activeTab.symbol.minMove).toFixed(Math.max(0, String(activeTab.symbol.minMove).split(".")[1]?.length ?? 0))} price</small></label>
+            <label><span>Price source</span><select aria-label="Renko price source" value={activeTab.renkoSettings.priceSource} onChange={(event) => updateRenkoSettings({ priceSource: event.target.value as "close" | "high-low" })}><option value="close">Close</option><option value="high-low">High / Low</option></select></label>
+            <label><span>Reversal</span><select aria-label="Renko reversal bricks" value={activeTab.renkoSettings.reversalBricks} onChange={(event) => updateRenkoSettings({ reversalBricks: Number(event.target.value) as 1 | 2 })}><option value="1">1 brick</option><option value="2">2 bricks</option></select><small>{activeTab.renkoSettings.reversalBricks === 2 ? "Traditional non-overlap" : "Immediate reversal"}</small></label>
+          </section>}
+          {activeTab.chartKind === "point-and-figure" && <section className="synthetic-chart-settings" aria-label="Point and Figure settings">
+            <div className="synthetic-settings-heading"><strong>Point & Figure construction</strong><span>SMA/EMA use columns</span></div>
+            <label><span>Box size</span><div className="tick-input"><input type="number" min="1" max="10000" step="1" aria-label="Point and Figure box size in ticks" value={activeTab.pointAndFigureSettings.boxSizeTicks} onChange={(event) => updatePointAndFigureSettings({ boxSizeTicks: Number(event.target.value) })} /><em>ticks</em></div><small>{(activeTab.pointAndFigureSettings.boxSizeTicks * activeTab.symbol.minMove).toFixed(Math.max(0, String(activeTab.symbol.minMove).split(".")[1]?.length ?? 0))} price</small></label>
+            <label><span>Price source</span><select aria-label="Point and Figure price source" value={activeTab.pointAndFigureSettings.priceSource} onChange={(event) => updatePointAndFigureSettings({ priceSource: event.target.value as "close" | "high-low" })}><option value="close">Close</option><option value="high-low">High / Low</option></select></label>
+            <label><span>Reversal boxes</span><input type="number" min="1" max="10" step="1" aria-label="Point and Figure reversal boxes" value={activeTab.pointAndFigureSettings.reversalBoxes} onChange={(event) => updatePointAndFigureSettings({ reversalBoxes: Number(event.target.value) })} /></label>
+          </section>}
+        </div></>}
       </div>
       <div className="toolbar-popover-anchor">
-        <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => { setAlertOpen(false); setIndicatorOpen((value) => !value); }}><SlidersHorizontal size={16} />Indicators</button>
-        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible).length} active</span></header>{activeTab.indicators.map((indicator) => <div key={indicator.id} className="indicator-row"><label className="indicator-color" title={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`}><input type="color" value={indicator.color} aria-label={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" aria-pressed={indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind === "VWAP" ? "NY Session VWAP" : indicator.kind}</strong><small>{indicator.kind === "VWAP" ? isIntradayTimeframe(activeTab.timeframe) ? "9:30 AM–4:00 PM ET" : "Intraday only" : `Length ${indicator.period}`}</small></span><span className={`toggle ${indicator.visible ? "on" : ""}`} /></button></div>)}</div>}
+        <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => { setAlertOpen(false); setChartStyleOpen(false); setIndicatorOpen((value) => !value); }}><SlidersHorizontal size={16} />Indicators</button>
+        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible && (i.kind !== "VWAP" || (activeTab.chartKind !== "renko" && activeTab.chartKind !== "point-and-figure"))).length} active</span></header>{activeTab.indicators.map((indicator) => {
+          const unavailable = indicator.kind === "VWAP" && (activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure");
+          return <div key={indicator.id} className={`indicator-row ${unavailable ? "unavailable" : ""}`}><label className="indicator-color" title={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`}><input type="color" value={indicator.color} disabled={unavailable} aria-label={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" disabled={unavailable} aria-pressed={unavailable ? false : indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind === "VWAP" ? "NY Session VWAP" : indicator.kind}</strong><small>{unavailable ? "Time-based charts only" : indicator.kind === "VWAP" ? isIntradayTimeframe(activeTab.timeframe) ? "9:30 AM–4:00 PM ET" : "Intraday only" : `${activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure" ? "Synthetic" : "Source"} length ${indicator.period}`}</small></span><span className={`toggle ${!unavailable && indicator.visible ? "on" : ""}`} /></button></div>;
+        })}</div>}
       </div>
       {!isDetached && <div className="toolbar-popover-anchor">
-        <button className={`text-tool-button alert-tool-button ${alertOpen || activeAlertCount > 0 ? "active" : ""}`} aria-pressed={activeAlertCount > 0} title={`${activeAlertCount} EMA 200 alert timeframe${activeAlertCount === 1 ? "" : "s"} active`} onClick={() => { prepareAlertAudio(); setIndicatorOpen(false); setAlertOpen((value) => !value); }}><Bell size={16} fill={activeAlertCount > 0 ? "currentColor" : "none"} /><span className="tool-label">Alert</span></button>
-        {alertOpen && <div className="popover alert-popover"><header><strong>EMA 200 Alerts</strong><span>{activeAlertCount} active</span></header><div className="alert-list">{ALERT_TIMEFRAMES.map((timeframe) => {
+        <button className={`text-tool-button alert-tool-button ${alertOpen || activeAlertCount > 0 ? "active" : ""}`} aria-pressed={activeAlertCount > 0} title={`${activeAlertCount} EMA 200 alert timeframe${activeAlertCount === 1 ? "" : "s"} active`} onClick={() => { prepareAlertAudio(); setIndicatorOpen(false); setChartStyleOpen(false); setAlertOpen((value) => !value); }}><Bell size={16} fill={activeAlertCount > 0 ? "currentColor" : "none"} /><span className="tool-label">Alert</span></button>
+        {alertOpen && <div className="popover alert-popover"><header><strong>EMA 200 Alerts</strong><span>{activeAlertCount} active · source bars</span></header><div className="alert-list">{ALERT_TIMEFRAMES.map((timeframe) => {
           const config = activeTab.ema200Alert[timeframe];
           return <section key={timeframe} className={`alert-row ${config.enabled ? "enabled" : ""}`}>
             <button className="alert-toggle-button" aria-pressed={config.enabled} onClick={() => { prepareAlertAudio(); updateTimeframeAlert(timeframe, { enabled: !config.enabled }); }}><span><strong>{timeframe}</strong><small>Price crosses EMA 200</small></span><span className={`toggle ${config.enabled ? "on" : ""}`} /></button>
@@ -1849,7 +1898,7 @@ export default function App() {
     <section className={`workspace ${hasWindowTabs ? "" : "empty-chart-workspace"} ${!isDetached ? `with-right ${workspace.rightPanelOpen ? "right-open" : "right-collapsed"}` : ""} ${!isDetached ? "with-bottom" : ""} ${!isDetached && !workspace.bottomPanelOpen ? "bottom-collapsed" : ""} ${!isDetached && workspace.bottomPanelOpen && bottomPanelMaximized ? "bottom-maximized" : ""}`} style={{ "--bottom-height": workspace.bottomPanelOpen && bottomPanelMaximized ? "100%" : `${workspace.bottomPanelOpen ? workspace.bottomPanelHeight ?? 360 : 42}px` } as React.CSSProperties}>
       <aside className="drawing-rail" aria-label="Drawing tools" onKeyDown={(event) => { if (event.key === "Escape") setHorizontalToolsOpen(false); }}>
         <IconButton label="Cursor" active={activeTool === "cursor"} onClick={() => setActiveTool("cursor")}><MousePointer2 size={18} /></IconButton>
-        <IconButton label="Magnet: snap crosshair to candle high or low" active={activeTab.magnetEnabled} onClick={() => updateActiveTab({ magnetEnabled: !activeTab.magnetEnabled })}><Magnet size={18} /></IconButton>
+        <IconButton label={`Magnet: snap crosshair to ${activeTab.chartKind === "point-and-figure" ? "box levels" : activeTab.chartKind === "renko" ? "brick extremes" : "candle high or low"}`} active={activeTab.magnetEnabled} onClick={() => updateActiveTab({ magnetEnabled: !activeTab.magnetEnabled })}><Magnet size={18} /></IconButton>
         <div className="drawing-tool-anchor">
           <IconButton label="Horizontal drawing tools" active={activeTool === "horizontal" || activeTool === "horizontal-ray"} onClick={() => setHorizontalToolsOpen((value) => !value)}><Minus size={18} /></IconButton>
           {horizontalToolsOpen && <><button className="drawing-flyout-backdrop" aria-label="Close horizontal drawing selector" onClick={() => setHorizontalToolsOpen(false)} /><div className="drawing-flyout" role="menu" aria-label="Horizontal drawing selector">
@@ -1859,7 +1908,7 @@ export default function App() {
         </div>
       </aside>
 
-      <TradingChart key={activeTab.id} bars={bars} vwapBars={vwapMarkets[activeTab.symbol.symbol]?.bars ?? []} kind={activeTab.chartKind} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} pointValue={activeTradeMeta?.pointValue ?? activeTab.symbol.pointValue} currentPrice={activeTradeQuote.last} chartLabelSettings={workspace.settings.chartLabels} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={editProjectedExit} onOrderProjectionRestore={restoreOrderProjection} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={requestVisibleVwap} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
+      <TradingChart key={activeTab.id} bars={bars} vwapBars={vwapMarkets[activeTab.symbol.symbol]?.bars ?? []} kind={activeTab.chartKind} renkoSettings={activeTab.renkoSettings} pointAndFigureSettings={activeTab.pointAndFigureSettings} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} pointValue={activeTradeMeta?.pointValue ?? activeTab.symbol.pointValue} currentPrice={activeTradeQuote.last} chartLabelSettings={workspace.settings.chartLabels} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={editProjectedExit} onOrderProjectionRestore={restoreOrderProjection} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={requestVisibleVwap} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
 
       {!isDetached && <aside className={`right-panel ${workspace.rightPanelOpen ? "open" : "collapsed"}`} aria-labelledby="order-panel-title">
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>
@@ -1988,6 +2037,14 @@ function TopbarWatchlist({ symbols, quotes, active, onSelect }: { symbols: strin
       })}
     </div>
   </div>;
+}
+
+function ChartStyleGlyph({ kind, size = 16 }: { kind: ChartKind; size?: number }) {
+  if (kind === "line") return <LineChart size={size} />;
+  if (kind === "area") return <Activity size={size} />;
+  if (kind === "renko") return <SquareStack size={size} />;
+  if (kind === "point-and-figure") return <TrendingUp size={size} />;
+  return <BarChart3 size={size} />;
 }
 
 function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: WorkspaceState; onChange: (symbols: string[]) => void; onNotify: (message: string) => void }) {

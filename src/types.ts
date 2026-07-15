@@ -3,7 +3,8 @@ export type ConnectionState = "demo" | "connecting" | "live" | "stale" | "discon
 export type Timeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "D" | "W" | "M";
 export type AlertSound = "chime" | "bell" | "pulse" | "siren";
 export type AlertDurationSeconds = 1 | 3 | 5 | 10;
-export type ChartKind = "candles" | "line" | "area";
+export type ChartKind = "candles" | "line" | "area" | "renko" | "point-and-figure";
+export type SyntheticPriceSource = "close" | "high-low";
 export type OrderType = "Market" | "Limit" | "StopMarket" | "StopLimit";
 export type ChartTimezone = "exchange" | "local" | "UTC" | "America/New_York" | "America/Chicago" | "America/Denver" | "America/Los_Angeles" | "Europe/London" | "Asia/Tokyo";
 export type StreamConnectionState = "connecting" | "streaming" | "stale" | "reconnecting" | "disconnected" | "rate-limited";
@@ -216,6 +217,8 @@ export interface ChartTabState {
   symbol: SymbolMeta;
   timeframe: Timeframe;
   chartKind: ChartKind;
+  renkoSettings: RenkoSettings;
+  pointAndFigureSettings: PointAndFigureSettings;
   indicators: IndicatorConfig[];
   ema200Alert: Ema200AlertConfig;
   chartTimezone: ChartTimezone;
@@ -240,6 +243,18 @@ export interface ChartWindowState {
   physicalY?: number;
   physicalWidth?: number;
   physicalHeight?: number;
+}
+
+export interface RenkoSettings {
+  brickSizeTicks: number;
+  priceSource: SyntheticPriceSource;
+  reversalBricks: 1 | 2;
+}
+
+export interface PointAndFigureSettings {
+  boxSizeTicks: number;
+  priceSource: SyntheticPriceSource;
+  reversalBoxes: number;
 }
 
 export interface ChartLabelSettings {

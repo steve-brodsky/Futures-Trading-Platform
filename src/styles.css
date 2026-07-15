@@ -92,11 +92,15 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .timeframe-group button:hover { background: var(--surface-3); color: #e8edf3; }
 .timeframe-group button.active { color: #071217; background: var(--cyan); }
 .chart-kinds { display: flex; }
+.chart-style-button { min-width: 116px; justify-content: flex-start; }
+.chart-style-button > span { overflow: hidden; flex: 1; text-align: left; white-space: nowrap; text-overflow: ellipsis; }
+.chart-style-button > svg:last-child { color: var(--muted); }
 .text-tool-button { height: 32px; padding: 0 10px; border: 0; border-radius: 5px; color: #9aa5b4; background: transparent; display: flex; align-items: center; gap: 7px; font-size: 11px; cursor: pointer; }
 .text-tool-button:hover, .text-tool-button.active { background: #171e28; color: #edf2f7; }
 .alert-tool-button.active { color: var(--cyan); background: rgba(55,213,232,.09); }
 .toolbar-spacer { flex: 1; }
 .toolbar-popover-anchor { position: relative; }
+.popover-backdrop { position: fixed; z-index: 29; inset: 0; padding: 0; border: 0; background: transparent; }
 .toolbar.empty > * { display: none; }
 .toolbar.empty::after { content: "No chart in this window — add a tab or drag one here"; color: var(--muted); font-size: 10px; }
 
@@ -125,6 +129,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .current-price-label strong { font-size: 11px; line-height: 1; font-weight: 700; }
 .current-price-label span { border-top: 1px solid rgba(7,17,22,.18); font-size: 10px; line-height: 1; font-weight: 700; letter-spacing: .02em; opacity: .95; }
 .current-price-label.area { background: #37d5e8; }
+.current-price-label.price-only { height: 20px; display: grid; grid-template-rows: 20px; transform: translateY(-10px); }
 .current-price-label.up { color: #fff; background: var(--green); }
 .current-price-label.down { color: #fff; background: var(--red); }
 .current-price-label.up span, .current-price-label.down span { border-top-color: rgba(255,255,255,.18); }
@@ -148,6 +153,10 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .chart-heading { position: absolute; z-index: 5; top: 10px; left: 13px; display: flex; align-items: center; gap: 7px; font-size: 11px; pointer-events: none; }
 .chart-heading strong { color: #d8dee8; font-weight: 500; }
 .chart-heading > span { color: var(--muted); }
+.chart-heading .synthetic-live { padding: 3px 5px; border: 1px solid rgba(240,184,75,.38); border-radius: 3px; color: var(--amber); background: rgba(240,184,75,.08); font: 700 8px/1 DM Mono, monospace; letter-spacing: .08em; }
+.synthetic-metrics > span:first-child { font-weight: 700; }
+.synthetic-empty { position: absolute; z-index: 4; top: 50%; left: 50%; display: flex; flex-direction: column; align-items: center; gap: 6px; transform: translate(-50%, -50%); color: var(--muted); font: 500 10px DM Mono, monospace; pointer-events: none; }
+.synthetic-empty strong { color: #b9c3cf; font-size: 11px; font-weight: 600; }
 .instrument-mark { display: grid; place-items: center; width: 27px; height: 18px; border-radius: 4px; font: 700 7px DM Mono, monospace; color: #061014; background: var(--cyan); }
 .ohlc { display: flex; gap: 7px; margin-left: 4px; font: 500 9px DM Mono, monospace; color: var(--muted); }
 .ohlc b { color: #a6b0bf; font-weight: 500; }
@@ -330,9 +339,33 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .empty-table { height: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted-2); font-size: 10px; }
 
 .popover { position: absolute; top: 38px; left: 0; z-index: 30; width: 250px; background: #121821; border: 1px solid #2a3442; border-radius: 7px; box-shadow: 0 18px 50px rgba(0,0,0,.45); overflow: hidden; animation: pop-in .14s ease-out; }
+.chart-style-popover { width: 286px; }
+.chart-style-popover > header { height: 42px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 10px; }
+.chart-style-popover > header span { color: var(--muted); font-size: 8px; }
+.chart-style-list { padding: 4px; }
+.chart-style-list > button { position: relative; width: 100%; height: 43px; display: grid; grid-template-columns: 27px minmax(0, 1fr) 14px; align-items: center; gap: 8px; padding: 0 8px; border: 0; border-radius: 5px; color: #8f9bac; background: transparent; text-align: left; cursor: pointer; }
+.chart-style-list > button:hover { color: #edf3f8; background: #19212c; }
+.chart-style-list > button.selected { color: var(--cyan); background: rgba(55,213,232,.075); }
+.chart-style-list > button > span { display: flex; flex-direction: column; gap: 3px; }
+.chart-style-list strong { color: #dce3eb; font-size: 10px; font-weight: 600; }
+.chart-style-list small { color: var(--muted); font-size: 8px; }
+.chart-style-list button.selected i { width: 6px; height: 6px; justify-self: center; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 7px rgba(55,213,232,.7); }
+.synthetic-chart-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 11px 12px 13px; border-top: 1px solid var(--line); background: #0f151d; }
+.synthetic-settings-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin-bottom: 1px; }
+.synthetic-settings-heading strong { color: #dce4ed; font-size: 9px; }
+.synthetic-settings-heading span { color: var(--muted); font-size: 8px; }
+.synthetic-chart-settings label { min-width: 0; display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 8px; }
+.synthetic-chart-settings label:first-of-type { grid-row: span 2; }
+.synthetic-chart-settings input, .synthetic-chart-settings select { width: 100%; height: 28px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 4px; color: #dbe3ec; background: #151d27; font: 600 9px DM Mono, monospace; }
+.synthetic-chart-settings label > small { color: #667386; font: 500 8px DM Mono, monospace; }
+.tick-input { position: relative; }
+.tick-input input { padding-right: 34px; }
+.tick-input em { position: absolute; top: 9px; right: 7px; color: var(--muted); font: 500 8px DM Mono, monospace; font-style: normal; pointer-events: none; }
 @keyframes pop-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .indicator-popover header { height: 42px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 10px; }
 .indicator-popover header span { color: var(--muted); font-size: 8px; }
+.indicator-row.unavailable { opacity: .46; }
+.indicator-row.unavailable button { cursor: not-allowed; }
 .indicator-row { width: 100%; height: 48px; display: flex; align-items: center; border-bottom: 1px solid var(--line-soft); background: transparent; }
 .indicator-row:hover { background: #18202a; }
 .indicator-color { position: relative; width: 26px; height: 32px; margin-left: 5px; display: grid; place-items: center; cursor: pointer; }

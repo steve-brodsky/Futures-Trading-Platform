@@ -9,7 +9,8 @@ Northstar Trader is a private futures charting and order-entry desktop client fo
 
 ### Charts and market data
 
-- Candlestick, line, and area charts powered by TradingView Lightweight Charts.
+- Candlestick, line, area, fixed-tick Renko, and Point & Figure charts powered by TradingView Lightweight Charts.
+- Per-tab Renko and Point & Figure construction settings, including close or deterministic high/low input and configurable reversal thresholds.
 - `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, daily, weekly, and monthly timeframes.
 - Shared streaming bars across matching charts, EMA alerts, and VWAP consumers, plus a deduplicated quote stream for charts, contracts, and the watchlist.
 - SQLite-backed candle caching, initial history, and lazy backfill when the chart approaches its oldest loaded bar.

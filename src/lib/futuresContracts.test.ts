@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ChartTabState, SymbolMeta } from "../types";
 import { defaultEma200Alert } from "./emaAlerts";
+import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
 import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol } from "./futuresContracts";
 
 const continuous: SymbolMeta = { symbol: "@MES", root: "MES", underlying: "MESU26", description: "Continuous MES", exchange: "CME", assetType: "FUTURE", minMove: .25, pointValue: 5 };
-const tab = (symbol: SymbolMeta, tradeContract?: string): ChartTabState => ({ id: symbol.symbol, symbol, tradeContract, timeframe: "1m", chartKind: "candles", indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false });
+const tab = (symbol: SymbolMeta, tradeContract?: string): ChartTabState => ({ id: symbol.symbol, symbol, tradeContract, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false });
 
 describe("futures trade-contract resolution", () => {
   it("uses concrete chart symbols directly", () => {
