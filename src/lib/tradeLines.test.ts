@@ -187,6 +187,18 @@ describe("chart trade lines", () => {
     expect(nextTick.get("projection:stop-loss")).toEqual({ dollarAmount: -40, rMultiple: -1 });
   });
 
+  it("uses the executable entry price for projections without changing live position PnL", () => {
+    const tradePosition = { ...position, averagePrice: 100, unrealizedPnl: 25 };
+    const lines = [
+      ...buildTradeLines("MES", [tradePosition], []),
+      ...buildProjectedTradeLines({ takeProfit: 110, stopLoss: 95, side: "Buy", quantity: 2 }),
+    ];
+    const metrics = buildTradeLineMetrics(lines, 5, 100, 101);
+    expect(metrics.get("position:p1")).toEqual({ dollarAmount: 0, rMultiple: null });
+    expect(metrics.get("projection:take-profit")).toEqual({ dollarAmount: 90, rMultiple: 1.5 });
+    expect(metrics.get("projection:stop-loss")).toEqual({ dollarAmount: -60, rMultiple: -1 });
+  });
+
   it("shows projected dollars with a missing R baseline until a valid stop exists", () => {
     const lines = buildProjectedTradeLines({ takeProfit: 110, side: "Buy", quantity: 2 });
     expect(buildTradeLineMetrics(lines, 5, 100).get("projection:take-profit")).toEqual({

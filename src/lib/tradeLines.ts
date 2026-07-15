@@ -126,7 +126,7 @@ export function buildProjectedTradeLines(projection?: OrderProjection): TradeLin
   return lines;
 }
 
-export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: number, currentPrice?: number): Map<string, TradeLineMetrics> {
+export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: number, currentPrice?: number, projectedEntryPrice = currentPrice): Map<string, TradeLineMetrics> {
   const metrics = new Map<string, TradeLineMetrics>();
   if (!Number.isFinite(pointValue) || pointValue <= 0) return metrics;
 
@@ -160,23 +160,23 @@ export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: numbe
     });
   });
 
-  if (currentPrice != null && Number.isFinite(currentPrice) && currentPrice > 0) {
+  if (projectedEntryPrice != null && Number.isFinite(projectedEntryPrice) && projectedEntryPrice > 0) {
     const projectedLines = lines.filter((line) => line.kind === "projected-take-profit" || line.kind === "projected-stop-loss");
     const referenceLine = projectedLines[0];
     const quantity = referenceLine?.quantity ?? 0;
     if (referenceLine && Number.isFinite(quantity) && quantity > 0) {
       const direction = referenceLine.side === "Sell" ? -1 : 1;
       const nearestStop = projectedLines
-        .filter((line) => line.kind === "projected-stop-loss" && direction * (line.price - currentPrice) < 0)
+        .filter((line) => line.kind === "projected-stop-loss" && direction * (line.price - projectedEntryPrice) < 0)
         .reduce<TradeLineModel | undefined>((nearest, line) => (
-          !nearest || Math.abs(line.price - currentPrice) < Math.abs(nearest.price - currentPrice) ? line : nearest
+          !nearest || Math.abs(line.price - projectedEntryPrice) < Math.abs(nearest.price - projectedEntryPrice) ? line : nearest
         ), undefined);
       const riskAmount = nearestStop
-        ? Math.abs(nearestStop.price - currentPrice) * pointValue * quantity
+        ? Math.abs(nearestStop.price - projectedEntryPrice) * pointValue * quantity
         : null;
 
       projectedLines.forEach((line) => {
-        const dollarAmount = direction * (line.price - currentPrice) * pointValue * quantity;
+        const dollarAmount = direction * (line.price - projectedEntryPrice) * pointValue * quantity;
         metrics.set(line.id, {
           dollarAmount,
           rMultiple: riskAmount != null && riskAmount > 0 ? dollarAmount / riskAmount : null,
