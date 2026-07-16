@@ -1455,6 +1455,23 @@ async fn ingest_journal_orders(
     .await
 }
 
+async fn complete_journal_cloud_sync(
+    path: &std::path::Path,
+) -> Result<journal::JournalSyncStatus, AppError> {
+    for attempt in 0..40 {
+        let status = journal::sync_cloud(path).await?;
+        if status.state != "syncing" {
+            return Ok(status);
+        }
+        if attempt < 39 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+    Err(AppError::Api(
+        "Another journal cloud sync is still running; retry Sync when it finishes".into(),
+    ))
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn sync_journal(
     scope: Option<journal::JournalScope>,
@@ -1467,6 +1484,7 @@ async fn sync_journal(
         .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
     let environment = state.api.environment().await;
     let accounts = state.api.accounts().await?;
+    let mut account_histories = Vec::new();
     for account in accounts.into_iter().filter(|account| {
         account.account_type.eq_ignore_ascii_case("futures")
             && scope.as_ref().is_none_or(|selected| {
@@ -1495,6 +1513,22 @@ async fn sync_journal(
                 break;
             }
         }
+        journal::repair_misclassified_close_campaigns(
+            &state.db_path,
+            &environment,
+            &historical_orders,
+        )?;
+        account_histories.push((account.id, historical_orders));
+    }
+
+    complete_journal_cloud_sync(&state.db_path).await?;
+
+    for (account_id, historical_orders) in account_histories {
+        journal::repair_misclassified_close_campaigns(
+            &state.db_path,
+            &environment,
+            &historical_orders,
+        )?;
         ingest_orders_with_metadata(
             &state.api,
             &state.db_path,
@@ -1503,9 +1537,9 @@ async fn sync_journal(
             "broker-history",
         )
         .await?;
-        journal::set_reconciliation_checkpoint(&state.db_path, &environment, &account.id)?;
+        journal::set_reconciliation_checkpoint(&state.db_path, &environment, &account_id)?;
     }
-    let result = journal::sync_cloud(&state.db_path).await?;
+    let result = complete_journal_cloud_sync(&state.db_path).await?;
     let _ = app.emit(
         "journal-updated",
         serde_json::json!({"reason":"cloud-sync"}),

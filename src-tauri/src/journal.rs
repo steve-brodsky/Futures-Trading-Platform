@@ -647,7 +647,38 @@ pub fn ingest_orders(
     let mut fills = 0;
     let mut unmatched_closes = Vec::new();
     let mut ordered = orders.to_vec();
-    ordered.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    ordered.sort_by(|a, b| {
+        let a_time = a
+            .closed_at
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&a.timestamp);
+        let b_time = b
+            .closed_at
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&b.timestamp);
+        let close_rank = |order: &OrderUpdate| {
+            if order
+                .open_or_close
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("open"))
+            {
+                0
+            } else if order
+                .open_or_close
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("close"))
+            {
+                2
+            } else {
+                1
+            }
+        };
+        a_time
+            .cmp(b_time)
+            .then_with(|| close_rank(a).cmp(&close_rank(b)))
+    });
     for order in ordered {
         if order.id.is_empty() || order.symbol.is_empty() {
             continue;
@@ -959,11 +990,20 @@ pub fn repair_misclassified_close_campaigns(
         let bad_id = stable_id(&format!("{env}:{account_id}:{}:{}", order.symbol, order.id));
         let bad_direction = if order.side == "Buy" { "Long" } else { "Short" };
         let exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM journal_trades WHERE id=?1 AND status='open' AND direction=?2)",
+            "SELECT EXISTS(SELECT 1 FROM journal_trades WHERE id=?1 AND direction=?2)",
             params![bad_id, bad_direction],
             |row| row.get(0),
         )?;
         if !exists {
+            continue;
+        }
+        let allocated_to_other_trades: f64 = tx.query_row(
+            "SELECT COALESCE(SUM(ABS(quantity)),0) FROM journal_events WHERE broker_order_id=?1 AND event_type='fill' AND trade_id IS NOT NULL AND trade_id<>?2",
+            params![order.id, bad_id],
+            |row| row.get(0),
+        )?;
+        let filled = order.filled_quantity.unwrap_or(0.0);
+        if allocated_to_other_trades > 1e-9 && allocated_to_other_trades + 1e-9 < filled {
             continue;
         }
         tx.execute(
@@ -987,6 +1027,55 @@ pub fn repair_misclassified_close_campaigns(
     }
     tx.commit()?;
     Ok(repaired)
+}
+
+pub fn repair_mirrored_duplicate_trades(path: &Path) -> Result<usize, AppError> {
+    init(path)?;
+    let mut db = Connection::open(path)?;
+    let tx = db.transaction()?;
+    let trade_ids = {
+        let mut stmt = tx.prepare(
+            "WITH reversed AS (
+               SELECT id FROM journal_trades WHERE closed_at IS NOT NULL AND julianday(closed_at)<julianday(opened_at)
+             ), candidate_orders AS (
+               SELECT reversed.id AS candidate_id,journal_events.broker_order_id
+               FROM reversed
+               JOIN journal_events ON journal_events.trade_id=reversed.id AND journal_events.event_type='fill' AND journal_events.broker_order_id IS NOT NULL
+               GROUP BY reversed.id,journal_events.broker_order_id
+             ), candidate_totals AS (
+               SELECT candidate_id,COUNT(*) AS order_count FROM candidate_orders GROUP BY candidate_id
+             ), mirrored_orders AS (
+               SELECT candidate_orders.candidate_id,other_events.trade_id AS valid_trade_id,COUNT(*) AS matched_orders
+               FROM candidate_orders
+               JOIN journal_events AS other_events ON other_events.event_type='fill' AND other_events.broker_order_id=candidate_orders.broker_order_id AND other_events.trade_id IS NOT NULL AND other_events.trade_id<>candidate_orders.candidate_id
+               JOIN journal_trades AS valid_trade ON valid_trade.id=other_events.trade_id AND valid_trade.closed_at IS NOT NULL AND julianday(valid_trade.closed_at)>=julianday(valid_trade.opened_at)
+               GROUP BY candidate_orders.candidate_id,other_events.trade_id
+             )
+             SELECT DISTINCT mirrored_orders.candidate_id
+             FROM mirrored_orders
+             JOIN candidate_totals ON candidate_totals.candidate_id=mirrored_orders.candidate_id
+             WHERE candidate_totals.order_count>=2 AND mirrored_orders.matched_orders=candidate_totals.order_count",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for trade_id in &trade_ids {
+        tx.execute(
+            "INSERT OR IGNORE INTO journal_trade_tombstones(trade_id,created_at) VALUES(?1,?2)",
+            params![trade_id, now()],
+        )?;
+        tx.execute(
+            "DELETE FROM journal_annotations WHERE trade_id=?1",
+            params![trade_id],
+        )?;
+        tx.execute(
+            "UPDATE journal_events SET trade_id=NULL WHERE trade_id=?1",
+            params![trade_id],
+        )?;
+        tx.execute("DELETE FROM journal_trades WHERE id=?1", params![trade_id])?;
+    }
+    tx.commit()?;
+    Ok(trade_ids.len())
 }
 
 fn create_trade_from_fill(
@@ -1686,7 +1775,7 @@ fn merge_cloud(
     let mut db = Connection::open(path)?;
     let tx = db.transaction()?;
     for t in trades {
-        tx.execute("INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(id) DO UPDATE SET status=excluded.status,closed_at=excluded.closed_at,entry_quantity=excluded.entry_quantity,exit_quantity=excluded.exit_quantity,average_entry=excluded.average_entry,average_exit=excluded.average_exit,original_stop=excluded.original_stop,original_target=excluded.original_target,planned_risk=excluded.planned_risk,deployed_risk=excluded.deployed_risk,point_value=excluded.point_value,gross_pnl=excluded.gross_pnl,fees=excluded.fees,net_pnl=excluded.net_pnl,r_multiple=excluded.r_multiple,risk_provenance=excluded.risk_provenance,updated_at=excluded.updated_at WHERE excluded.updated_at>journal_trades.updated_at",params![t.id,t.environment,t.account_id,t.symbol,t.direction,t.status,t.opened_at,t.closed_at,t.entry_quantity,t.exit_quantity,t.average_entry,t.average_exit,t.original_stop,t.original_target,t.planned_risk,t.deployed_risk,t.point_value,t.gross_pnl,t.fees,t.net_pnl,t.r_multiple,t.risk_provenance,t.updated_at])?;
+        tx.execute("INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(id) DO UPDATE SET status=excluded.status,closed_at=excluded.closed_at,entry_quantity=excluded.entry_quantity,exit_quantity=excluded.exit_quantity,average_entry=excluded.average_entry,average_exit=excluded.average_exit,original_stop=excluded.original_stop,original_target=excluded.original_target,planned_risk=excluded.planned_risk,deployed_risk=excluded.deployed_risk,point_value=excluded.point_value,gross_pnl=excluded.gross_pnl,fees=excluded.fees,net_pnl=excluded.net_pnl,r_multiple=excluded.r_multiple,risk_provenance=excluded.risk_provenance,updated_at=excluded.updated_at WHERE excluded.updated_at>journal_trades.updated_at OR (journal_trades.status='open' AND excluded.status='closed') OR (journal_trades.status=excluded.status AND excluded.exit_quantity>journal_trades.exit_quantity) OR (journal_trades.risk_provenance!='exact' AND excluded.risk_provenance='exact' AND NOT (journal_trades.status='closed' AND excluded.status='open'))",params![t.id,t.environment,t.account_id,t.symbol,t.direction,t.status,t.opened_at,t.closed_at,t.entry_quantity,t.exit_quantity,t.average_entry,t.average_exit,t.original_stop,t.original_target,t.planned_risk,t.deployed_risk,t.point_value,t.gross_pnl,t.fees,t.net_pnl,t.r_multiple,t.risk_provenance,t.updated_at])?;
     }
     for a in annotations {
         tx.execute("INSERT INTO journal_annotations(trade_id,notes,tags,updated_at,synced) VALUES(?1,?2,?3,?4,1) ON CONFLICT(trade_id) DO UPDATE SET notes=excluded.notes,tags=excluded.tags,updated_at=excluded.updated_at,synced=1 WHERE excluded.updated_at>journal_annotations.updated_at",params![a.trade_id,a.notes,serde_json::to_string(&a.tags)?,a.updated_at])?;
@@ -1694,7 +1783,33 @@ fn merge_cloud(
     for e in events {
         tx.execute("INSERT OR IGNORE INTO journal_events(id,event_key,trade_id,environment,account_id,broker_order_id,event_type,occurred_at,source,status,old_price,new_price,quantity,price,note,synced) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,1)",params![e.id,e.event_key,e.trade_id,e.environment,e.account_id,e.broker_order_id,e.event_type,e.occurred_at,e.source,e.status,e.old_price,e.new_price,e.quantity,e.price,e.note])?;
     }
+    hydrate_order_state_from_events(&tx)?;
     tx.commit()?;
+    Ok(())
+}
+
+fn hydrate_order_state_from_events(db: &Connection) -> Result<(), AppError> {
+    let commission_rate = commission_per_contract_side(db)?;
+    let states = {
+        let mut stmt = db.prepare(
+            "SELECT environment,account_id,broker_order_id,MAX(ABS(quantity)) FROM journal_events WHERE event_type='order-observed' AND broker_order_id IS NOT NULL AND quantity IS NOT NULL GROUP BY environment,account_id,broker_order_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (environment, account_id, order_id, filled_quantity) in states {
+        db.execute(
+            "INSERT INTO journal_order_state(environment,account_id,order_id,filled_quantity,commission) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(environment,account_id,order_id) DO UPDATE SET filled_quantity=MAX(journal_order_state.filled_quantity,excluded.filled_quantity),commission=MAX(journal_order_state.commission,excluded.commission)",
+            params![environment, account_id, order_id, filled_quantity, filled_quantity * commission_rate],
+        )?;
+    }
     Ok(())
 }
 
@@ -1716,10 +1831,13 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
     let token = access_token(&cfg).await?;
     let user_id = cfg.user_id.clone();
     let client = reqwest::Client::new();
+    repair_mirrored_duplicate_trades(path)?;
     delete_tombstoned_trades(&client, &cfg, &token, path).await?;
     let (remote_trades, remote_annotations, remote_events) =
         pull_cloud(&client, &cfg, &token).await?;
     merge_cloud(path, remote_trades, remote_annotations, remote_events)?;
+    repair_mirrored_duplicate_trades(path)?;
+    delete_tombstoned_trades(&client, &cfg, &token, path).await?;
     let (events, annotations, trades) = {
         let db = Connection::open(path)?;
         let events = {
@@ -1937,6 +2055,35 @@ mod tests {
     }
 
     #[test]
+    fn historical_replay_orders_bracket_fills_by_execution_time() {
+        let path = temp();
+        let points = HashMap::from([("MESU26".into(), 5.0)]);
+        let mut entry = order("entry-history", "Buy", "Open", 1.0, 7617.75);
+        entry.timestamp = "2026-07-15T19:07:05Z".into();
+        entry.closed_at = Some("2026-07-15T19:07:06Z".into());
+        let mut protective_close = order("close-history", "Sell", "Close", 1.0, 7617.75);
+        protective_close.timestamp = "2026-07-15T19:07:04Z".into();
+        protective_close.closed_at = Some("2026-07-15T19:09:00Z".into());
+
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[protective_close, entry],
+            "broker-history",
+            &points,
+        )
+        .unwrap();
+
+        let trades = load_trades(&path, None).unwrap();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].direction, "Long");
+        assert_eq!(trades[0].status, "closed");
+        assert_eq!(trades[0].opened_at, "2026-07-15T19:07:06Z");
+        assert_eq!(trades[0].closed_at.as_deref(), Some("2026-07-15T19:09:00Z"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn repairs_legacy_close_fill_that_was_saved_as_an_open_campaign() {
         let path = temp();
         init(&path).unwrap();
@@ -1988,6 +2135,300 @@ mod tests {
             })
             .unwrap();
         assert_eq!(tombstones, 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn repairs_a_misclassified_close_campaign_after_it_was_closed() {
+        let path = temp();
+        init(&path).unwrap();
+        let points = HashMap::from([("MESU26".into(), 5.0)]);
+        let mut close = order("closed-duplicate", "Sell", "Close", 1.0, 7618.0);
+        close.closed_at = Some("2026-07-15T19:17:00Z".into());
+        create_trade_from_fill(
+            &Connection::open(&path).unwrap(),
+            "sim",
+            "A1",
+            &close,
+            1.0,
+            7618.0,
+            0.4,
+            Some(5.0),
+            "broker-history",
+            "2026-07-15T19:17:00Z",
+        )
+        .unwrap();
+        let mut later_buy = order("later-buy", "Buy", "Open", 1.0, 7618.5);
+        later_buy.closed_at = Some("2026-07-15T19:18:00Z".into());
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[later_buy],
+            "broker-history",
+            &points,
+        )
+        .unwrap();
+        assert_eq!(load_trades(&path, None).unwrap()[0].status, "closed");
+        insert_event(
+            &Connection::open(&path).unwrap(),
+            "correct-close-event",
+            Some("correct-trade"),
+            "sim",
+            "A1",
+            Some(&close.id),
+            "fill",
+            "2026-07-15T19:17:00Z",
+            "broker-stream",
+            Some("confirmed"),
+            None,
+            None,
+            Some(1.0),
+            Some(7618.0),
+            Some("Correct cloud closing fill"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            repair_misclassified_close_campaigns(
+                &path,
+                &TradingEnvironment::Sim,
+                std::slice::from_ref(&close),
+            )
+            .unwrap(),
+            1
+        );
+        assert!(load_trades(&path, None).unwrap().is_empty());
+        let tombstones: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM journal_trade_tombstones", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(tombstones, 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn repairs_the_mirrored_cross_device_trade_from_its_reversed_timestamps() {
+        let path = temp();
+        let points = HashMap::from([("MESU26".into(), 5.0)]);
+        let mut entry = order("mirrored-entry", "Buy", "Open", 1.0, 7617.75);
+        entry.closed_at = Some("2026-07-15T23:07:38Z".into());
+        let mut close = order("mirrored-close", "Sell", "Close", 1.0, 7617.75);
+        close.closed_at = Some("2026-07-15T23:09:08Z".into());
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[entry.clone(), close.clone()],
+            "broker-stream",
+            &points,
+        )
+        .unwrap();
+        let correct_trade_id = load_trades(&path, None).unwrap()[0].id.clone();
+
+        create_trade_from_fill(
+            &Connection::open(&path).unwrap(),
+            "sim",
+            "A1",
+            &close,
+            1.0,
+            7617.75,
+            0.4,
+            Some(5.0),
+            "broker-history",
+            "2026-07-15T23:09:08Z",
+        )
+        .unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "DELETE FROM journal_order_state WHERE environment='sim' AND account_id='A1' AND order_id=?1",
+                params![entry.id],
+            )
+            .unwrap();
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[entry],
+            "broker-history",
+            &points,
+        )
+        .unwrap();
+        let mut standalone_entry = order("standalone-entry", "Sell", "Open", 1.0, 7618.0);
+        standalone_entry.closed_at = Some("2026-07-15T23:20:00Z".into());
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[standalone_entry],
+            "broker-history",
+            &points,
+        )
+        .unwrap();
+        let standalone_trade_id =
+            query_active_trade(&Connection::open(&path).unwrap(), "sim", "A1", "MESU26")
+                .unwrap()
+                .unwrap()
+                .id;
+        let mut standalone_close = order("standalone-close", "Buy", "Close", 1.0, 7618.25);
+        standalone_close.closed_at = Some("2026-07-15T23:19:00Z".into());
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[standalone_close],
+            "broker-history",
+            &points,
+        )
+        .unwrap();
+        let before = load_trades(&path, None).unwrap();
+        assert_eq!(before.len(), 3);
+        assert_eq!(
+            before
+                .iter()
+                .filter(|trade| {
+                    trade.closed_at.as_deref().is_some_and(|closed| {
+                        DateTime::parse_from_rfc3339(closed).unwrap()
+                            < DateTime::parse_from_rfc3339(&trade.opened_at).unwrap()
+                    })
+                })
+                .count(),
+            2
+        );
+
+        assert_eq!(repair_mirrored_duplicate_trades(&path).unwrap(), 1);
+        let after = load_trades(&path, None).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().any(|trade| trade.id == correct_trade_id));
+        assert!(after.iter().any(|trade| trade.id == standalone_trade_id));
+        let tombstones: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM journal_trade_tombstones", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(tombstones, 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn synced_order_events_restore_replay_deduplication_state() {
+        let path = temp();
+        let points = HashMap::from([("MESU26".into(), 5.0)]);
+        let mut entry = order("synced-entry", "Buy", "Open", 1.0, 7619.5);
+        entry.closed_at = Some("2026-07-15T19:44:00Z".into());
+        let mut close = order("synced-close", "Sell", "Close", 1.0, 7618.0);
+        close.timestamp = "2026-07-15T19:43:59Z".into();
+        close.closed_at = Some("2026-07-15T19:47:00Z".into());
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            std::slice::from_ref(&entry),
+            "broker-stream",
+            &points,
+        )
+        .unwrap();
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            std::slice::from_ref(&close),
+            "broker-stream",
+            &points,
+        )
+        .unwrap();
+        let before = load_trades(&path, None).unwrap();
+
+        let db = Connection::open(&path).unwrap();
+        db.execute("DELETE FROM journal_order_state", []).unwrap();
+        hydrate_order_state_from_events(&db).unwrap();
+        drop(db);
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[close, entry],
+            "broker-history",
+            &points,
+        )
+        .unwrap();
+
+        let after = load_trades(&path, None).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, before[0].id);
+        assert_eq!(after[0].status, "closed");
+        assert_eq!(after[0].entry_quantity, before[0].entry_quantity);
+        assert_eq!(after[0].exit_quantity, before[0].exit_quantity);
+        assert_eq!(after[0].net_pnl, before[0].net_pnl);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn cloud_merge_prefers_a_completed_exact_trade_over_a_newer_partial_replay() {
+        let path = temp();
+        init(&path).unwrap();
+        let local_replay = JournalTrade {
+            id: "shared-trade".into(),
+            environment: TradingEnvironment::Sim,
+            account_id: "A1".into(),
+            symbol: "MESU26".into(),
+            direction: "Long".into(),
+            status: "open".into(),
+            opened_at: "2026-07-15T19:44:00Z".into(),
+            closed_at: None,
+            entry_quantity: 1.0,
+            exit_quantity: 0.0,
+            average_entry: 7619.5,
+            average_exit: None,
+            original_stop: None,
+            original_target: None,
+            planned_risk: None,
+            deployed_risk: None,
+            point_value: Some(5.0),
+            gross_pnl: 0.0,
+            fees: 0.4,
+            net_pnl: -0.4,
+            r_multiple: None,
+            risk_provenance: "unknown".into(),
+            notes: String::new(),
+            tags: vec![],
+            events: None,
+        };
+        save_trade(&Connection::open(&path).unwrap(), &local_replay).unwrap();
+
+        merge_cloud(
+            &path,
+            vec![RemoteTradeRow {
+                id: "shared-trade".into(),
+                environment: "sim".into(),
+                account_id: "A1".into(),
+                symbol: "MESU26".into(),
+                direction: "Long".into(),
+                status: "closed".into(),
+                opened_at: "2026-07-15T19:44:00Z".into(),
+                closed_at: Some("2026-07-15T19:47:00Z".into()),
+                entry_quantity: 1.0,
+                exit_quantity: 1.0,
+                average_entry: 7619.5,
+                average_exit: Some(7618.0),
+                original_stop: Some(7616.75),
+                original_target: Some(7625.0),
+                planned_risk: Some(13.75),
+                deployed_risk: Some(13.75),
+                point_value: Some(5.0),
+                gross_pnl: -7.5,
+                fees: 0.8,
+                net_pnl: -8.3,
+                r_multiple: Some(-0.545454545),
+                risk_provenance: "exact".into(),
+                updated_at: "2020-01-01T00:00:00Z".into(),
+            }],
+            vec![],
+            vec![],
+        )
+        .unwrap();
+
+        let merged = &load_trades(&path, None).unwrap()[0];
+        assert_eq!(merged.status, "closed");
+        assert_eq!(merged.exit_quantity, 1.0);
+        assert_eq!(merged.original_stop, Some(7616.75));
+        assert_eq!(merged.risk_provenance, "exact");
         std::fs::remove_file(path).unwrap();
     }
 
@@ -2090,13 +2531,11 @@ mod tests {
     fn reversal_splits_fees_between_campaigns() {
         let path = temp();
         let points = HashMap::from([("MESU26".into(), 5.0)]);
+        let reversal = order("2", "Sell", "Close", 3.0, 6252.0);
         ingest_orders(
             &path,
             &TradingEnvironment::Sim,
-            &[
-                order("1", "Buy", "Open", 2.0, 6250.0),
-                order("2", "Sell", "Close", 3.0, 6252.0),
-            ],
+            &[order("1", "Buy", "Open", 2.0, 6250.0), reversal.clone()],
             "broker-history",
             &points,
         )
@@ -2120,6 +2559,18 @@ mod tests {
         // Two opening contracts plus a three-contract reversal fill are five
         // charged sides at the default $0.40 rate.
         assert!((trades.iter().map(|trade| trade.fees).sum::<f64>() - 2.0).abs() < 1e-9);
+        assert_eq!(
+            repair_misclassified_close_campaigns(
+                &path,
+                &TradingEnvironment::Sim,
+                std::slice::from_ref(&reversal),
+            )
+            .unwrap(),
+            0,
+            "a close fill with excess quantity is a real reversal, not a duplicate"
+        );
+        assert_eq!(repair_mirrored_duplicate_trades(&path).unwrap(), 0);
+        assert_eq!(load_trades(&path, None).unwrap().len(), 2);
         std::fs::remove_file(path).unwrap();
     }
 
