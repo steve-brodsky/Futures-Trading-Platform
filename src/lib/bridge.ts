@@ -147,6 +147,10 @@ export const api = {
   async setJournalBackfillStart(backfillStart: string): Promise<void> {
     if (isTauri) await native("set_journal_backfill_start", { backfillStart });
   },
+  async resetJournalNow(): Promise<JournalAuthStatus> {
+    if (!isTauri) return { configured: false, authenticated: false, error: "Journal reset is available in the desktop app." };
+    return native("reset_journal_now");
+  },
   async setJournalCommission(commissionPerContractSide: number): Promise<void> {
     if (isTauri) await native("set_journal_commission", { commissionPerContractSide });
   },

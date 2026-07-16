@@ -157,7 +157,7 @@ The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes,
 
 1. Create a Supabase project and an email/password user for the private journal owner.
 2. Apply every SQL file in [`supabase/migrations`](supabase/migrations) in filename order with the Supabase CLI or SQL editor.
-3. In Northstar, open **Settings → Supabase connection** and enter the project URL, publishable key, existing user email/password, and first backfill date.
+3. In Northstar, open **Settings → Supabase connection** and enter the project URL, publishable key, existing user email/password, and first backfill date. The date is inclusive. To discard all existing local/cloud journal history and record only new orders, connect first and choose **Start fresh now**.
 4. Open the journal from the book icon in the main chart toolbar and press **Sync**.
 
 The password is used only for the initial token exchange. Northstar stores the Supabase refresh token in the operating-system credential vault, keeps access tokens in memory, and never accepts a service-role key. Journal tables use row-level security keyed to the authenticated Supabase user.

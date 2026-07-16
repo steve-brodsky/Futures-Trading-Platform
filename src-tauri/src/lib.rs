@@ -1291,6 +1291,19 @@ fn set_journal_backfill_start(
     journal::set_backfill(&state.db_path, &backfill_start)
 }
 
+#[tauri::command]
+async fn reset_journal_now(
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalAuthStatus, AppError> {
+    let status = journal::reset_now(&state.db_path).await?;
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"journal-reset-now"}),
+    );
+    Ok(status)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 fn set_journal_commission(
     commission_per_contract_side: f64,
@@ -2329,6 +2342,7 @@ pub fn run() {
             configure_journal,
             disconnect_journal,
             set_journal_backfill_start,
+            reset_journal_now,
             set_journal_commission,
             sync_journal,
             get_journal_scopes,

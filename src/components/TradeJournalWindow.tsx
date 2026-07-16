@@ -46,6 +46,7 @@ export function JournalCloudSettings({ compact = false, onConfigured }: { compac
   const [backfillStart, setBackfillStart] = useState(defaultStart);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>();
+  const [confirmReset, setConfirmReset] = useState(false);
 
   useEffect(() => {
     api.journalAuthStatus().then((next) => {
@@ -75,6 +76,27 @@ export function JournalCloudSettings({ compact = false, onConfigured }: { compac
     finally { setBusy(false); }
   }
 
+  async function resetNow() {
+    setConfirmReset(false);
+    setBusy(true); setMessage(undefined);
+    try {
+      const next = await api.resetJournalNow();
+      setStatus(next); setBackfillStart(next.backfillStart ?? today);
+      setMessage("Journal cleared. Recording will begin with orders created after the new cutoff.");
+      onConfigured?.();
+    } catch (error) { setMessage(String(error)); }
+    finally { setBusy(false); }
+  }
+
+  function requestReset() {
+    if (!status.authenticated) {
+      setMessage("Reconnect the Supabase journal first so Northstar can clear both this Mac and the cloud copy.");
+      return;
+    }
+    setMessage(undefined);
+    setConfirmReset(true);
+  }
+
   return <section className={`journal-cloud-settings ${compact ? "compact" : ""}`}>
     <header><div className="journal-cloud-icon"><ShieldCheck size={18} /></div><div><span>Cloud journal</span><h3>Supabase connection</h3><p>Execution data is owner-scoped. Only the refresh token is retained in the operating system vault.</p></div><i className={status.authenticated ? "connected" : ""}>{status.authenticated ? "Connected" : "Not connected"}</i></header>
     {!api.isNative && <p className="journal-inline-notice">Cloud setup is disabled in browser demo mode.</p>}
@@ -83,10 +105,13 @@ export function JournalCloudSettings({ compact = false, onConfigured }: { compac
       <label><span>Publishable key</span><input value={publishableKey} onChange={(event) => setPublishableKey(event.target.value)} placeholder="sb_publishable_…" type="password" disabled={!api.isNative || busy} /></label>
       <label><span>Email</span><input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="username" disabled={!api.isNative || busy} /></label>
       <label><span>Password</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" placeholder={status.configured ? "Enter to reconnect" : "Supabase password"} disabled={!api.isNative || busy} /></label>
-      <label><span>Backfill from</span><input value={backfillStart} onChange={(event) => setBackfillStart(event.target.value)} type="date" max={today} disabled={!api.isNative || busy} /></label>
+      <label><span>Backfill from (inclusive)</span><input value={backfillStart} onChange={(event) => setBackfillStart(event.target.value)} type="date" max={today} disabled={!api.isNative || busy} /></label>
     </div>
+    <p className="journal-backfill-help">A backfill date includes that entire day through today. To ignore all earlier executions and begin at the current moment, use Start fresh now.</p>
+    {status.recordFrom && <p className="journal-recording-cutoff">Recording from {new Date(status.recordFrom).toLocaleString()}.</p>}
     {message && <p className="journal-settings-message" role="status">{message}</p>}
-    <div className="journal-cloud-actions"><button className="secondary-button" disabled={busy || !status.configured} onClick={disconnect}>Disconnect</button><button className="primary-button" disabled={busy || !api.isNative} onClick={connect}>{busy ? "Connecting…" : status.configured ? "Reconnect" : "Connect journal"}</button></div>
+    <div className="journal-cloud-actions"><button className="danger-button" disabled={busy || !api.isNative} onClick={requestReset}>Start fresh now</button><button className="secondary-button" disabled={busy || !status.configured} onClick={disconnect}>Disconnect</button><button className="primary-button" disabled={busy || !api.isNative} onClick={connect}>{busy ? "Working…" : status.configured ? "Reconnect" : "Connect journal"}</button></div>
+    {confirmReset && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setConfirmReset(false); }}><section className="modal journal-reset-confirm" role="dialog" aria-modal="true" aria-labelledby="journal-reset-title"><header><h2 id="journal-reset-title">Start the Trade Journal fresh now?</h2><button className="icon-button" aria-label="Cancel journal reset" onClick={() => setConfirmReset(false)}><X size={17} /></button></header><div className="journal-reset-copy"><strong>This permanently deletes the current journal.</strong><p>All local and Supabase trades, annotations, and execution history will be removed. Only broker orders created after the new exact-time cutoff will be recorded.</p></div><div className="modal-actions"><button className="secondary-button" onClick={() => setConfirmReset(false)}>Cancel</button><button className="danger-button" onClick={resetNow}>Delete history and start now</button></div></section></div>}
   </section>;
 }
 
@@ -112,6 +137,7 @@ export function TradeJournalWindow() {
   const loadScopes = useCallback(async () => {
     const [authStatus, nextScopes] = await Promise.all([api.journalAuthStatus(), api.journalScopes()]);
     setAuth(authStatus); setScopes(nextScopes);
+    if (nextScopes.length === 0) setSelectedTrade(undefined);
     setScope((current) => nextScopes.find((item) => current && item.accountId === current.accountId && item.environment === current.environment) ?? nextScopes[0]);
     if (api.isNative && !authStatus.configured) setShowSetup(true);
   }, []);

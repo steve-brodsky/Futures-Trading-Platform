@@ -358,6 +358,7 @@ export interface JournalAuthStatus {
   email?: string;
   projectUrl?: string;
   backfillStart?: string;
+  recordFrom?: string;
   error?: string;
 }
 

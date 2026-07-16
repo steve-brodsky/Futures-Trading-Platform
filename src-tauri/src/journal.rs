@@ -39,6 +39,7 @@ pub struct JournalAuthStatus {
     pub email: Option<String>,
     pub project_url: Option<String>,
     pub backfill_start: Option<String>,
+    pub record_from: Option<String>,
     pub error: Option<String>,
 }
 
@@ -175,6 +176,15 @@ struct CloudConfig {
     email: String,
     user_id: String,
     backfill_start: String,
+    record_from: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteSettingsRow {
+    backfill_start: String,
+    record_from: Option<String>,
+    updated_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,6 +264,16 @@ pub fn init(path: &Path) -> Result<(), AppError> {
       CREATE TABLE IF NOT EXISTS journal_protective_state (environment TEXT NOT NULL, account_id TEXT NOT NULL, order_id TEXT NOT NULL, order_type TEXT NOT NULL, last_price REAL NOT NULL, PRIMARY KEY(environment,account_id,order_id));
       CREATE TABLE IF NOT EXISTS journal_sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS journal_trade_tombstones (trade_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);")?;
+    let has_record_from = {
+        let mut stmt = db.prepare("PRAGMA table_info(journal_config)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        columns.iter().any(|column| column == "record_from")
+    };
+    if !has_record_from {
+        db.execute("ALTER TABLE journal_config ADD COLUMN record_from TEXT", [])?;
+    }
     db.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS journal_preferences (id INTEGER PRIMARY KEY CHECK(id=1), commission_per_contract_side REAL NOT NULL, updated_at TEXT NOT NULL);
          INSERT OR IGNORE INTO journal_preferences(id,commission_per_contract_side,updated_at) VALUES(1,{DEFAULT_COMMISSION_PER_CONTRACT_SIDE},datetime('now'));"
@@ -302,6 +322,31 @@ fn stable_id(value: &str) -> String {
 
 fn now() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn parse_record_from(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn order_recorded_at(order: &OrderUpdate) -> Option<DateTime<Utc>> {
+    let timestamp = if order.timestamp.trim().is_empty() {
+        order.closed_at.as_deref()
+    } else {
+        Some(order.timestamp.as_str())
+    };
+    timestamp
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn order_is_recordable(order: &OrderUpdate, cutoff: Option<DateTime<Utc>>) -> bool {
+    cutoff.is_none_or(|cutoff| order_recorded_at(order).is_none_or(|occurred| occurred >= cutoff))
+}
+
+pub fn record_from(path: &Path) -> Result<Option<String>, AppError> {
+    Ok(config(path)?.and_then(|value| value.record_from))
 }
 fn environment_key(environment: &TradingEnvironment) -> &'static str {
     environment.key()
@@ -641,6 +686,7 @@ pub fn ingest_orders(
     point_values: &HashMap<String, f64>,
 ) -> Result<JournalIngestResult, AppError> {
     init(path)?;
+    let cutoff = parse_record_from(record_from(path)?.as_deref());
     let mut db = Connection::open(path)?;
     let tx = db.transaction()?;
     let env = environment_key(environment);
@@ -680,6 +726,9 @@ pub fn ingest_orders(
             .then_with(|| close_rank(a).cmp(&close_rank(b)))
     });
     for order in ordered {
+        if !order_is_recordable(&order, cutoff) {
+            continue;
+        }
         if order.id.is_empty() || order.symbol.is_empty() {
             continue;
         }
@@ -972,12 +1021,14 @@ pub fn repair_misclassified_close_campaigns(
     orders: &[OrderUpdate],
 ) -> Result<usize, AppError> {
     init(path)?;
+    let cutoff = parse_record_from(record_from(path)?.as_deref());
     let mut db = Connection::open(path)?;
     let tx = db.transaction()?;
     let env = environment_key(environment);
     let mut repaired = 0;
     for order in orders.iter().filter(|order| {
-        order.filled_quantity.unwrap_or(0.0) > 0.0
+        order_is_recordable(order, cutoff)
+            && order.filled_quantity.unwrap_or(0.0) > 0.0
             && order
                 .open_or_close
                 .as_deref()
@@ -1475,7 +1526,7 @@ pub fn update_annotation(
 fn config(path: &Path) -> Result<Option<CloudConfig>, AppError> {
     init(path)?;
     let db = Connection::open(path)?;
-    db.query_row("SELECT project_url,publishable_key,email,user_id,backfill_start FROM journal_config WHERE id=1",[],|row|Ok(CloudConfig{project_url:row.get(0)?,publishable_key:row.get(1)?,email:row.get(2)?,user_id:row.get(3)?,backfill_start:row.get(4)?})).optional().map_err(Into::into)
+    db.query_row("SELECT project_url,publishable_key,email,user_id,backfill_start,record_from,updated_at FROM journal_config WHERE id=1",[],|row|Ok(CloudConfig{project_url:row.get(0)?,publishable_key:row.get(1)?,email:row.get(2)?,user_id:row.get(3)?,backfill_start:row.get(4)?,record_from:row.get(5)?,updated_at:row.get(6)?})).optional().map_err(Into::into)
 }
 pub fn auth_status(path: &Path) -> Result<JournalAuthStatus, AppError> {
     let cfg = config(path)?;
@@ -1485,7 +1536,8 @@ pub fn auth_status(path: &Path) -> Result<JournalAuthStatus, AppError> {
         authenticated,
         email: cfg.as_ref().map(|v| v.email.clone()),
         project_url: cfg.as_ref().map(|v| v.project_url.clone()),
-        backfill_start: cfg.map(|v| v.backfill_start),
+        backfill_start: cfg.as_ref().map(|v| v.backfill_start.clone()),
+        record_from: cfg.and_then(|v| v.record_from),
         error: None,
     })
 }
@@ -1525,7 +1577,7 @@ pub async fn configure(
         .id;
     storage::set_secret("journal_refresh_token", &auth.refresh_token)?;
     init(path)?;
-    Connection::open(path)?.execute("INSERT INTO journal_config(id,project_url,publishable_key,email,user_id,backfill_start,updated_at) VALUES(1,?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET project_url=excluded.project_url,publishable_key=excluded.publishable_key,email=excluded.email,user_id=excluded.user_id,backfill_start=excluded.backfill_start,updated_at=excluded.updated_at",params![input.project_url.trim_end_matches('/'),input.publishable_key.trim(),input.email.trim(),user_id,input.backfill_start,now()])?;
+    Connection::open(path)?.execute("INSERT INTO journal_config(id,project_url,publishable_key,email,user_id,backfill_start,record_from,updated_at) VALUES(1,?1,?2,?3,?4,?5,NULL,?6) ON CONFLICT(id) DO UPDATE SET project_url=excluded.project_url,publishable_key=excluded.publishable_key,email=excluded.email,user_id=excluded.user_id,backfill_start=excluded.backfill_start,updated_at=excluded.updated_at",params![input.project_url.trim_end_matches('/'),input.publishable_key.trim(),input.email.trim(),user_id,input.backfill_start,now()])?;
     auth_status(path)
 }
 pub fn disconnect(path: &Path) -> Result<(), AppError> {
@@ -1541,6 +1593,67 @@ pub fn set_backfill(path: &Path, value: &str) -> Result<(), AppError> {
         "UPDATE journal_config SET backfill_start=?1,updated_at=?2 WHERE id=1",
         params![value, now()],
     )?;
+    Ok(())
+}
+
+fn purge_before_record_from(path: &Path, cutoff: &str) -> Result<(), AppError> {
+    init(path)?;
+    let mut db = Connection::open(path)?;
+    let tx = db.transaction()?;
+    tx.execute(
+        "DELETE FROM journal_annotations WHERE trade_id IN (SELECT id FROM journal_trades WHERE julianday(opened_at)<julianday(?1))",
+        params![cutoff],
+    )?;
+    tx.execute(
+        "DELETE FROM journal_events WHERE julianday(occurred_at)<julianday(?1)",
+        params![cutoff],
+    )?;
+    tx.execute(
+        "DELETE FROM journal_trades WHERE julianday(opened_at)<julianday(?1)",
+        params![cutoff],
+    )?;
+    tx.execute(
+        "DELETE FROM journal_annotations WHERE trade_id NOT IN (SELECT id FROM journal_trades)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM journal_events WHERE trade_id IS NOT NULL AND trade_id NOT IN (SELECT id FROM journal_trades)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM journal_intents WHERE julianday(created_at)<julianday(?1)",
+        params![cutoff],
+    )?;
+    tx.execute("DELETE FROM journal_order_state", [])?;
+    tx.execute(
+        "DELETE FROM journal_sync_state WHERE key LIKE 'broker-checkpoint:%'",
+        [],
+    )?;
+    hydrate_order_state_from_events(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn reset_local_journal(path: &Path, cutoff: &str) -> Result<(), AppError> {
+    init(path)?;
+    let backfill_start = cutoff
+        .get(..10)
+        .ok_or_else(|| AppError::Validation("Invalid journal recording cutoff".into()))?;
+    let mut db = Connection::open(path)?;
+    let tx = db.transaction()?;
+    tx.execute("DELETE FROM journal_annotations", [])?;
+    tx.execute("DELETE FROM journal_events", [])?;
+    tx.execute("DELETE FROM journal_trades", [])?;
+    tx.execute("DELETE FROM journal_intents", [])?;
+    tx.execute("DELETE FROM journal_order_state", [])?;
+    tx.execute("DELETE FROM journal_protective_state", [])?;
+    tx.execute("DELETE FROM journal_trade_tombstones", [])?;
+    tx.execute("DELETE FROM journal_sync_state", [])?;
+    tx.execute(
+        "UPDATE journal_config SET backfill_start=?1,record_from=?2,updated_at=?3 WHERE id=1",
+        params![backfill_start, cutoff, cutoff],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1705,6 +1818,70 @@ async fn delete_tombstoned_trades(
     Ok(())
 }
 
+async fn pull_cloud_settings(
+    client: &reqwest::Client,
+    cfg: &CloudConfig,
+    token: &str,
+) -> Result<Option<RemoteSettingsRow>, AppError> {
+    let response = client
+        .get(format!("{}/rest/v1/journal_settings", cfg.project_url))
+        .headers(headers(cfg, token, false)?)
+        .query(&[
+            ("select", "backfill_start,record_from,updated_at"),
+            ("limit", "1"),
+        ])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await?;
+        return Err(AppError::Api(format!(
+            "Supabase journal settings download failed ({status}): {body}. Apply the latest journal migration and retry sync"
+        )));
+    }
+    Ok(response
+        .json::<Vec<RemoteSettingsRow>>()
+        .await?
+        .into_iter()
+        .next())
+}
+
+fn merge_cloud_settings(
+    path: &Path,
+    local: &CloudConfig,
+    remote: Option<RemoteSettingsRow>,
+) -> Result<(), AppError> {
+    let Some(remote) = remote else {
+        if let Some(cutoff) = local.record_from.as_deref() {
+            purge_before_record_from(path, cutoff)?;
+        }
+        return Ok(());
+    };
+    let remote_cutoff = parse_record_from(remote.record_from.as_deref());
+    let local_cutoff = parse_record_from(local.record_from.as_deref());
+    let remote_cutoff_wins = match (remote_cutoff.as_ref(), local_cutoff.as_ref()) {
+        (Some(remote), Some(local)) => remote > local,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    let remote_updated_at = parse_record_from(Some(&remote.updated_at));
+    let local_updated_at = parse_record_from(Some(&local.updated_at));
+    let remote_is_newer = remote_updated_at
+        .zip(local_updated_at)
+        .map(|(remote, local)| remote > local)
+        .unwrap_or_else(|| remote.updated_at > local.updated_at);
+    if remote_cutoff_wins || (remote.record_from == local.record_from && remote_is_newer) {
+        Connection::open(path)?.execute(
+            "UPDATE journal_config SET backfill_start=?1,record_from=?2,updated_at=?3 WHERE id=1",
+            params![remote.backfill_start, remote.record_from, remote.updated_at],
+        )?;
+    }
+    if let Some(cutoff) = config(path)?.and_then(|value| value.record_from) {
+        purge_before_record_from(path, &cutoff)?;
+    }
+    Ok(())
+}
+
 async fn pull_cloud(
     client: &reqwest::Client,
     cfg: &CloudConfig,
@@ -1717,14 +1894,14 @@ async fn pull_cloud(
     ),
     AppError,
 > {
-    let trades_response = client
-        .get(format!(
-            "{}/rest/v1/journal_trades?select=*&order=opened_at.asc",
-            cfg.project_url
-        ))
+    let mut trades_request = client
+        .get(format!("{}/rest/v1/journal_trades", cfg.project_url))
         .headers(headers(cfg, token, false)?)
-        .send()
-        .await?;
+        .query(&[("select", "*"), ("order", "opened_at.asc")]);
+    if let Some(cutoff) = cfg.record_from.as_deref() {
+        trades_request = trades_request.query(&[("opened_at", format!("gte.{cutoff}"))]);
+    }
+    let trades_response = trades_request.send().await?;
     if !trades_response.status().is_success() {
         return Err(AppError::Api(format!(
             "Supabase trade download failed: {}",
@@ -1745,14 +1922,14 @@ async fn pull_cloud(
             annotations_response.text().await?
         )));
     }
-    let events_response = client
-        .get(format!(
-            "{}/rest/v1/journal_events?select=*&order=occurred_at.asc",
-            cfg.project_url
-        ))
+    let mut events_request = client
+        .get(format!("{}/rest/v1/journal_events", cfg.project_url))
         .headers(headers(cfg, token, false)?)
-        .send()
-        .await?;
+        .query(&[("select", "*"), ("order", "occurred_at.asc")]);
+    if let Some(cutoff) = cfg.record_from.as_deref() {
+        events_request = events_request.query(&[("occurred_at", format!("gte.{cutoff}"))]);
+    }
+    let events_response = events_request.send().await?;
     if !events_response.status().is_success() {
         return Err(AppError::Api(format!(
             "Supabase event download failed: {}",
@@ -1778,7 +1955,7 @@ fn merge_cloud(
         tx.execute("INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(id) DO UPDATE SET status=excluded.status,closed_at=excluded.closed_at,entry_quantity=excluded.entry_quantity,exit_quantity=excluded.exit_quantity,average_entry=excluded.average_entry,average_exit=excluded.average_exit,original_stop=excluded.original_stop,original_target=excluded.original_target,planned_risk=excluded.planned_risk,deployed_risk=excluded.deployed_risk,point_value=excluded.point_value,gross_pnl=excluded.gross_pnl,fees=excluded.fees,net_pnl=excluded.net_pnl,r_multiple=excluded.r_multiple,risk_provenance=excluded.risk_provenance,updated_at=excluded.updated_at WHERE excluded.updated_at>journal_trades.updated_at OR (journal_trades.status='open' AND excluded.status='closed') OR (journal_trades.status=excluded.status AND excluded.exit_quantity>journal_trades.exit_quantity) OR (journal_trades.risk_provenance!='exact' AND excluded.risk_provenance='exact' AND NOT (journal_trades.status='closed' AND excluded.status='open'))",params![t.id,t.environment,t.account_id,t.symbol,t.direction,t.status,t.opened_at,t.closed_at,t.entry_quantity,t.exit_quantity,t.average_entry,t.average_exit,t.original_stop,t.original_target,t.planned_risk,t.deployed_risk,t.point_value,t.gross_pnl,t.fees,t.net_pnl,t.r_multiple,t.risk_provenance,t.updated_at])?;
     }
     for a in annotations {
-        tx.execute("INSERT INTO journal_annotations(trade_id,notes,tags,updated_at,synced) VALUES(?1,?2,?3,?4,1) ON CONFLICT(trade_id) DO UPDATE SET notes=excluded.notes,tags=excluded.tags,updated_at=excluded.updated_at,synced=1 WHERE excluded.updated_at>journal_annotations.updated_at",params![a.trade_id,a.notes,serde_json::to_string(&a.tags)?,a.updated_at])?;
+        tx.execute("INSERT INTO journal_annotations(trade_id,notes,tags,updated_at,synced) SELECT ?1,?2,?3,?4,1 WHERE EXISTS(SELECT 1 FROM journal_trades WHERE id=?1) ON CONFLICT(trade_id) DO UPDATE SET notes=excluded.notes,tags=excluded.tags,updated_at=excluded.updated_at,synced=1 WHERE excluded.updated_at>journal_annotations.updated_at",params![a.trade_id,a.notes,serde_json::to_string(&a.tags)?,a.updated_at])?;
     }
     for e in events {
         tx.execute("INSERT OR IGNORE INTO journal_events(id,event_key,trade_id,environment,account_id,broker_order_id,event_type,occurred_at,source,status,old_price,new_price,quantity,price,note,synced) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,1)",params![e.id,e.event_key,e.trade_id,e.environment,e.account_id,e.broker_order_id,e.event_type,e.occurred_at,e.source,e.status,e.old_price,e.new_price,e.quantity,e.price,e.note])?;
@@ -1826,11 +2003,15 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
         });
     }
     let _guard = SyncGuard;
-    let cfg = config(path)?
+    let mut cfg = config(path)?
         .ok_or_else(|| AppError::Validation("Configure Trade Journal Cloud first".into()))?;
     let token = access_token(&cfg).await?;
-    let user_id = cfg.user_id.clone();
     let client = reqwest::Client::new();
+    let remote_settings = pull_cloud_settings(&client, &cfg, &token).await?;
+    merge_cloud_settings(path, &cfg, remote_settings)?;
+    cfg = config(path)?
+        .ok_or_else(|| AppError::Validation("Configure Trade Journal Cloud first".into()))?;
+    let user_id = cfg.user_id.clone();
     repair_mirrored_duplicate_trades(path)?;
     delete_tombstoned_trades(&client, &cfg, &token, path).await?;
     let (remote_trades, remote_annotations, remote_events) =
@@ -1888,7 +2069,7 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
                 .map(str::to_owned)
         })
         .collect();
-    upload(&client,&cfg,&token,"journal_settings","user_id",vec![json!({"user_id":user_id,"timezone":"America/New_York","backfill_start":cfg.backfill_start,"updated_at":now()})],false).await?;
+    upload(&client,&cfg,&token,"journal_settings","user_id",vec![json!({"user_id":user_id,"timezone":"America/New_York","backfill_start":cfg.backfill_start,"record_from":cfg.record_from,"updated_at":cfg.updated_at})],false).await?;
     upload(
         &client,
         &cfg,
@@ -1944,6 +2125,68 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
     })
 }
 
+async fn delete_cloud_journal_table(
+    client: &reqwest::Client,
+    cfg: &CloudConfig,
+    token: &str,
+    table: &str,
+) -> Result<(), AppError> {
+    let response = client
+        .delete(format!("{}/rest/v1/{table}", cfg.project_url))
+        .headers(headers(cfg, token, false)?)
+        .query(&[("user_id", format!("eq.{}", cfg.user_id))])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await?;
+        return Err(AppError::Api(format!(
+            "Supabase journal reset failed for {table} ({status}): {body}. Apply the latest journal migration and retry"
+        )));
+    }
+    Ok(())
+}
+
+pub async fn reset_now(path: &Path) -> Result<JournalAuthStatus, AppError> {
+    if CLOUD_SYNCING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(AppError::Api(
+            "A journal sync is running. Wait for it to finish, then start fresh again".into(),
+        ));
+    }
+    let _guard = SyncGuard;
+    let cfg = config(path)?
+        .ok_or_else(|| AppError::Validation("Configure Trade Journal Cloud first".into()))?;
+    let token = access_token(&cfg).await?;
+    let cutoff = now();
+    reset_local_journal(path, &cutoff)?;
+    let cfg = config(path)?
+        .ok_or_else(|| AppError::Validation("Configure Trade Journal Cloud first".into()))?;
+    let client = reqwest::Client::new();
+    upload(
+        &client,
+        &cfg,
+        &token,
+        "journal_settings",
+        "user_id",
+        vec![json!({
+            "user_id": cfg.user_id.clone(),
+            "timezone": "America/New_York",
+            "backfill_start": cfg.backfill_start.clone(),
+            "record_from": cfg.record_from.clone(),
+            "updated_at": cfg.updated_at.clone()
+        })],
+        false,
+    )
+    .await?;
+    delete_cloud_journal_table(&client, &cfg, &token, "journal_events").await?;
+    delete_cloud_journal_table(&client, &cfg, &token, "journal_annotations").await?;
+    delete_cloud_journal_table(&client, &cfg, &token, "journal_trades").await?;
+    auth_status(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1976,6 +2219,16 @@ mod tests {
             group_name: None,
             related_orders: vec![],
         }
+    }
+    fn configure_local(path: &Path, record_from: Option<&str>) {
+        init(path).unwrap();
+        Connection::open(path)
+            .unwrap()
+            .execute(
+                "INSERT INTO journal_config(id,project_url,publishable_key,email,user_id,backfill_start,record_from,updated_at) VALUES(1,'https://example.supabase.co','key','owner@example.com','user-1','2026-01-01',?1,'2026-01-01T00:00:00Z')",
+                params![record_from],
+            )
+            .unwrap();
     }
     #[test]
     fn reduces_flat_to_flat_and_deduplicates() {
@@ -2757,6 +3010,132 @@ mod tests {
         assert_eq!(
             reconciliation_since(&path, &TradingEnvironment::Sim, "A1", "2026-01-01").unwrap(),
             "2026-07-13"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn exact_recording_cutoff_ignores_earlier_broker_history() {
+        let path = temp();
+        configure_local(&path, Some("2026-03-08T05:00:00Z"));
+        let points = HashMap::from([("MESU26".into(), 5.0)]);
+        let old = order("old", "Buy", "Open", 1.0, 6250.0);
+        let mut new = order("new", "Buy", "Open", 1.0, 6251.0);
+        new.timestamp = "2026-03-08T05:30:00Z".into();
+        new.closed_at = Some("2026-03-08T05:31:00Z".into());
+
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[old, new],
+            "broker-history",
+            &points,
+        )
+        .unwrap();
+
+        let trades = load_trades(&path, None).unwrap();
+        assert_eq!(trades.len(), 1);
+        assert_eq!(trades[0].average_entry, 6251.0);
+        let db = Connection::open(&path).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM journal_events", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn start_fresh_clears_local_ledger_and_sets_exact_cutoff() {
+        let path = temp();
+        configure_local(&path, None);
+        let points = HashMap::from([("MESU26".into(), 5.0)]);
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[order("old", "Buy", "Open", 1.0, 6250.0)],
+            "broker-stream",
+            &points,
+        )
+        .unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO journal_sync_state(key,value) VALUES('broker-checkpoint:sim:A1','2026-03-08')",
+                [],
+            )
+            .unwrap();
+
+        let cutoff = "2026-07-15T23:45:12Z";
+        reset_local_journal(&path, cutoff).unwrap();
+
+        let db = Connection::open(&path).unwrap();
+        for table in [
+            "journal_trades",
+            "journal_events",
+            "journal_annotations",
+            "journal_order_state",
+            "journal_sync_state",
+        ] {
+            let count: i64 = db
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} was not cleared");
+        }
+        let (backfill, stored_cutoff): (String, Option<String>) = db
+            .query_row(
+                "SELECT backfill_start,record_from FROM journal_config WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(backfill, "2026-07-15");
+        assert_eq!(stored_cutoff.as_deref(), Some(cutoff));
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn newer_cross_device_cutoff_wins_and_purges_local_history() {
+        let path = temp();
+        configure_local(&path, None);
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE journal_config SET updated_at='2026-07-16T00:00:00Z' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        let points = HashMap::from([("MESU26".into(), 5.0)]);
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[order("old", "Buy", "Open", 1.0, 6250.0)],
+            "broker-stream",
+            &points,
+        )
+        .unwrap();
+        let local = config(&path).unwrap().unwrap();
+
+        merge_cloud_settings(
+            &path,
+            &local,
+            Some(RemoteSettingsRow {
+                backfill_start: "2026-07-15".into(),
+                record_from: Some("2026-07-15T23:45:12Z".into()),
+                updated_at: "2026-07-15T23:45:12Z".into(),
+            }),
+        )
+        .unwrap();
+
+        assert!(load_trades(&path, None).unwrap().is_empty());
+        assert_eq!(
+            record_from(&path).unwrap().as_deref(),
+            Some("2026-07-15T23:45:12Z")
         );
         std::fs::remove_file(path).unwrap();
     }
