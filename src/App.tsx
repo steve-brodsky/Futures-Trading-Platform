@@ -2287,8 +2287,20 @@ function TradingApp() {
       <div className="divider" />
       <div className="timeframe-group">{timeframes.map((tf) => <button key={tf} className={activeTab.timeframe === tf ? "active" : ""} onClick={() => updateActiveTab({ timeframe: tf })}>{tf}</button>)}</div>
       <div className="divider" />
+      <div className="toolbar-popover-anchor chart-layout-anchor">
+        <IconButton label="Chart layout" active={chartLayoutOpen || chartLayout !== "single"} onClick={() => { setIndicatorOpen(false); setChartStyleOpen(false); setAlertOpen(false); setChartLayoutOpen((value) => !value); }}><PanelsTopLeft size={17} /></IconButton>
+        {chartLayoutOpen && <><button className="popover-backdrop" aria-label="Close chart layout menu" onClick={() => setChartLayoutOpen(false)} /><div className="popover chart-layout-popover" role="menu" aria-label="Chart layout">
+          <header><strong>Chart layout</strong><span>{visibleTabs.length} visible</span></header>
+          <div className="chart-layout-list">{chartLayouts.map((item) => {
+            const missing = Math.max(0, chartLayoutCapacity(item.layout) - windowState.tabIds.length);
+            const unavailable = workspace.tabs.length + missing > MAX_CHART_TABS;
+            return <button key={item.layout} type="button" role="menuitemradio" aria-checked={chartLayout === item.layout} disabled={unavailable} title={unavailable ? `Needs ${missing} more tabs; maximum ${MAX_CHART_TABS}` : item.label} onClick={() => changeChartLayout(item.layout)}><ChartLayoutGlyph layout={item.layout} /><span>{item.label}</span>{chartLayout === item.layout && <i />}</button>;
+          })}</div>
+          <small className="chart-layout-hint">Drag dividers to resize · double-click to reset</small>
+        </div></>}
+      </div>
       <div className="toolbar-popover-anchor chart-style-anchor">
-        <button className={`text-tool-button chart-style-button ${chartStyleOpen ? "active" : ""}`} aria-haspopup="menu" aria-expanded={chartStyleOpen} onClick={() => { setIndicatorOpen(false); setAlertOpen(false); setChartStyleOpen((value) => !value); }}><ChartStyleGlyph kind={activeTab.chartKind} /><span>{chartStyles.find((style) => style.kind === activeTab.chartKind)?.label}</span><ChevronDown size={13} /></button>
+        <button className={`text-tool-button chart-style-button ${chartStyleOpen ? "active" : ""}`} aria-haspopup="menu" aria-expanded={chartStyleOpen} onClick={() => { setIndicatorOpen(false); setAlertOpen(false); setChartLayoutOpen(false); setChartStyleOpen((value) => !value); }}><ChartStyleGlyph kind={activeTab.chartKind} /><span>{chartStyles.find((style) => style.kind === activeTab.chartKind)?.label}</span><ChevronDown size={13} /></button>
         {chartStyleOpen && <><button className="popover-backdrop" aria-label="Close chart style menu" onClick={() => setChartStyleOpen(false)} /><div className="popover chart-style-popover" role="menu" aria-label="Chart style">
           <header><strong>Chart style</strong><span>Per tab</span></header>
           <div className="chart-style-list">{chartStyles.map((style) => <button key={style.kind} role="menuitemradio" aria-checked={activeTab.chartKind === style.kind} className={activeTab.chartKind === style.kind ? "selected" : ""} onClick={() => updateChartStyle(style.kind)}><ChartStyleGlyph kind={style.kind} size={17} /><span><strong>{style.label}</strong><small>{style.description}</small></span><i /></button>)}</div>
@@ -2329,18 +2341,6 @@ function TradingApp() {
       </div>}
       <div className="divider" />
       <span className="toolbar-spacer" />
-      <div className="toolbar-popover-anchor chart-layout-anchor">
-        <IconButton label="Chart layout" active={chartLayoutOpen || chartLayout !== "single"} onClick={() => { setIndicatorOpen(false); setChartStyleOpen(false); setAlertOpen(false); setChartLayoutOpen((value) => !value); }}><PanelsTopLeft size={17} /></IconButton>
-        {chartLayoutOpen && <><button className="popover-backdrop" aria-label="Close chart layout menu" onClick={() => setChartLayoutOpen(false)} /><div className="popover chart-layout-popover" role="menu" aria-label="Chart layout">
-          <header><strong>Chart layout</strong><span>{visibleTabs.length} visible</span></header>
-          <div className="chart-layout-list">{chartLayouts.map((item) => {
-            const missing = Math.max(0, chartLayoutCapacity(item.layout) - windowState.tabIds.length);
-            const unavailable = workspace.tabs.length + missing > MAX_CHART_TABS;
-            return <button key={item.layout} type="button" role="menuitemradio" aria-checked={chartLayout === item.layout} disabled={unavailable} title={unavailable ? `Needs ${missing} more tabs; maximum ${MAX_CHART_TABS}` : item.label} onClick={() => changeChartLayout(item.layout)}><ChartLayoutGlyph layout={item.layout} /><span>{item.label}</span>{chartLayout === item.layout && <i />}</button>;
-          })}</div>
-          <small className="chart-layout-hint">Drag dividers to resize · double-click to reset</small>
-        </div></>}
-      </div>
       {!isDetached && <><IconButton label="Trade journal" onClick={openTradeJournal}><BookOpen size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
       <IconButton label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} active={isFullscreen} onClick={toggleFullscreen}>{isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</IconButton>
     </nav>
