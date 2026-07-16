@@ -11,12 +11,50 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
+    time::{Duration as StdDuration, Instant},
 };
 
 static CLOUD_SYNCING: AtomicBool = AtomicBool::new(false);
 static PREFERENCES_SYNCING: AtomicBool = AtomicBool::new(false);
 const DEFAULT_COMMISSION_PER_CONTRACT_SIDE: f64 = 0.40;
+const DEFAULT_SUPABASE_TOKEN_LIFETIME_SECONDS: u64 = 3600;
+
+#[derive(Clone)]
+struct CachedAccessToken {
+    project_url: String,
+    user_id: String,
+    value: String,
+    refresh_after: Instant,
+}
+
+static SUPABASE_ACCESS_TOKEN: OnceLock<Mutex<Option<CachedAccessToken>>> = OnceLock::new();
+
+fn access_token_cache() -> &'static Mutex<Option<CachedAccessToken>> {
+    SUPABASE_ACCESS_TOKEN.get_or_init(|| Mutex::new(None))
+}
+
+fn cache_access_token(cfg: &CloudConfig, value: String, expires_in: Option<u64>) {
+    let lifetime = expires_in.unwrap_or(DEFAULT_SUPABASE_TOKEN_LIFETIME_SECONDS);
+    let refresh_in = lifetime.saturating_sub(60).max(1);
+    if let Ok(mut cache) = access_token_cache().lock() {
+        *cache = Some(CachedAccessToken {
+            project_url: cfg.project_url.clone(),
+            user_id: cfg.user_id.clone(),
+            value,
+            refresh_after: Instant::now() + StdDuration::from_secs(refresh_in),
+        });
+    }
+}
+
+fn invalidate_access_token() {
+    if let Ok(mut cache) = access_token_cache().lock() {
+        *cache = None;
+    }
+}
 struct SyncGuard;
 impl Drop for SyncGuard {
     fn drop(&mut self) {
@@ -270,6 +308,7 @@ struct RemoteEventRow {
 struct AuthResponse {
     access_token: String,
     refresh_token: String,
+    expires_in: Option<u64>,
     user: Option<AuthUser>,
 }
 #[derive(Debug, Deserialize)]
@@ -1598,16 +1637,25 @@ pub async fn configure(
         return Err(AppError::Api(format!("Supabase sign-in failed: {body}")));
     }
     let auth: AuthResponse = serde_json::from_str(&body)?;
-    let user_id = auth
-        .user
+    let AuthResponse {
+        access_token,
+        refresh_token,
+        expires_in,
+        user,
+    } = auth;
+    let user_id = user
         .ok_or_else(|| AppError::Api("Supabase did not return a user".into()))?
         .id;
-    storage::set_secret("journal_refresh_token", &auth.refresh_token)?;
+    storage::set_secret("journal_refresh_token", &refresh_token)?;
     init(path)?;
     Connection::open(path)?.execute("INSERT INTO journal_config(id,project_url,publishable_key,email,user_id,backfill_start,record_from,updated_at) VALUES(1,?1,?2,?3,?4,?5,NULL,?6) ON CONFLICT(id) DO UPDATE SET project_url=excluded.project_url,publishable_key=excluded.publishable_key,email=excluded.email,user_id=excluded.user_id,backfill_start=excluded.backfill_start,updated_at=excluded.updated_at",params![input.project_url.trim_end_matches('/'),input.publishable_key.trim(),input.email.trim(),user_id,input.backfill_start,now()])?;
+    if let Some(cfg) = config(path)? {
+        cache_access_token(&cfg, access_token, expires_in);
+    }
     auth_status(path)
 }
 pub fn disconnect(path: &Path) -> Result<(), AppError> {
+    invalidate_access_token();
     storage::delete_secret("journal_refresh_token")?;
     if path.exists() {
         Connection::open(path)?.execute("DELETE FROM journal_config WHERE id=1", [])?;
@@ -1731,6 +1779,15 @@ pub fn set_reconciliation_checkpoint(
 }
 
 async fn access_token(cfg: &CloudConfig) -> Result<String, AppError> {
+    if let Ok(cache) = access_token_cache().lock() {
+        if let Some(cached) = cache.as_ref().filter(|cached| {
+            cached.project_url == cfg.project_url
+                && cached.user_id == cfg.user_id
+                && Instant::now() < cached.refresh_after
+        }) {
+            return Ok(cached.value.clone());
+        }
+    }
     let refresh =
         storage::get_secret("journal_refresh_token")?.ok_or(AppError::AuthenticationRequired)?;
     let url = format!("{}/auth/v1/token?grant_type=refresh_token", cfg.project_url);
@@ -1749,7 +1806,9 @@ async fn access_token(cfg: &CloudConfig) -> Result<String, AppError> {
     }
     let auth: AuthResponse = serde_json::from_str(&body)?;
     storage::set_secret("journal_refresh_token", &auth.refresh_token)?;
-    Ok(auth.access_token)
+    let token = auth.access_token;
+    cache_access_token(cfg, token.clone(), auth.expires_in);
+    Ok(token)
 }
 fn headers(cfg: &CloudConfig, token: &str, ignore_duplicates: bool) -> Result<HeaderMap, AppError> {
     let mut h = HeaderMap::new();
@@ -1852,6 +1911,64 @@ fn valid_remote_preference(row: &RemotePreferenceRow) -> bool {
         && DateTime::parse_from_rfc3339(&row.modified_at).is_ok()
 }
 
+fn local_preference_needs_upload(
+    local: &storage::PreferenceRecord,
+    remote: Option<&RemotePreferenceRow>,
+) -> bool {
+    match remote {
+        Some(remote) => preference_is_newer(
+            &local.modified_at,
+            &local.device_id,
+            &remote.modified_at,
+            &remote.device_id,
+        ),
+        None => true,
+    }
+}
+
+fn merge_remote_preference_rows(
+    path: &Path,
+    local: &mut HashMap<String, storage::PreferenceRecord>,
+    remote_rows: Vec<RemotePreferenceRow>,
+    replaced_categories: &mut Vec<String>,
+) -> Result<(), AppError> {
+    for remote in remote_rows.into_iter().filter(valid_remote_preference) {
+        let Some(current) = local.get(&remote.category) else {
+            continue;
+        };
+        let remote_is_newer = preference_is_newer(
+            &remote.modified_at,
+            &remote.device_id,
+            &current.modified_at,
+            &current.device_id,
+        );
+        let local_is_newer = preference_is_newer(
+            &current.modified_at,
+            &current.device_id,
+            &remote.modified_at,
+            &remote.device_id,
+        );
+        // If metadata is tied but payloads differ, the row already stored by
+        // Supabase is authoritative. This makes retries converge safely.
+        if !remote_is_newer && (local_is_newer || remote.payload == current.payload) {
+            continue;
+        }
+        if remote.payload != current.payload && !replaced_categories.contains(&remote.category) {
+            replaced_categories.push(remote.category.clone());
+        }
+        let record = storage::PreferenceRecord {
+            category: remote.category,
+            schema_version: remote.schema_version,
+            payload: remote.payload,
+            modified_at: remote.modified_at,
+            device_id: remote.device_id,
+        };
+        storage::replace_local_preference(path, &record)?;
+        local.insert(record.category.clone(), record);
+    }
+    Ok(())
+}
+
 pub async fn sync_app_preferences(
     path: &Path,
     profile: &Value,
@@ -1871,30 +1988,26 @@ pub async fn sync_app_preferences(
     let token = access_token(&cfg).await?;
     let client = reqwest::Client::new();
     let initial_remote = pull_app_preferences(&client, &cfg, &token).await?;
-    let local_before = storage::local_preferences(path)?;
-    let local_by_category: HashMap<_, _> = local_before
+    let remote_by_category: HashMap<_, _> = initial_remote
         .iter()
+        .filter(|record| valid_remote_preference(record))
         .cloned()
         .map(|record| (record.category.clone(), record))
         .collect();
-    let remote_by_category: HashMap<_, _> = initial_remote
+    let mut local_by_category: HashMap<_, _> = storage::local_preferences(path)?
         .into_iter()
-        .filter(valid_remote_preference)
         .map(|record| (record.category.clone(), record))
         .collect();
+    let mut replaced_categories = Vec::new();
+    merge_remote_preference_rows(
+        path,
+        &mut local_by_category,
+        initial_remote,
+        &mut replaced_categories,
+    )?;
     let mut uploads = Vec::new();
-    for local in &local_before {
-        let remote_is_newer = remote_by_category
-            .get(&local.category)
-            .is_some_and(|remote| {
-                preference_is_newer(
-                    &remote.modified_at,
-                    &remote.device_id,
-                    &local.modified_at,
-                    &local.device_id,
-                )
-            });
-        if !remote_is_newer {
+    for local in local_by_category.values() {
+        if local_preference_needs_upload(local, remote_by_category.get(&local.category)) {
             uploads.push(json!({
                 "user_id": cfg.user_id.clone(),
                 "category": local.category,
@@ -1905,45 +2018,28 @@ pub async fn sync_app_preferences(
             }));
         }
     }
-    upload(
-        &client,
-        &cfg,
-        &token,
-        "app_preferences",
-        "user_id,category",
-        uploads,
-        false,
-    )
-    .await?;
+    let upload_count = uploads.len();
+    if upload_count > 0 {
+        upload(
+            &client,
+            &cfg,
+            &token,
+            "app_preferences",
+            "user_id,category",
+            uploads,
+            false,
+        )
+        .await?;
 
-    // Pull once more because the database trigger rejects stale concurrent
-    // updates and therefore remains the final conflict-resolution authority.
-    let final_remote = pull_app_preferences(&client, &cfg, &token).await?;
-    let mut replaced_categories = Vec::new();
-    for remote in final_remote.into_iter().filter(valid_remote_preference) {
-        let Some(local) = local_by_category.get(&remote.category) else {
-            continue;
-        };
-        if preference_is_newer(
-            &remote.modified_at,
-            &remote.device_id,
-            &local.modified_at,
-            &local.device_id,
-        ) {
-            if remote.payload != local.payload {
-                replaced_categories.push(remote.category.clone());
-            }
-            storage::replace_local_preference(
-                path,
-                &storage::PreferenceRecord {
-                    category: remote.category,
-                    schema_version: remote.schema_version,
-                    payload: remote.payload,
-                    modified_at: remote.modified_at,
-                    device_id: remote.device_id,
-                },
-            )?;
-        }
+        // Pull once more only after a write. The database trigger may have
+        // rejected a stale concurrent update, so Supabase remains authoritative.
+        let final_remote = pull_app_preferences(&client, &cfg, &token).await?;
+        merge_remote_preference_rows(
+            path,
+            &mut local_by_category,
+            final_remote,
+            &mut replaced_categories,
+        )?;
     }
     let mut records = storage::local_preferences(path)?;
     records.sort_by_key(|record| {
@@ -1958,7 +2054,11 @@ pub async fn sync_app_preferences(
         records,
         replaced_categories,
         last_synced_at: Some(synced_at),
-        message: Some("Preferences synced".into()),
+        message: Some(if upload_count == 0 {
+            "Preferences are up to date".into()
+        } else {
+            format!("Synced {upload_count} changed preference categories")
+        }),
     })
 }
 
@@ -3343,6 +3443,30 @@ mod tests {
             "00000000-0000-0000-0000-000000000001",
             "2026-07-15T20:00:00Z",
             "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ));
+
+        let local = storage::PreferenceRecord {
+            category: "watchlist".into(),
+            schema_version: 1,
+            payload: json!({"symbols":["MESU26"]}),
+            modified_at: "2026-07-15T20:00:00Z".into(),
+            device_id: "00000000-0000-0000-0000-000000000001".into(),
+        };
+        let same_remote = RemotePreferenceRow {
+            category: local.category.clone(),
+            schema_version: 1,
+            payload: local.payload.clone(),
+            modified_at: local.modified_at.clone(),
+            device_id: local.device_id.clone(),
+        };
+        assert!(!local_preference_needs_upload(&local, Some(&same_remote)));
+        assert!(local_preference_needs_upload(&local, None));
+
+        let mut newer_local = local.clone();
+        newer_local.modified_at = "2026-07-15T20:00:01Z".into();
+        assert!(local_preference_needs_upload(
+            &newer_local,
+            Some(&same_remote)
         ));
     }
 }

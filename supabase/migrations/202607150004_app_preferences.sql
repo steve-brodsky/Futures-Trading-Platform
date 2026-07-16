@@ -23,7 +23,7 @@ language plpgsql
 set search_path = ''
 as $$
 begin
-  if tg_op = 'UPDATE' and (new.modified_at, new.device_id::text) < (old.modified_at, old.device_id::text) then
+  if tg_op = 'UPDATE' and (new.modified_at, new.device_id::text) <= (old.modified_at, old.device_id::text) then
     return old;
   end if;
   new.server_updated_at = now();

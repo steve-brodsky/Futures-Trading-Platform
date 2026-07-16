@@ -42,7 +42,8 @@ function workspace(): WorkspaceState {
 
 describe("cloud preferences", () => {
   it("serializes only explicitly synchronized fields", () => {
-    const profile = cloudPreferenceProfile(workspace());
+    const original = workspace();
+    const profile = cloudPreferenceProfile(original);
     const serialized = JSON.stringify(profile);
     expect(serialized).toContain("MESU26");
     expect(serialized).toContain("commissionPerContractSide");
@@ -51,6 +52,15 @@ describe("cloud preferences", () => {
     expect(serialized).not.toContain('"environment"');
     expect(serialized).not.toContain('"x":120');
     expect(serialized).not.toMatch(/password|refreshToken|clientSecret|publishableKey|projectUrl/i);
+
+    const deviceLocalChange = {
+      ...original,
+      environment: "sim" as const,
+      selectedAccountId: "another-local-account",
+      confirmOrders: true,
+      windows: original.windows.map((window) => ({ ...window, x: 999, y: 777, width: 800, height: 600 })),
+    };
+    expect(cloudPreferenceProfile(deviceLocalChange)).toEqual(profile);
   });
 
   it("applies cloud preferences without replacing device-local safety and geometry", () => {

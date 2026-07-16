@@ -36,6 +36,8 @@ import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRange
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
+const PREFERENCE_POLL_INTERVAL_MS = 5 * 60_000;
+const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
   { kind: "candles", label: "Candles", description: "Time-based OHLC" },
   { kind: "line", label: "Line", description: "Close price" },
@@ -238,6 +240,7 @@ function TradingApp() {
   const preferenceSyncPendingRef = useRef(false);
   const preferenceSyncRetryRef = useRef<number | undefined>(undefined);
   const preferenceSyncAttemptRef = useRef(0);
+  const preferenceLastSyncStartedAtRef = useRef(0);
   const brokerageRefreshRef = useRef<(settle?: boolean) => void>(() => undefined);
   const brokerageBalanceRefreshRef = useRef<() => void>(() => undefined);
   const brokerageFillReconcileTimerRef = useRef<number | undefined>(undefined);
@@ -328,6 +331,10 @@ function TradingApp() {
       : quoteFor(activeTradeSymbol))
     : { symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
   const activeOrderMinMove = activeTradeMeta?.minMove ?? activeTab.symbol.minMove;
+  const cloudPreferenceKey = useMemo(
+    () => JSON.stringify(cloudPreferenceProfile(workspace)),
+    [workspace],
+  );
 
   useEffect(() => {
     if (isDetached || !workspace.rightPanelOpen) return;
@@ -1157,17 +1164,21 @@ function TradingApp() {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
     const timer = window.setTimeout(() => { void syncCloudPreferences(); }, 1000);
     return () => window.clearTimeout(timer);
-  }, [workspace, workspaceLoaded]);
+  }, [cloudPreferenceKey, workspaceLoaded]);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
     const sync = () => { void syncCloudPreferences(); };
-    const interval = window.setInterval(sync, 60_000);
-    window.addEventListener("focus", sync);
+    const focusSync = () => {
+      if (Date.now() - preferenceLastSyncStartedAtRef.current < PREFERENCE_FOCUS_THROTTLE_MS) return;
+      sync();
+    };
+    const interval = window.setInterval(sync, PREFERENCE_POLL_INTERVAL_MS);
+    window.addEventListener("focus", focusSync);
     sync();
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener("focus", sync);
+      window.removeEventListener("focus", focusSync);
       if (preferenceSyncRetryRef.current != null) window.clearTimeout(preferenceSyncRetryRef.current);
     };
   }, [workspaceLoaded, preferenceSyncEpoch]);
@@ -1266,6 +1277,7 @@ function TradingApp() {
       return;
     }
     preferenceSyncInFlightRef.current = true;
+    preferenceLastSyncStartedAtRef.current = Date.now();
     preferenceSyncPendingRef.current = false;
     setPreferenceSync((current) => ({ ...current, state: "syncing", message: undefined }));
     try {
