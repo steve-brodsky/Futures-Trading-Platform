@@ -1225,9 +1225,21 @@ fn load_workspace(state: State<'_, NativeState>) -> Result<Option<Value>, AppErr
     storage::load_workspace(&state.db_path)
 }
 
-#[tauri::command]
-fn save_workspace(workspace: Value, state: State<'_, NativeState>) -> Result<(), AppError> {
-    storage::save_workspace(&state.db_path, &workspace)
+#[tauri::command(rename_all = "camelCase")]
+fn save_workspace(
+    workspace: Value,
+    cloud_profile: Option<Value>,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    storage::save_workspace(&state.db_path, &workspace, cloud_profile.as_ref())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn sync_app_preferences(
+    cloud_profile: Value,
+    state: State<'_, NativeState>,
+) -> Result<journal::PreferenceSyncResult, AppError> {
+    journal::sync_app_preferences(&state.db_path, &cloud_profile).await
 }
 
 fn schedule_journal_flush(app: tauri::AppHandle, path: PathBuf) {
@@ -1279,8 +1291,16 @@ async fn configure_journal(
 }
 
 #[tauri::command]
-fn disconnect_journal(state: State<'_, NativeState>) -> Result<(), AppError> {
-    journal::disconnect(&state.db_path)
+fn disconnect_journal(
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    journal::disconnect(&state.db_path)?;
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"cloud-disconnected"}),
+    );
+    Ok(())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2338,6 +2358,7 @@ pub fn run() {
             cancel_order,
             load_workspace,
             save_workspace,
+            sync_app_preferences,
             journal_auth_status,
             configure_journal,
             disconnect_journal,

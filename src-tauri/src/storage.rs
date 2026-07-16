@@ -1,6 +1,7 @@
 use crate::AppError;
+use chrono::Utc;
 use keyring::Entry;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
@@ -8,8 +9,20 @@ use std::{
 };
 
 const SERVICE: &str = "com.northstar.trader";
-const CREDENTIALS_ACCOUNT: &str = "credentials";
+const LEGACY_CREDENTIALS_ACCOUNT: &str = "credentials";
+const TRADESTATION_CREDENTIALS_ACCOUNT: &str = "tradestation";
+const SUPABASE_CREDENTIALS_ACCOUNT: &str = "supabase";
 const BAR_TIME_FORMAT_VERSION: &str = "2";
+
+pub const PREFERENCE_CATEGORIES: [&str; 7] = [
+    "chart_workspace",
+    "alerts",
+    "drawings",
+    "watchlist",
+    "chart_display",
+    "order_entry",
+    "journal_fees",
+];
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct Credentials {
@@ -19,35 +32,138 @@ struct Credentials {
     journal_refresh_token: Option<String>,
 }
 
-static CREDENTIALS: OnceLock<Mutex<Option<Credentials>>> = OnceLock::new();
-
-fn credentials_cache() -> &'static Mutex<Option<Credentials>> {
-    CREDENTIALS.get_or_init(|| Mutex::new(None))
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct TradeStationCredentials {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
 }
 
-fn credentials_entry() -> Result<Entry, AppError> {
-    Ok(Entry::new(SERVICE, CREDENTIALS_ACCOUNT)?)
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct SupabaseCredentials {
+    refresh_token: Option<String>,
 }
 
-fn read_credentials() -> Result<Credentials, AppError> {
-    let mut cached = credentials_cache()
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreferenceRecord {
+    pub category: String,
+    pub schema_version: i64,
+    pub payload: serde_json::Value,
+    pub modified_at: String,
+    pub device_id: String,
+}
+
+static TRADESTATION_CREDENTIALS: OnceLock<Mutex<Option<TradeStationCredentials>>> = OnceLock::new();
+static SUPABASE_CREDENTIALS: OnceLock<Mutex<Option<SupabaseCredentials>>> = OnceLock::new();
+static CREDENTIAL_MIGRATED: OnceLock<Mutex<bool>> = OnceLock::new();
+
+fn tradestation_credentials_cache() -> &'static Mutex<Option<TradeStationCredentials>> {
+    TRADESTATION_CREDENTIALS.get_or_init(|| Mutex::new(None))
+}
+
+fn supabase_credentials_cache() -> &'static Mutex<Option<SupabaseCredentials>> {
+    SUPABASE_CREDENTIALS.get_or_init(|| Mutex::new(None))
+}
+
+fn credentials_entry(account: &str) -> Result<Entry, AppError> {
+    Ok(Entry::new(SERVICE, account)?)
+}
+
+fn split_legacy_credentials(legacy: Credentials) -> (TradeStationCredentials, SupabaseCredentials) {
+    (
+        TradeStationCredentials {
+            client_id: legacy.client_id,
+            client_secret: legacy.client_secret,
+            refresh_token: legacy.refresh_token,
+        },
+        SupabaseCredentials {
+            refresh_token: legacy.journal_refresh_token,
+        },
+    )
+}
+
+fn migrate_legacy_credentials() -> Result<(), AppError> {
+    let mut migrated = CREDENTIAL_MIGRATED
+        .get_or_init(|| Mutex::new(false))
+        .lock()
+        .map_err(|_| AppError::Api("Credential migration lock is unavailable".into()))?;
+    if *migrated {
+        return Ok(());
+    }
+    let legacy_entry = credentials_entry(LEGACY_CREDENTIALS_ACCOUNT)?;
+    let legacy = match legacy_entry.get_password() {
+        Ok(value) => Some(serde_json::from_str::<Credentials>(&value)?),
+        Err(keyring::Error::NoEntry) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(legacy) = legacy {
+        let (tradestation, supabase) = split_legacy_credentials(legacy);
+        credentials_entry(TRADESTATION_CREDENTIALS_ACCOUNT)?
+            .set_password(&serde_json::to_string(&tradestation)?)?;
+        credentials_entry(SUPABASE_CREDENTIALS_ACCOUNT)?
+            .set_password(&serde_json::to_string(&supabase)?)?;
+        legacy_entry.delete_credential()?;
+        *tradestation_credentials_cache()
+            .lock()
+            .map_err(|_| AppError::Api("Credential cache is unavailable".into()))? =
+            Some(tradestation);
+        *supabase_credentials_cache()
+            .lock()
+            .map_err(|_| AppError::Api("Credential cache is unavailable".into()))? = Some(supabase);
+    }
+    *migrated = true;
+    Ok(())
+}
+
+fn read_tradestation_credentials() -> Result<TradeStationCredentials, AppError> {
+    migrate_legacy_credentials()?;
+    let mut cached = tradestation_credentials_cache()
         .lock()
         .map_err(|_| AppError::Api("Credential cache is unavailable".into()))?;
     if let Some(credentials) = cached.as_ref() {
         return Ok(credentials.clone());
     }
-    let credentials = match credentials_entry()?.get_password() {
+    let credentials = match credentials_entry(TRADESTATION_CREDENTIALS_ACCOUNT)?.get_password() {
         Ok(value) => serde_json::from_str(&value)?,
-        Err(keyring::Error::NoEntry) => Credentials::default(),
+        Err(keyring::Error::NoEntry) => TradeStationCredentials::default(),
         Err(error) => return Err(error.into()),
     };
     *cached = Some(credentials.clone());
     Ok(credentials)
 }
 
-fn write_credentials(credentials: &Credentials) -> Result<(), AppError> {
-    credentials_entry()?.set_password(&serde_json::to_string(credentials)?)?;
-    *credentials_cache()
+fn read_supabase_credentials() -> Result<SupabaseCredentials, AppError> {
+    migrate_legacy_credentials()?;
+    let mut cached = supabase_credentials_cache()
+        .lock()
+        .map_err(|_| AppError::Api("Credential cache is unavailable".into()))?;
+    if let Some(credentials) = cached.as_ref() {
+        return Ok(credentials.clone());
+    }
+    let credentials = match credentials_entry(SUPABASE_CREDENTIALS_ACCOUNT)?.get_password() {
+        Ok(value) => serde_json::from_str(&value)?,
+        Err(keyring::Error::NoEntry) => SupabaseCredentials::default(),
+        Err(error) => return Err(error.into()),
+    };
+    *cached = Some(credentials.clone());
+    Ok(credentials)
+}
+
+fn write_tradestation_credentials(credentials: &TradeStationCredentials) -> Result<(), AppError> {
+    credentials_entry(TRADESTATION_CREDENTIALS_ACCOUNT)?
+        .set_password(&serde_json::to_string(credentials)?)?;
+    *tradestation_credentials_cache()
+        .lock()
+        .map_err(|_| AppError::Api("Credential cache is unavailable".into()))? =
+        Some(credentials.clone());
+    Ok(())
+}
+
+fn write_supabase_credentials(credentials: &SupabaseCredentials) -> Result<(), AppError> {
+    credentials_entry(SUPABASE_CREDENTIALS_ACCOUNT)?
+        .set_password(&serde_json::to_string(credentials)?)?;
+    *supabase_credentials_cache()
         .lock()
         .map_err(|_| AppError::Api("Credential cache is unavailable".into()))? =
         Some(credentials.clone());
@@ -55,12 +171,11 @@ fn write_credentials(credentials: &Credentials) -> Result<(), AppError> {
 }
 
 pub fn get_secret(key: &str) -> Result<Option<String>, AppError> {
-    let credentials = read_credentials()?;
     match key {
-        "client_id" => Ok(credentials.client_id),
-        "client_secret" => Ok(credentials.client_secret),
-        "refresh_token" => Ok(credentials.refresh_token),
-        "journal_refresh_token" => Ok(credentials.journal_refresh_token),
+        "client_id" => Ok(read_tradestation_credentials()?.client_id),
+        "client_secret" => Ok(read_tradestation_credentials()?.client_secret),
+        "refresh_token" => Ok(read_tradestation_credentials()?.refresh_token),
+        "journal_refresh_token" => Ok(read_supabase_credentials()?.refresh_token),
         _ => Err(AppError::Validation(format!(
             "Unknown credential key: {key}"
         ))),
@@ -68,41 +183,56 @@ pub fn get_secret(key: &str) -> Result<Option<String>, AppError> {
 }
 
 pub fn set_secret(key: &str, value: &str) -> Result<(), AppError> {
-    let mut credentials = read_credentials()?;
     match key {
-        "client_id" => credentials.client_id = Some(value.to_owned()),
-        "client_secret" => credentials.client_secret = Some(value.to_owned()),
-        "refresh_token" => credentials.refresh_token = Some(value.to_owned()),
-        "journal_refresh_token" => credentials.journal_refresh_token = Some(value.to_owned()),
-        _ => {
-            return Err(AppError::Validation(format!(
-                "Unknown credential key: {key}"
-            )))
+        "client_id" | "client_secret" | "refresh_token" => {
+            let mut credentials = read_tradestation_credentials()?;
+            match key {
+                "client_id" => credentials.client_id = Some(value.to_owned()),
+                "client_secret" => credentials.client_secret = Some(value.to_owned()),
+                "refresh_token" => credentials.refresh_token = Some(value.to_owned()),
+                _ => unreachable!(),
+            }
+            write_tradestation_credentials(&credentials)
         }
+        "journal_refresh_token" => {
+            let mut credentials = read_supabase_credentials()?;
+            credentials.refresh_token = Some(value.to_owned());
+            write_supabase_credentials(&credentials)
+        }
+        _ => Err(AppError::Validation(format!(
+            "Unknown credential key: {key}"
+        ))),
     }
-    write_credentials(&credentials)
 }
 
 pub fn delete_secret(key: &str) -> Result<(), AppError> {
-    let mut credentials = read_credentials()?;
     match key {
-        "client_id" => credentials.client_id = None,
-        "client_secret" => credentials.client_secret = None,
-        "refresh_token" => credentials.refresh_token = None,
-        "journal_refresh_token" => credentials.journal_refresh_token = None,
-        _ => {
-            return Err(AppError::Validation(format!(
-                "Unknown credential key: {key}"
-            )))
+        "client_id" | "client_secret" | "refresh_token" => {
+            let mut credentials = read_tradestation_credentials()?;
+            match key {
+                "client_id" => credentials.client_id = None,
+                "client_secret" => credentials.client_secret = None,
+                "refresh_token" => credentials.refresh_token = None,
+                _ => unreachable!(),
+            }
+            write_tradestation_credentials(&credentials)
         }
+        "journal_refresh_token" => {
+            let mut credentials = read_supabase_credentials()?;
+            credentials.refresh_token = None;
+            write_supabase_credentials(&credentials)
+        }
+        _ => Err(AppError::Validation(format!(
+            "Unknown credential key: {key}"
+        ))),
     }
-    write_credentials(&credentials)
 }
 
 fn connection(path: &Path) -> Result<Connection, AppError> {
     let mut db = Connection::open(path)?;
     db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)", [])?;
     db.execute("CREATE TABLE IF NOT EXISTS bars (environment TEXT NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL, time INTEGER NOT NULL, open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL, realtime INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(environment,symbol,timeframe,time))", [])?;
+    db.execute("CREATE TABLE IF NOT EXISTS app_preference_local (category TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, payload TEXT NOT NULL, modified_at TEXT NOT NULL, device_id TEXT NOT NULL)", [])?;
     let current_version = db.query_row(
         "SELECT value FROM settings WHERE key='bar_time_format_version'",
         [],
@@ -120,10 +250,160 @@ fn connection(path: &Path) -> Result<Connection, AppError> {
     Ok(db)
 }
 
-pub fn save_workspace(path: &Path, value: &serde_json::Value) -> Result<(), AppError> {
-    connection(path)?.execute(
+fn preference_device_id(db: &Connection) -> Result<String, AppError> {
+    if let Some(value) = db
+        .query_row(
+            "SELECT value FROM settings WHERE key='preference_device_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        return Ok(value);
+    }
+    let value = uuid::Uuid::new_v4().to_string();
+    db.execute(
+        "INSERT INTO settings(key,value) VALUES('preference_device_id',?1)",
+        params![value],
+    )?;
+    Ok(value)
+}
+
+fn record_preference_profile_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    profile: &serde_json::Value,
+    seed_modified_at: Option<&str>,
+    device_id: &str,
+) -> Result<(), AppError> {
+    let Some(categories) = profile
+        .get("categories")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Err(AppError::Validation(
+            "Cloud preference profile is missing categories".into(),
+        ));
+    };
+    let now = Utc::now().to_rfc3339();
+    for category in PREFERENCE_CATEGORIES {
+        let Some(payload) = categories.get(category).filter(|value| value.is_object()) else {
+            return Err(AppError::Validation(format!(
+                "Cloud preference category {category} must be an object"
+            )));
+        };
+        let payload = serde_json::to_string(payload)?;
+        let existing = tx
+            .query_row(
+                "SELECT payload FROM app_preference_local WHERE category=?1",
+                params![category],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if existing.as_deref() == Some(payload.as_str()) {
+            continue;
+        }
+        let modified_at = if existing.is_none() {
+            seed_modified_at.unwrap_or(&now)
+        } else {
+            &now
+        };
+        tx.execute(
+            "INSERT INTO app_preference_local(category,schema_version,payload,modified_at,device_id) VALUES(?1,1,?2,?3,?4) ON CONFLICT(category) DO UPDATE SET schema_version=1,payload=excluded.payload,modified_at=excluded.modified_at,device_id=excluded.device_id",
+            params![category, payload, modified_at, device_id],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn record_preference_profile(path: &Path, profile: &serde_json::Value) -> Result<(), AppError> {
+    let mut db = connection(path)?;
+    let seed = db
+        .query_row(
+            "SELECT updated_at FROM settings WHERE key='workspace'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let device_id = preference_device_id(&db)?;
+    let tx = db.transaction()?;
+    record_preference_profile_in_transaction(
+        &tx,
+        profile,
+        seed.as_deref().or(Some("1970-01-01T00:00:00Z")),
+        &device_id,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn save_workspace(
+    path: &Path,
+    value: &serde_json::Value,
+    profile: Option<&serde_json::Value>,
+) -> Result<(), AppError> {
+    let mut db = connection(path)?;
+    let previous_updated_at = db
+        .query_row(
+            "SELECT updated_at FROM settings WHERE key='workspace'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let device_id = preference_device_id(&db)?;
+    let tx = db.transaction()?;
+    tx.execute(
         "INSERT INTO settings(key,value) VALUES('workspace',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
         params![serde_json::to_string(value)?],
+    )?;
+    if let Some(profile) = profile {
+        let seed = previous_updated_at
+            .as_deref()
+            .or(Some("1970-01-01T00:00:00Z"));
+        record_preference_profile_in_transaction(&tx, profile, seed, &device_id)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn local_preferences(path: &Path) -> Result<Vec<PreferenceRecord>, AppError> {
+    let db = connection(path)?;
+    let mut statement = db.prepare(
+        "SELECT category,schema_version,payload,modified_at,device_id FROM app_preference_local",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let payload = row.get::<_, String>(2)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            payload,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (category, schema_version, payload, modified_at, device_id) = row?;
+        Ok(PreferenceRecord {
+            category,
+            schema_version,
+            payload: serde_json::from_str(&payload)?,
+            modified_at,
+            device_id,
+        })
+    })
+    .collect()
+}
+
+pub fn replace_local_preference(path: &Path, record: &PreferenceRecord) -> Result<(), AppError> {
+    if !PREFERENCE_CATEGORIES.contains(&record.category.as_str())
+        || record.schema_version != 1
+        || !record.payload.is_object()
+    {
+        return Err(AppError::Validation(
+            "Invalid cloud preference record".into(),
+        ));
+    }
+    connection(path)?.execute(
+        "INSERT INTO app_preference_local(category,schema_version,payload,modified_at,device_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(category) DO UPDATE SET schema_version=excluded.schema_version,payload=excluded.payload,modified_at=excluded.modified_at,device_id=excluded.device_id",
+        params![record.category, record.schema_version, serde_json::to_string(&record.payload)?, record.modified_at, record.device_id],
     )?;
     Ok(())
 }
@@ -278,5 +558,98 @@ mod tests {
             .unwrap()
             .is_empty());
         std::fs::remove_file(path).unwrap();
+    }
+
+    fn profile(watchlist: &str) -> serde_json::Value {
+        let categories = PREFERENCE_CATEGORIES
+            .iter()
+            .map(|category| {
+                let payload = if *category == "watchlist" {
+                    serde_json::json!({"symbols":[watchlist]})
+                } else {
+                    serde_json::json!({"value":category})
+                };
+                ((*category).to_string(), payload)
+            })
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::json!({"schemaVersion":1,"categories":categories})
+    }
+
+    #[test]
+    fn new_workspace_preferences_seed_old_then_track_only_changed_categories() {
+        let path = std::env::temp_dir().join(format!(
+            "northstar-preferences-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let first = profile("MESU26");
+        save_workspace(&path, &serde_json::json!({"revision":1}), Some(&first)).unwrap();
+        let seeded = local_preferences(&path).unwrap();
+        assert_eq!(seeded.len(), PREFERENCE_CATEGORIES.len());
+        assert!(seeded
+            .iter()
+            .all(|record| record.modified_at == "1970-01-01T00:00:00Z"));
+        let device_id = seeded[0].device_id.clone();
+        assert!(seeded.iter().all(|record| record.device_id == device_id));
+
+        let second = profile("MNQU26");
+        save_workspace(&path, &serde_json::json!({"revision":2}), Some(&second)).unwrap();
+        let tracked = local_preferences(&path).unwrap();
+        assert_ne!(
+            tracked
+                .iter()
+                .find(|record| record.category == "watchlist")
+                .unwrap()
+                .modified_at,
+            "1970-01-01T00:00:00Z"
+        );
+        assert!(tracked
+            .iter()
+            .filter(|record| record.category != "watchlist")
+            .all(|record| record.modified_at == "1970-01-01T00:00:00Z"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn downloaded_preference_replaces_local_metadata_without_marking_a_new_edit() {
+        let path = std::env::temp_dir().join(format!(
+            "northstar-preference-remote-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        record_preference_profile(&path, &profile("MESU26")).unwrap();
+        let record = PreferenceRecord {
+            category: "watchlist".into(),
+            schema_version: 1,
+            payload: serde_json::json!({"symbols":["MCLU26"]}),
+            modified_at: "2026-07-15T20:00:00Z".into(),
+            device_id: uuid::Uuid::new_v4().to_string(),
+        };
+        replace_local_preference(&path, &record).unwrap();
+        let saved = local_preferences(&path)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.category == "watchlist")
+            .unwrap();
+        assert_eq!(saved.payload, record.payload);
+        assert_eq!(saved.modified_at, record.modified_at);
+        assert_eq!(saved.device_id, record.device_id);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_credentials_split_into_independent_vault_payloads() {
+        let (tradestation, supabase) = split_legacy_credentials(Credentials {
+            client_id: Some("ts-client".into()),
+            client_secret: Some("ts-secret".into()),
+            refresh_token: Some("ts-refresh".into()),
+            journal_refresh_token: Some("sb-refresh".into()),
+        });
+        let tradestation_json = serde_json::to_string(&tradestation).unwrap();
+        let supabase_json = serde_json::to_string(&supabase).unwrap();
+        assert!(tradestation_json.contains("ts-client"));
+        assert!(tradestation_json.contains("ts-secret"));
+        assert!(tradestation_json.contains("ts-refresh"));
+        assert!(!tradestation_json.contains("sb-refresh"));
+        assert_eq!(supabase_json, r#"{"refresh_token":"sb-refresh"}"#);
+        assert!(!supabase_json.contains("ts-"));
     }
 }

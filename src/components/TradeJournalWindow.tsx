@@ -35,7 +35,12 @@ function maskAccount(value: string): string {
   return `${value.slice(0, 3)} ··${value.slice(-4)}`;
 }
 
-export function JournalCloudSettings({ compact = false, onConfigured }: { compact?: boolean; onConfigured?: () => void }) {
+export function JournalCloudSettings({ compact = false, onConfigured, onConnectionChanged, preferenceSync }: {
+  compact?: boolean;
+  onConfigured?: () => void;
+  onConnectionChanged?: () => void;
+  preferenceSync?: { state: "idle" | "syncing" | "synced" | "offline" | "error"; lastSyncedAt?: string; message?: string };
+}) {
   const today = new Date().toISOString().slice(0, 10);
   const defaultStart = `${new Date().getFullYear()}-01-01`;
   const [status, setStatus] = useState<JournalAuthStatus>({ configured: false, authenticated: false });
@@ -64,14 +69,14 @@ export function JournalCloudSettings({ compact = false, onConfigured }: { compac
     setBusy(true); setMessage(undefined);
     try {
       const next = await api.configureJournal(projectUrl.trim(), publishableKey.trim(), email.trim(), password, backfillStart);
-      setStatus(next); setPassword(""); setMessage("Trade Journal Cloud connected. Historical sync can now begin."); onConfigured?.();
+      setStatus(next); setPassword(""); setMessage("Supabase connected. Journal and preference synchronization are enabled."); onConfigured?.(); onConnectionChanged?.();
     } catch (error) { setMessage(String(error)); }
     finally { setBusy(false); }
   }
 
   async function disconnect() {
     setBusy(true);
-    try { await api.disconnectJournal(); setStatus({ configured: false, authenticated: false }); setMessage("Journal cloud session removed from this device."); }
+    try { await api.disconnectJournal(); setStatus({ configured: false, authenticated: false }); setMessage("Supabase session removed from this device. Local data was kept."); onConnectionChanged?.(); }
     catch (error) { setMessage(String(error)); }
     finally { setBusy(false); }
   }
@@ -98,7 +103,7 @@ export function JournalCloudSettings({ compact = false, onConfigured }: { compac
   }
 
   return <section className={`journal-cloud-settings ${compact ? "compact" : ""}`}>
-    <header><div className="journal-cloud-icon"><ShieldCheck size={18} /></div><div><span>Cloud journal</span><h3>Supabase connection</h3><p>Execution data is owner-scoped. Only the refresh token is retained in the operating system vault.</p></div><i className={status.authenticated ? "connected" : ""}>{status.authenticated ? "Connected" : "Not connected"}</i></header>
+    <header><div className="journal-cloud-icon"><ShieldCheck size={18} /></div><div><span>Private cloud</span><h3>Supabase connection</h3><p>Journal data and non-secret app preferences are owner-scoped. The refresh token stays in a separate operating-system vault record.</p></div><i className={status.authenticated ? "connected" : ""}>{status.authenticated ? "Connected" : "Not connected"}</i></header>
     {!api.isNative && <p className="journal-inline-notice">Cloud setup is disabled in browser demo mode.</p>}
     <div className="journal-cloud-fields">
       <label><span>Project URL</span><input value={projectUrl} onChange={(event) => setProjectUrl(event.target.value)} placeholder="https://project.supabase.co" disabled={!api.isNative || busy} /></label>
@@ -109,8 +114,13 @@ export function JournalCloudSettings({ compact = false, onConfigured }: { compac
     </div>
     <p className="journal-backfill-help">A backfill date includes that entire day through today. To ignore all earlier executions and begin at the current moment, use Start fresh now.</p>
     {status.recordFrom && <p className="journal-recording-cutoff">Recording from {new Date(status.recordFrom).toLocaleString()}.</p>}
+    {preferenceSync && <p className={`journal-settings-message preference-sync-${preferenceSync.state}`} role="status">
+      {preferenceSync.state === "syncing" ? "Syncing app preferences…"
+        : preferenceSync.state === "synced" ? `App preferences synced${preferenceSync.lastSyncedAt ? ` ${new Date(preferenceSync.lastSyncedAt).toLocaleString()}` : ""}.`
+        : preferenceSync.message ?? "App preference sync is idle."}
+    </p>}
     {message && <p className="journal-settings-message" role="status">{message}</p>}
-    <div className="journal-cloud-actions"><button className="danger-button" disabled={busy || !api.isNative} onClick={requestReset}>Start fresh now</button><button className="secondary-button" disabled={busy || !status.configured} onClick={disconnect}>Disconnect</button><button className="primary-button" disabled={busy || !api.isNative} onClick={connect}>{busy ? "Working…" : status.configured ? "Reconnect" : "Connect journal"}</button></div>
+    <div className="journal-cloud-actions"><button className="danger-button" disabled={busy || !api.isNative} onClick={requestReset}>Start fresh now</button><button className="secondary-button" disabled={busy || !status.configured} onClick={disconnect}>Disconnect</button><button className="primary-button" disabled={busy || !api.isNative} onClick={connect}>{busy ? "Working…" : status.configured ? "Reconnect" : "Connect Supabase"}</button></div>
     {confirmReset && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setConfirmReset(false); }}><section className="modal journal-reset-confirm" role="dialog" aria-modal="true" aria-labelledby="journal-reset-title"><header><h2 id="journal-reset-title">Start the Trade Journal fresh now?</h2><button className="icon-button" aria-label="Cancel journal reset" onClick={() => setConfirmReset(false)}><X size={17} /></button></header><div className="journal-reset-copy"><strong>This permanently deletes the current journal.</strong><p>All local and Supabase trades, annotations, and execution history will be removed. Only broker orders created after the new exact-time cutoff will be recorded.</p></div><div className="modal-actions"><button className="secondary-button" onClick={() => setConfirmReset(false)}>Cancel</button><button className="danger-button" onClick={resetNow}>Delete history and start now</button></div></section></div>}
   </section>;
 }

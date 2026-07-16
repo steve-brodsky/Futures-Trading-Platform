@@ -15,11 +15,19 @@ use std::{
 };
 
 static CLOUD_SYNCING: AtomicBool = AtomicBool::new(false);
+static PREFERENCES_SYNCING: AtomicBool = AtomicBool::new(false);
 const DEFAULT_COMMISSION_PER_CONTRACT_SIDE: f64 = 0.40;
 struct SyncGuard;
 impl Drop for SyncGuard {
     fn drop(&mut self) {
         CLOUD_SYNCING.store(false, Ordering::Release);
+    }
+}
+
+struct PreferenceSyncGuard;
+impl Drop for PreferenceSyncGuard {
+    fn drop(&mut self) {
+        PREFERENCES_SYNCING.store(false, Ordering::Release);
     }
 }
 
@@ -58,6 +66,16 @@ pub struct JournalConnectionInput {
 pub struct JournalSyncStatus {
     pub state: String,
     pub pending_events: usize,
+    pub last_synced_at: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreferenceSyncResult {
+    pub state: String,
+    pub records: Vec<storage::PreferenceRecord>,
+    pub replaced_categories: Vec<String>,
     pub last_synced_at: Option<String>,
     pub message: Option<String>,
 }
@@ -185,6 +203,15 @@ struct RemoteSettingsRow {
     backfill_start: String,
     record_from: Option<String>,
     updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RemotePreferenceRow {
+    category: String,
+    schema_version: i64,
+    payload: Value,
+    modified_at: String,
+    device_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1778,6 +1805,163 @@ async fn upload(
     Ok(())
 }
 
+fn preference_is_newer(
+    left_modified_at: &str,
+    left_device_id: &str,
+    right_modified_at: &str,
+    right_device_id: &str,
+) -> bool {
+    let left_time = DateTime::parse_from_rfc3339(left_modified_at).ok();
+    let right_time = DateTime::parse_from_rfc3339(right_modified_at).ok();
+    match (left_time, right_time) {
+        (Some(left), Some(right)) if left != right => left > right,
+        _ if left_modified_at != right_modified_at => left_modified_at > right_modified_at,
+        _ => left_device_id > right_device_id,
+    }
+}
+
+async fn pull_app_preferences(
+    client: &reqwest::Client,
+    cfg: &CloudConfig,
+    token: &str,
+) -> Result<Vec<RemotePreferenceRow>, AppError> {
+    let response = client
+        .get(format!("{}/rest/v1/app_preferences", cfg.project_url))
+        .headers(headers(cfg, token, false)?)
+        .query(&[(
+            "select",
+            "category,schema_version,payload,modified_at,device_id",
+        )])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await?;
+        return Err(AppError::Api(format!(
+            "Supabase preference download failed ({status}): {body}. Apply the latest Supabase migration and retry"
+        )));
+    }
+    Ok(response.json().await?)
+}
+
+fn valid_remote_preference(row: &RemotePreferenceRow) -> bool {
+    storage::PREFERENCE_CATEGORIES.contains(&row.category.as_str())
+        && row.schema_version == 1
+        && row.payload.is_object()
+        && uuid::Uuid::parse_str(&row.device_id).is_ok()
+        && DateTime::parse_from_rfc3339(&row.modified_at).is_ok()
+}
+
+pub async fn sync_app_preferences(
+    path: &Path,
+    profile: &Value,
+) -> Result<PreferenceSyncResult, AppError> {
+    if PREFERENCES_SYNCING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(AppError::Api(
+            "Another preference sync is already running".into(),
+        ));
+    }
+    let _guard = PreferenceSyncGuard;
+    storage::record_preference_profile(path, profile)?;
+    let cfg =
+        config(path)?.ok_or_else(|| AppError::Validation("Configure Supabase first".into()))?;
+    let token = access_token(&cfg).await?;
+    let client = reqwest::Client::new();
+    let initial_remote = pull_app_preferences(&client, &cfg, &token).await?;
+    let local_before = storage::local_preferences(path)?;
+    let local_by_category: HashMap<_, _> = local_before
+        .iter()
+        .cloned()
+        .map(|record| (record.category.clone(), record))
+        .collect();
+    let remote_by_category: HashMap<_, _> = initial_remote
+        .into_iter()
+        .filter(valid_remote_preference)
+        .map(|record| (record.category.clone(), record))
+        .collect();
+    let mut uploads = Vec::new();
+    for local in &local_before {
+        let remote_is_newer = remote_by_category
+            .get(&local.category)
+            .is_some_and(|remote| {
+                preference_is_newer(
+                    &remote.modified_at,
+                    &remote.device_id,
+                    &local.modified_at,
+                    &local.device_id,
+                )
+            });
+        if !remote_is_newer {
+            uploads.push(json!({
+                "user_id": cfg.user_id.clone(),
+                "category": local.category,
+                "schema_version": local.schema_version,
+                "payload": local.payload,
+                "modified_at": local.modified_at,
+                "device_id": local.device_id,
+            }));
+        }
+    }
+    upload(
+        &client,
+        &cfg,
+        &token,
+        "app_preferences",
+        "user_id,category",
+        uploads,
+        false,
+    )
+    .await?;
+
+    // Pull once more because the database trigger rejects stale concurrent
+    // updates and therefore remains the final conflict-resolution authority.
+    let final_remote = pull_app_preferences(&client, &cfg, &token).await?;
+    let mut replaced_categories = Vec::new();
+    for remote in final_remote.into_iter().filter(valid_remote_preference) {
+        let Some(local) = local_by_category.get(&remote.category) else {
+            continue;
+        };
+        if preference_is_newer(
+            &remote.modified_at,
+            &remote.device_id,
+            &local.modified_at,
+            &local.device_id,
+        ) {
+            if remote.payload != local.payload {
+                replaced_categories.push(remote.category.clone());
+            }
+            storage::replace_local_preference(
+                path,
+                &storage::PreferenceRecord {
+                    category: remote.category,
+                    schema_version: remote.schema_version,
+                    payload: remote.payload,
+                    modified_at: remote.modified_at,
+                    device_id: remote.device_id,
+                },
+            )?;
+        }
+    }
+    let mut records = storage::local_preferences(path)?;
+    records.sort_by_key(|record| {
+        storage::PREFERENCE_CATEGORIES
+            .iter()
+            .position(|category| *category == record.category)
+            .unwrap_or(usize::MAX)
+    });
+    let synced_at = now();
+    Ok(PreferenceSyncResult {
+        state: "synced".into(),
+        records,
+        replaced_categories,
+        last_synced_at: Some(synced_at),
+        message: Some("Preferences synced".into()),
+    })
+}
+
 async fn delete_tombstoned_trades(
     client: &reqwest::Client,
     cfg: &CloudConfig,
@@ -3138,5 +3322,27 @@ mod tests {
             Some("2026-07-15T23:45:12Z")
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn preference_conflicts_use_timestamp_then_device_id() {
+        assert!(preference_is_newer(
+            "2026-07-15T20:00:01Z",
+            "00000000-0000-0000-0000-000000000001",
+            "2026-07-15T20:00:00Z",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ));
+        assert!(preference_is_newer(
+            "2026-07-15T20:00:00Z",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+            "2026-07-15T20:00:00Z",
+            "00000000-0000-0000-0000-000000000001",
+        ));
+        assert!(!preference_is_newer(
+            "2026-07-15T20:00:00Z",
+            "00000000-0000-0000-0000-000000000001",
+            "2026-07-15T20:00:00Z",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ));
     }
 }

@@ -153,20 +153,23 @@ The executable is written to `src-tauri\target\release\northstar-trader.exe`. Th
 
 The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes, so that port must be available while signing in.
 
-## Supabase trade journal configuration
+## Supabase cloud configuration
 
-1. Create a Supabase project and an email/password user for the private journal owner.
+1. Create a Supabase project and an email/password user for the private Northstar owner.
 2. Apply every SQL file in [`supabase/migrations`](supabase/migrations) in filename order with the Supabase CLI or SQL editor.
-3. In Northstar, open **Settings → Supabase connection** and enter the project URL, publishable key, existing user email/password, and first backfill date. The date is inclusive. To discard all existing local/cloud journal history and record only new orders, connect first and choose **Start fresh now**.
-4. Open the journal from the book icon in the main chart toolbar and press **Sync**.
+3. In Northstar, open **Settings → Supabase connection** and enter the project URL, publishable key, existing user email/password, and first journal backfill date. The date is inclusive. To discard all existing local/cloud journal history and record only new orders, connect first and choose **Start fresh now**.
+4. Open the journal from the book icon in the main chart toolbar and press **Sync** for execution history. App preferences synchronize automatically after connection, at startup, after edits, when the app regains focus, and periodically while online.
 
-The password is used only for the initial token exchange. Northstar stores the Supabase refresh token in the operating-system credential vault, keeps access tokens in memory, and never accepts a service-role key. Journal tables use row-level security keyed to the authenticated Supabase user.
+The password is used only for the initial token exchange. Northstar stores the Supabase refresh token in its own operating-system vault record, keeps access tokens in memory, and never accepts a service-role key. Journal and preference tables use row-level security keyed to the authenticated Supabase user.
+
+Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EMA alert configuration, drawings, the watchlist, order-entry preferences and entry rules, and the journal fee rate. Monitor geometry, panel layout, SIM/LIVE selection, selected broker account, order-confirmation safety state, transient order drafts, and alert history remain local to each computer.
 
 ## Security and local data
 
-- The client ID, client secret, and refresh token are stored in the operating system credential vault. They are not placed in frontend storage or SQLite.
+- The TradeStation client ID, client secret, and OAuth refresh token are stored together in a TradeStation-only operating-system vault record. They are not placed in frontend storage, SQLite, or Supabase.
+- The Supabase refresh token is stored in a separate Supabase-only vault record. The Supabase password is never retained, and no Supabase connection fields or tokens are included in synchronized preference payloads.
 - The access token is kept in native process memory and refreshed shortly before expiration.
-- Chart workspace state and cached bars are stored in `northstar.sqlite3` under the operating system's Tauri application-data directory.
+- Chart workspace state and cached bars are stored in `northstar.sqlite3` under the operating system's Tauri application-data directory. The local workspace continues to work while Supabase is offline.
 - SIM and LIVE bar caches are separated by environment.
 - TradeStation account IDs are masked before they are displayed by the app.
 - Native HTTP calls and order validation live in Rust; the frontend invokes a constrained set of Tauri commands.
@@ -272,4 +275,4 @@ The main window owns shared streams and persisted workspace state. Detached wind
 
 ## Status
 
-The current test baseline is 85 passing frontend unit tests and 26 passing Rust tests. There is no end-to-end suite or release pipeline in the repository yet.
+The current test baseline is 192 passing frontend unit tests and 68 passing Rust tests. There is no end-to-end suite or release pipeline in the repository yet.

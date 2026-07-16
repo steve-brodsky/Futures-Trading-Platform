@@ -305,6 +305,36 @@ export interface WorkspaceState {
   settings: WorkspaceSettings;
 }
 
+export type CloudPreferenceCategory =
+  | "chart_workspace"
+  | "alerts"
+  | "drawings"
+  | "watchlist"
+  | "chart_display"
+  | "order_entry"
+  | "journal_fees";
+
+export interface CloudPreferenceProfile {
+  schemaVersion: 1;
+  categories: Record<CloudPreferenceCategory, Record<string, unknown>>;
+}
+
+export interface CloudPreferenceRecord {
+  category: CloudPreferenceCategory;
+  schemaVersion: 1;
+  payload: Record<string, unknown>;
+  modifiedAt: string;
+  deviceId: string;
+}
+
+export interface PreferenceSyncResult {
+  state: "synced" | "offline" | "error";
+  records: CloudPreferenceRecord[];
+  replacedCategories: CloudPreferenceCategory[];
+  lastSyncedAt?: string;
+  message?: string;
+}
+
 export interface BarSnapshotEvent {
   subscriptionId: string;
   environment: TradingEnvironment;

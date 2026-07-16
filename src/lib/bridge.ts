@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSyncStatus, JournalTrade, OrderDraft, OrderPreview, OrderUpdate, Position, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSyncStatus, JournalTrade, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, monthSummary } from "./journal";
 import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, futures, makeDemoBars, quoteFor } from "./demo";
 
@@ -131,8 +132,12 @@ export const api = {
     return raw ? JSON.parse(raw) : null;
   },
   async saveWorkspace(workspace: WorkspaceState): Promise<void> {
-    if (isTauri) await native("save_workspace", { workspace });
+    if (isTauri) await native("save_workspace", { workspace, cloudProfile: cloudPreferenceProfile(workspace) });
     else localStorage.setItem("northstar-workspace", JSON.stringify(workspace));
+  },
+  async syncPreferences(cloudProfile: CloudPreferenceProfile): Promise<PreferenceSyncResult> {
+    if (!isTauri) return { state: "synced", records: [], replacedCategories: [], lastSyncedAt: new Date().toISOString(), message: "Browser preferences are local only" };
+    return native("sync_app_preferences", { cloudProfile });
   },
   async journalAuthStatus(): Promise<JournalAuthStatus> {
     return isTauri ? native("journal_auth_status") : { configured: false, authenticated: false };

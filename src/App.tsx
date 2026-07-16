@@ -14,6 +14,7 @@ import { TradingChart } from "./components/TradingChart";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { api } from "./lib/bridge";
+import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
@@ -32,7 +33,7 @@ import { reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
 import { claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, detachedSourceWindowToClose, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
@@ -231,6 +232,12 @@ function TradingApp() {
   const [credentialsConfigured, setCredentialsConfigured] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
+  const [preferenceSync, setPreferenceSync] = useState<{ state: "idle" | "syncing" | PreferenceSyncResult["state"]; lastSyncedAt?: string; message?: string }>({ state: "idle" });
+  const [preferenceSyncEpoch, setPreferenceSyncEpoch] = useState(0);
+  const preferenceSyncInFlightRef = useRef(false);
+  const preferenceSyncPendingRef = useRef(false);
+  const preferenceSyncRetryRef = useRef<number | undefined>(undefined);
+  const preferenceSyncAttemptRef = useRef(0);
   const brokerageRefreshRef = useRef<(settle?: boolean) => void>(() => undefined);
   const brokerageBalanceRefreshRef = useRef<() => void>(() => undefined);
   const brokerageFillReconcileTimerRef = useRef<number | undefined>(undefined);
@@ -621,6 +628,11 @@ function TradingApp() {
     }).then((unlisten) => cleanups.push(unlisten));
     listen<StripBounds>("chart-strip-bounds", ({ payload }) => stripBoundsRef.current.set(payload.windowId, payload)).then((unlisten) => cleanups.push(unlisten));
     listen<{ tabId: string; range: { from: number; to: number } }>("chart-viewport", ({ payload }) => viewRangesRef.current.set(payload.tabId, payload.range)).then((unlisten) => cleanups.push(unlisten));
+    listen<{ reason?: string }>("journal-updated", ({ payload }) => {
+      if (payload.reason === "cloud-configured" || payload.reason === "cloud-disconnected") {
+        setPreferenceSyncEpoch((value) => value + 1);
+      }
+    }).then((unlisten) => cleanups.push(unlisten));
     return () => {
       if (brokerageFillReconcileTimerRef.current != null) window.clearTimeout(brokerageFillReconcileTimerRef.current);
       brokerageFillReconcileTimerRef.current = undefined;
@@ -1142,6 +1154,25 @@ function TradingApp() {
   }, [workspace, workspaceLoaded]);
 
   useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
+    const timer = window.setTimeout(() => { void syncCloudPreferences(); }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [workspace, workspaceLoaded]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
+    const sync = () => { void syncCloudPreferences(); };
+    const interval = window.setInterval(sync, 60_000);
+    window.addEventListener("focus", sync);
+    sync();
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", sync);
+      if (preferenceSyncRetryRef.current != null) window.clearTimeout(preferenceSyncRetryRef.current);
+    };
+  }, [workspaceLoaded, preferenceSyncEpoch]);
+
+  useEffect(() => {
     if (!searchOpen) return;
     let active = true;
     const timer = window.setTimeout(() => api.symbolSearch(search)
@@ -1227,6 +1258,79 @@ function TradingApp() {
     });
     return () => { active = false; };
   }, [workspaceLoaded, authenticated, environment, authEpoch, activeContinuous, activeTab.symbol.root]);
+
+  async function syncCloudPreferences() {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
+    if (preferenceSyncInFlightRef.current) {
+      preferenceSyncPendingRef.current = true;
+      return;
+    }
+    preferenceSyncInFlightRef.current = true;
+    preferenceSyncPendingRef.current = false;
+    setPreferenceSync((current) => ({ ...current, state: "syncing", message: undefined }));
+    try {
+      const auth = await api.journalAuthStatus();
+      if (!auth.authenticated) {
+        preferenceSyncAttemptRef.current = 0;
+        setPreferenceSync({ state: "idle", message: auth.configured ? "Reconnect Supabase to resume preference sync." : "Connect Supabase to sync preferences." });
+        return;
+      }
+      const requested = cloudPreferenceProfile(workspaceRef.current);
+      const result = await api.syncPreferences(requested);
+      const remote = profileFromRecords(result.records);
+      const current = workspaceRef.current;
+      const currentProfile = cloudPreferenceProfile(current);
+      const mergedProfile = cloudPreferenceProfile(current);
+      let deferredLocalEdit = false;
+      const eligible = new Set(result.records.flatMap((record) => {
+        const category = record.category;
+        if (JSON.stringify(currentProfile.categories[category]) !== JSON.stringify(requested.categories[category])) {
+          deferredLocalEdit = true;
+          return [];
+        }
+        mergedProfile.categories[category] = remote.categories[category];
+        return [category];
+      }));
+      let mergedWorkspace = current;
+      if (JSON.stringify(mergedProfile) !== JSON.stringify(currentProfile)) {
+        mergedWorkspace = stabilizeChartWorkspace(current, applyCloudPreferenceProfile(current, mergedProfile));
+        markDetachedMarketReplacements(current, mergedWorkspace);
+        workspaceRef.current = mergedWorkspace;
+        setWorkspace(mergedWorkspace);
+        syncWorkspaceToOpenWindows(mergedWorkspace);
+        if (mergedWorkspace.settings.journal.commissionPerContractSide !== current.settings.journal.commissionPerContractSide) {
+          await api.setJournalCommission(mergedWorkspace.settings.journal.commissionPerContractSide);
+        }
+        if (result.replacedCategories.some((category) => eligible.has(category))) {
+          showToast("Newer preferences from another computer were applied.");
+        }
+      }
+      if (deferredLocalEdit) {
+        // The native sync may have accepted a remote row while this request was
+        // in flight. Re-record the current value and immediately coalesce one
+        // follow-up sync so that the user's newer local edit cannot be lost.
+        await api.saveWorkspace(mergedWorkspace);
+        preferenceSyncPendingRef.current = true;
+      }
+      preferenceSyncAttemptRef.current = 0;
+      if (preferenceSyncRetryRef.current != null) window.clearTimeout(preferenceSyncRetryRef.current);
+      preferenceSyncRetryRef.current = undefined;
+      setPreferenceSync({ state: "synced", lastSyncedAt: result.lastSyncedAt, message: result.message });
+    } catch (error) {
+      const message = String(error);
+      setPreferenceSync({ state: /network|connect|offline|fetch|dns/i.test(message) ? "offline" : "error", message });
+      const attempt = preferenceSyncAttemptRef.current++;
+      const delay = preferenceRetryDelay(attempt);
+      if (preferenceSyncRetryRef.current != null) window.clearTimeout(preferenceSyncRetryRef.current);
+      preferenceSyncRetryRef.current = window.setTimeout(() => { void syncCloudPreferences(); }, delay);
+    } finally {
+      preferenceSyncInFlightRef.current = false;
+      if (preferenceSyncPendingRef.current) {
+        preferenceSyncPendingRef.current = false;
+        window.setTimeout(() => { void syncCloudPreferences(); }, 0);
+      }
+    }
+  }
 
   function showToast(message: string) {
     setToast(message);
@@ -1969,7 +2073,7 @@ function TradingApp() {
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Chart display</h3><p>Configure tab signals and the values shown beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>EMA 200 tab status</strong><small>Green above EMA 200, red below</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showEma200TabDots} onChange={(event) => updateChartLabelSettings({ showEma200TabDots: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure risk sizing and projected swing stops.</p></header><label className="settings-control-row"><span><strong>Risk budget behavior</strong><small>Choose whether risk sizing may exceed the limit</small></span><select aria-label="Risk budget behavior" value={workspace.settings.orderTicket.riskSizingPolicy} onChange={(event) => updateOrderTicketSettings({ riskSizingPolicy: event.target.value as OrderTicketSettings["riskSizingPolicy"] })}><option value="strict">Stay within risk</option><option value="minimum-one">Always allow 1 contract</option></select></label><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
       <section className="settings-section" aria-labelledby="journal-fee-settings"><header><span>Journal</span><h3 id="journal-fee-settings">Commission and fees</h3><p>Used for journal net P&amp;L on every opening and closing fill.</p></header><label className="settings-control-row"><span><strong>Fee per contract, per side</strong><small>One contract opened and closed is charged twice</small></span><div className="settings-number-control"><input aria-label="Journal fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.commissionPerContractSide} onChange={(event) => updateJournalCommission(Number(event.target.value))} /><span>USD</span></div></label></section>
-      <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings /></section>
+      <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings preferenceSync={preferenceSync} onConnectionChanged={() => { void syncCloudPreferences(); }} /></section>
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
     </div></Modal>}
 
