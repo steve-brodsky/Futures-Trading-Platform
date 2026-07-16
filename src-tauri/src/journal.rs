@@ -510,11 +510,11 @@ fn matching_entry_intent(
         .optional()?;
     if let Some(intent) = fallback.as_ref() {
         db.execute(
-            "UPDATE journal_intents SET broker_order_id=?1 WHERE id=?2",
+            "UPDATE journal_intents SET broker_order_id=COALESCE(broker_order_id,?1) WHERE id=?2",
             params![order.id, intent.id],
         )?;
         db.execute(
-            "UPDATE journal_events SET broker_order_id=?1,synced=0 WHERE event_key=?2",
+            "UPDATE journal_events SET broker_order_id=COALESCE(broker_order_id,?1),synced=0 WHERE event_key=?2",
             params![order.id, format!("intent:{}", intent.id)],
         )?;
     }
@@ -3676,6 +3676,21 @@ mod tests {
         assert_eq!(trade.risk_provenance, "exact");
         assert_eq!(trade.original_stop, Some(6245.0));
         assert_eq!(trade.deployed_risk, Some(25.0));
+        let mut screenshot = screenshot_input(1512, 720);
+        screenshot.broker_order_id = "parent-order".into();
+        assert_eq!(
+            resolve_screenshot_trade(&path, &screenshot).unwrap(),
+            trade.id
+        );
+        let persisted_order_id: String = Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT broker_order_id FROM journal_intents WHERE id=?1",
+                params![intent],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted_order_id, "parent-order");
         std::fs::remove_file(path).unwrap();
     }
 

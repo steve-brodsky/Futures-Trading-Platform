@@ -25,7 +25,7 @@ import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, qu
 import { quoteDayChangePercent } from "./lib/quotes";
 import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
 import { calculateSwingStop } from "./lib/swingStop";
-import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, ENTRY_SCREENSHOT_QUEUE_LIMIT } from "./lib/entryScreenshot";
+import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, shouldRetryEntryScreenshots, ENTRY_SCREENSHOT_QUEUE_LIMIT } from "./lib/entryScreenshot";
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
@@ -663,7 +663,7 @@ function TradingApp() {
       if (payload.reason === "cloud-configured" || payload.reason === "cloud-disconnected") {
         setPreferenceSyncEpoch((value) => value + 1);
       }
-      if (payload.reason === "cloud-configured" || payload.reason === "cloud-sync" || payload.reason === "outbox-flushed") {
+      if (shouldRetryEntryScreenshots(payload.reason)) {
         retryEntryScreenshotsRef.current();
       }
     }).then((unlisten) => cleanups.push(unlisten));

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrderUpdate, Position } from "../types";
-import { approximateDataUrlBytes, canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition } from "./entryScreenshot";
+import { approximateDataUrlBytes, canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, shouldRetryEntryScreenshots } from "./entryScreenshot";
 
 const position: Position = { id: "p1", symbol: "MESU26", side: "Long", quantity: 1, averagePrice: 6250, last: 6251, unrealizedPnl: 5 };
 const target: OrderUpdate = { id: "tp", symbol: "MESU26", side: "Sell", type: "Limit", quantity: 1, price: 6260, status: "Working", timestamp: "", openOrClose: "Close", groupName: "BRK 1" };
@@ -24,5 +24,13 @@ describe("entry chart screenshots", () => {
   it("estimates payload size and uses the bounded retry schedule", () => {
     expect(approximateDataUrlBytes("data:image/png;base64,AAAA")).toBe(3);
     expect([1, 2, 3, 4].map(entryScreenshotRetryDelay)).toEqual([5_000, 15_000, 60_000, undefined]);
+  });
+
+  it("retries as soon as the opening fill links the journal trade", () => {
+    expect(shouldRetryEntryScreenshots("broker-fill")).toBe(true);
+    expect(shouldRetryEntryScreenshots("close-reconciled")).toBe(true);
+    expect(shouldRetryEntryScreenshots("outbox-flushed")).toBe(true);
+    expect(shouldRetryEntryScreenshots("broker-order-observed")).toBe(false);
+    expect(shouldRetryEntryScreenshots("entry-screenshot")).toBe(false);
   });
 });

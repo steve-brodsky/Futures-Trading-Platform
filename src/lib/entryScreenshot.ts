@@ -33,3 +33,11 @@ export function approximateDataUrlBytes(dataUrl: string): number {
 export function entryScreenshotRetryDelay(attempt: number): number | undefined {
   return ENTRY_SCREENSHOT_RETRY_DELAYS[attempt - 1];
 }
+
+export function shouldRetryEntryScreenshots(reason?: string): boolean {
+  return reason === "broker-fill"
+    || reason === "close-reconciled"
+    || reason === "cloud-configured"
+    || reason === "cloud-sync"
+    || reason === "outbox-flushed";
+}
