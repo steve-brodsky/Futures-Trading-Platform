@@ -166,7 +166,7 @@ The password is used only for the initial token exchange. Northstar stores the S
 
 Entry-chart PNGs use the private `trade-screenshots` Supabase Storage bucket created by migration `202607150006_trade_screenshots.sql`. Images are uploaded and downloaded with the authenticated journal user, are limited to 5 MB, and are never written to SQLite or the local filesystem. If cloud access is unavailable after an entry, the order continues normally and the image is retried only while that desktop session remains open.
 
-Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EMA alert configuration, drawings, the watchlist, order-entry preferences and entry rules, and the journal fee rate. Monitor geometry, panel layout, SIM/LIVE selection, selected broker account, order-confirmation safety state, transient order drafts, and alert history remain local to each computer.
+Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EMA alert configuration, drawings, the watchlist, order-entry preferences, entry rules and their alert settings, and the journal fee rate. Monitor geometry, panel layout, SIM/LIVE selection, selected broker account, order-confirmation safety state, transient order drafts, and alert history remain local to each computer.
 
 ## Security and local data
 

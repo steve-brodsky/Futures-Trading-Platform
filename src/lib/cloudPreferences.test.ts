@@ -49,7 +49,8 @@ describe("cloud preferences", () => {
     const serialized = JSON.stringify(profile);
     expect(serialized).toContain("MESU26");
     expect(serialized).toContain("commissionPerContractSide");
-    expect(profile.categories.alerts.entryRules).toEqual(original.entryRuleAlerts);
+    expect(profile.categories.order_entry.entryRuleAlerts).toEqual(original.entryRuleAlerts);
+    expect(profile.categories.alerts.entryRules).toBeUndefined();
     expect(serialized).not.toContain("secret-account-id");
     expect(serialized).not.toContain("confirmOrders");
     expect(serialized).not.toContain('"environment"');
@@ -105,12 +106,25 @@ describe("cloud preferences", () => {
       ...local.entryRules,
       long: { ...local.entryRules.long, children: [{ id: "price", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } }] },
     };
-    profile.categories.alerts.entryRules = { long: { enabled: true, sound: "invalid", durationSeconds: 99 } };
+    profile.categories.order_entry.entryRuleAlerts = { long: { enabled: true, sound: "invalid", durationSeconds: 99 } };
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.settings.chartLabels.fontSize).toBe(16);
     expect(merged.settings.journal.commissionPerContractSide).toBe(0);
     expect(merged.watchlist).toEqual(["MESU26"]);
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "chime", durationSeconds: 3 });
+  });
+
+  it("reads rule alerts from the legacy alerts category", () => {
+    const local = workspace();
+    const profile = cloudPreferenceProfile(local);
+    delete profile.categories.order_entry.entryRuleAlerts;
+    profile.categories.order_entry.entryRules = {
+      ...local.entryRules,
+      long: { ...local.entryRules.long, children: [{ id: "price", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } }] },
+    };
+    profile.categories.alerts.entryRules = { long: { enabled: true, sound: "pulse", durationSeconds: 10 } };
+    expect(applyCloudPreferenceProfile(local, profile).entryRuleAlerts.long)
+      .toEqual({ enabled: true, sound: "pulse", durationSeconds: 10 });
   });
 
   it("caps automatic retry backoff at one minute", () => {

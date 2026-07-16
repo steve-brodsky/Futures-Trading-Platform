@@ -60,7 +60,6 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       },
       alerts: {
         byTabId: Object.fromEntries(workspace.tabs.map((tab) => [tab.id, tab.ema200Alert])),
-        entryRules: workspace.entryRuleAlerts,
       },
       drawings: { bySymbol: workspace.drawings },
       watchlist: { symbols: [...workspace.watchlist] },
@@ -68,6 +67,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       order_entry: {
         orderTicket: { ...workspace.settings.orderTicket },
         entryRules: workspace.entryRules,
+        entryRuleAlerts: workspace.entryRuleAlerts,
       },
       journal_fees: {
         commissionPerContractSide: workspace.settings.journal.commissionPerContractSide,
@@ -146,7 +146,9 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     drawings: object(drawings?.bySymbol) as unknown as WorkspaceState["drawings"] ?? current.drawings,
     watchlist: Array.isArray(watchlist?.symbols) ? watchlist.symbols.filter((item): item is string => typeof item === "string") : current.watchlist,
     entryRules: object(orderEntry?.entryRules) as unknown as WorkspaceState["entryRules"] ?? current.entryRules,
-    entryRuleAlerts: normalizeEntryRuleAlerts(alerts?.entryRules ?? current.entryRuleAlerts),
+    // Rule alert settings travel atomically with their rule definitions. The
+    // alerts.entryRules fallback preserves profiles written by older clients.
+    entryRuleAlerts: normalizeEntryRuleAlerts(orderEntry?.entryRuleAlerts ?? alerts?.entryRules ?? current.entryRuleAlerts),
     settings: {
       chartLabels: { ...current.settings.chartLabels, ...chartDisplay },
       orderTicket: { ...current.settings.orderTicket, ...object(orderEntry?.orderTicket) },
