@@ -143,7 +143,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .chart-pane-divider.vertical::after { top: 0; bottom: 0; left: 4px; width: 1px; }
 .chart-pane-divider.horizontal { right: 0; left: 0; height: 9px; margin-top: -4px; cursor: row-resize; }
 .chart-pane-divider.horizontal::after { top: 4px; right: 0; left: 0; height: 1px; }
-.chart-pane-divider:hover::after, .chart-pane-divider:focus-visible::after { background: var(--cyan); box-shadow: 0 0 7px rgba(55,213,232,.42); }
+.chart-pane-divider.dragging { will-change: left, top, transform; transform: translateZ(0); }
+.chart-pane-divider:hover::after, .chart-pane-divider:focus-visible::after, .chart-pane-divider.dragging::after { background: var(--cyan); box-shadow: 0 0 7px rgba(55,213,232,.42); }
 .chart-pane-divider:focus-visible { outline: none; }
 .chart-host { position: absolute; inset: 0; }
 .current-price-label { position: absolute; z-index: 7; right: 0; width: 72px; height: 32px; display: grid; grid-template-rows: 18px 14px; transform: translateY(-9px); color: #071116; background: #34d6e9; font-family: DM Mono, monospace; pointer-events: none; }

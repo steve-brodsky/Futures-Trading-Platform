@@ -1,0 +1,293 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e10]: NORTHSTAR
+      - generic [ref=e11]: TRADER
+    - navigation "Watchlist" [ref=e12]:
+      - generic [ref=e13]:
+        - button "MESU26, 6,260.50, +0.07%" [ref=e14] [cursor=pointer]:
+          - strong [ref=e15]: MESU26
+          - generic [ref=e16]: 6,260.50
+          - generic [ref=e17]: +0.07%
+        - button "MNQU26, 23,048.50, -0.01%" [ref=e18] [cursor=pointer]:
+          - strong [ref=e19]: MNQU26
+          - generic [ref=e20]: 23,048.50
+          - generic [ref=e21]: "-0.01%"
+        - button "MCLU26, 68.42, +6.54%" [ref=e22] [cursor=pointer]:
+          - strong [ref=e23]: MCLU26
+          - generic [ref=e24]: "68.42"
+          - generic [ref=e25]: +6.54%
+        - button "MGCQ26, 3,478.20, +0.12%" [ref=e26] [cursor=pointer]:
+          - strong [ref=e27]: MGCQ26
+          - generic [ref=e28]: 3,478.20
+          - generic [ref=e29]: +0.12%
+        - button "MYMU26, 44,982.00, +0.01%" [ref=e30] [cursor=pointer]:
+          - strong [ref=e31]: MYMU26
+          - generic [ref=e32]: 44,982.00
+          - generic [ref=e33]: +0.01%
+    - generic "New York market time 16:49:50 EDT" [ref=e236]:
+      - generic [ref=e36]: NY
+      - time [ref=e37]: 16:49:50 EDT
+    - button "SIM" [ref=e38] [cursor=pointer]
+    - button "DEMO FEED" [ref=e42] [cursor=pointer]
+  - tablist "Chart tabs" [ref=e48]:
+    - generic [ref=e49]:
+      - tab [selected] [ref=e178]:
+        - button "@MES 1m chart, price above EMA 200" [ref=e179] [cursor=pointer]:
+          - strong [ref=e52]: "@MES"
+          - generic [ref=e53]: ·
+          - generic [ref=e54]: 1m
+          - generic "Shown in split layout" [ref=e55]
+          - img "Price above EMA 200" [ref=e180]
+        - button "Close @MES 1m chart" [ref=e56] [cursor=pointer]
+      - tab [ref=e237]:
+        - button "@MES 1m chart, price above EMA 200" [ref=e238] [cursor=pointer]:
+          - strong [ref=e239]: "@MES"
+          - generic [ref=e240]: ·
+          - generic [ref=e241]: 1m
+          - generic "Shown in split layout" [ref=e242]
+          - img "Price above EMA 200" [ref=e243]
+        - button "Close @MES 1m chart" [ref=e244] [cursor=pointer]
+      - tab [ref=e248]:
+        - button "@MES 1m chart, price above EMA 200" [ref=e249] [cursor=pointer]:
+          - strong [ref=e250]: "@MES"
+          - generic [ref=e251]: ·
+          - generic [ref=e252]: 1m
+          - generic "Shown in split layout" [ref=e253]
+          - img "Price above EMA 200" [ref=e254]
+        - button "Close @MES 1m chart" [ref=e255] [cursor=pointer]
+      - tab [ref=e259]:
+        - button "@MES 1m chart, price above EMA 200" [ref=e260] [cursor=pointer]:
+          - strong [ref=e261]: "@MES"
+          - generic [ref=e262]: ·
+          - generic [ref=e263]: 1m
+          - generic "Shown in split layout" [ref=e264]
+          - img "Price above EMA 200" [ref=e265]
+        - button "Close @MES 1m chart" [ref=e266] [cursor=pointer]
+    - button "Add chart tab" [ref=e60] [cursor=pointer]
+  - navigation "Chart toolbar" [ref=e62]:
+    - button "@MES CME" [ref=e63] [cursor=pointer]:
+      - strong [ref=e67]: "@MES"
+      - generic [ref=e68]: CME
+    - generic [ref=e72]:
+      - button "1m" [ref=e73] [cursor=pointer]
+      - button "5m" [ref=e74] [cursor=pointer]
+      - button "15m" [ref=e75] [cursor=pointer]
+      - button "30m" [ref=e76] [cursor=pointer]
+      - button "1h" [ref=e77] [cursor=pointer]
+      - button "4h" [ref=e78] [cursor=pointer]
+      - button "D" [ref=e79] [cursor=pointer]
+      - button "W" [ref=e80] [cursor=pointer]
+      - button "M" [ref=e81] [cursor=pointer]
+    - button "Chart layout" [pressed] [ref=e84] [cursor=pointer]
+    - button "Candles" [ref=e88] [cursor=pointer]
+    - button "Indicators" [ref=e95] [cursor=pointer]
+    - button "Alert" [ref=e98] [cursor=pointer]
+    - button "Trade journal" [ref=e104] [cursor=pointer]
+    - button "Entry rules" [ref=e107] [cursor=pointer]
+    - button "Settings" [ref=e111] [cursor=pointer]
+    - button "Enter fullscreen" [ref=e115] [cursor=pointer]
+  - generic [ref=e121]:
+    - complementary "Drawing tools" [ref=e122]:
+      - button "Cursor" [pressed] [ref=e123] [cursor=pointer]
+      - 'button "Magnet: snap crosshair to candle high or low" [ref=e126] [cursor=pointer]'
+      - button "Horizontal drawing tools" [ref=e132] [cursor=pointer]
+    - generic [ref=e134]:
+      - generic [ref=e135]:
+        - region "@MES chart" [ref=e136]:
+          - generic:
+            - generic: CME
+            - strong: Micro E-mini S&P 500 Continuous
+            - generic: ·
+            - generic: "@MES"
+            - generic:
+              - generic: O 6252.82
+              - generic: H 6254.96
+              - generic: L 6251.90
+              - generic: C 6253.68
+          - table [ref=e139]:
+            - row [ref=e140]:
+              - cell
+              - cell [ref=e141]:
+                - link "Charting by TradingView" [ref=e145] [cursor=pointer]:
+                  - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+              - cell [ref=e150]
+            - row [ref=e154]:
+              - cell
+              - cell [ref=e155]
+              - cell [ref=e159]
+          - generic "Current price 6254.77; candle closes in 00:00":
+            - strong: "6254.77"
+            - generic: 00:00
+          - generic [ref=e181]:
+            - generic [ref=e182]: MESU26 LONG 2
+            - strong [ref=e183]: "6253.25"
+            - emphasis [ref=e184]: +$72.50 · +1.9R
+            - button "Close MESU26 position" [ref=e185] [cursor=pointer]
+          - generic "Drag to replace this protective order" [ref=e189]:
+            - generic [ref=e190]: MESU26 SL 2
+            - strong [ref=e191]: "6249.50"
+            - emphasis [ref=e192]: "-$37.50 · -1R"
+          - generic: "@MES"
+          - combobox "Chart timezone" [ref=e162] [cursor=pointer]:
+            - option "EXCH · CDT" [selected]
+            - option "Computer local"
+            - option "UTC"
+            - option "New York"
+            - option "Chicago"
+            - option "Denver"
+            - option "Los Angeles"
+            - option "London"
+            - option "Tokyo"
+        - button "Expand @MES chart" [ref=e270] [cursor=pointer]
+      - generic [ref=e276]:
+        - region "@MES chart" [ref=e277]:
+          - generic:
+            - generic: CME
+            - strong: Micro E-mini S&P 500 Continuous
+            - generic: ·
+            - generic: "@MES"
+            - generic:
+              - generic: O 6255.29
+              - generic: H 6255.67
+              - generic: L 6253.58
+              - generic: C 6254.77
+          - table [ref=e280]:
+            - row [ref=e281]:
+              - cell
+              - cell [ref=e282]:
+                - link "Charting by TradingView" [ref=e286] [cursor=pointer]:
+                  - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+              - cell [ref=e291]
+            - row [ref=e295]:
+              - cell
+              - cell [ref=e296]
+              - cell [ref=e300]
+          - generic "Current price 6254.77; candle closes in 00:00":
+            - strong: "6254.77"
+            - generic: 00:00
+          - generic [ref=e303]:
+            - generic [ref=e304]: MESU26 LONG 2
+            - strong [ref=e305]: "6253.25"
+            - emphasis [ref=e306]: +$72.50 · +1.9R
+            - button "Close MESU26 position" [ref=e307] [cursor=pointer]
+          - generic "Drag to replace this protective order" [ref=e311]:
+            - generic [ref=e312]: MESU26 SL 2
+            - strong [ref=e313]: "6249.50"
+            - emphasis [ref=e314]: "-$37.50 · -1R"
+          - generic: "@MES"
+          - combobox "Chart timezone" [ref=e315] [cursor=pointer]:
+            - option "EXCH · CDT" [selected]
+            - option "Computer local"
+            - option "UTC"
+            - option "New York"
+            - option "Chicago"
+            - option "Denver"
+            - option "Los Angeles"
+            - option "London"
+            - option "Tokyo"
+        - button "Expand @MES chart" [ref=e316] [cursor=pointer]
+      - generic [ref=e322]:
+        - region "@MES chart" [ref=e323]:
+          - generic:
+            - generic: CME
+            - strong: Micro E-mini S&P 500 Continuous
+            - generic: ·
+            - generic: "@MES"
+            - generic:
+              - generic: O 6255.29
+              - generic: H 6255.67
+              - generic: L 6253.58
+              - generic: C 6254.77
+          - table [ref=e326]:
+            - row [ref=e327]:
+              - cell
+              - cell [ref=e328]:
+                - link "Charting by TradingView" [ref=e332] [cursor=pointer]:
+                  - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+              - cell [ref=e337]
+            - row [ref=e341]:
+              - cell
+              - cell [ref=e342]
+              - cell [ref=e346]
+          - generic "Current price 6254.77; candle closes in 00:00":
+            - strong: "6254.77"
+            - generic: 00:00
+          - generic [ref=e349]:
+            - generic [ref=e350]: MESU26 LONG 2
+            - strong [ref=e351]: "6253.25"
+            - emphasis [ref=e352]: +$72.50 · +1.9R
+            - button "Close MESU26 position" [ref=e353] [cursor=pointer]
+          - generic "Drag to replace this protective order" [ref=e357]:
+            - generic [ref=e358]: MESU26 SL 2
+            - strong [ref=e359]: "6249.50"
+            - emphasis [ref=e360]: "-$37.50 · -1R"
+          - generic: "@MES"
+          - combobox "Chart timezone" [ref=e361] [cursor=pointer]:
+            - option "EXCH · CDT" [selected]
+            - option "Computer local"
+            - option "UTC"
+            - option "New York"
+            - option "Chicago"
+            - option "Denver"
+            - option "Los Angeles"
+            - option "London"
+            - option "Tokyo"
+        - button "Expand @MES chart" [ref=e362] [cursor=pointer]
+      - generic [ref=e368]:
+        - region "@MES chart" [ref=e369]:
+          - generic:
+            - generic: CME
+            - strong: Micro E-mini S&P 500 Continuous
+            - generic: ·
+            - generic: "@MES"
+            - generic:
+              - generic: O 6255.29
+              - generic: H 6255.67
+              - generic: L 6253.58
+              - generic: C 6254.77
+          - table [ref=e372]:
+            - row [ref=e373]:
+              - cell
+              - cell [ref=e374]:
+                - link "Charting by TradingView" [ref=e378] [cursor=pointer]:
+                  - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+              - cell [ref=e383]
+            - row [ref=e387]:
+              - cell
+              - cell [ref=e388]
+              - cell [ref=e392]
+          - generic "Current price 6254.77; candle closes in 00:00":
+            - strong: "6254.77"
+            - generic: 00:00
+          - generic [ref=e395]:
+            - generic [ref=e396]: MESU26 LONG 2
+            - strong [ref=e397]: "6253.25"
+            - emphasis [ref=e398]: +$72.50 · +1.9R
+            - button "Close MESU26 position" [ref=e399] [cursor=pointer]
+          - generic "Drag to replace this protective order" [ref=e403]:
+            - generic [ref=e404]: MESU26 SL 2
+            - strong [ref=e405]: "6249.50"
+            - emphasis [ref=e406]: "-$37.50 · -1R"
+          - generic: "@MES"
+          - combobox "Chart timezone" [ref=e407] [cursor=pointer]:
+            - option "EXCH · CDT" [selected]
+            - option "Computer local"
+            - option "UTC"
+            - option "New York"
+            - option "Chicago"
+            - option "Denver"
+            - option "Los Angeles"
+            - option "London"
+            - option "Tokyo"
+        - button "Expand @MES chart" [ref=e408] [cursor=pointer]
+      - separator "Resize chart panes 1" [ref=e414]
+      - separator "Resize chart panes 2" [ref=e415]
+    - complementary [ref=e163]:
+      - generic [ref=e164]:
+        - strong [ref=e165]: Order Panel
+        - button "Open order panel" [ref=e166] [cursor=pointer]
+    - generic [ref=e170]:
+      - strong [ref=e171]: TradeStation
+      - generic [ref=e172]: Brokerage data active
+      - button "Open bottom drawer" [ref=e174] [cursor=pointer]

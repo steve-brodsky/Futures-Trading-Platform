@@ -1,0 +1,104 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e10]: NORTHSTAR
+      - generic [ref=e11]: TRADER
+    - navigation "Watchlist" [ref=e12]:
+      - generic [ref=e13]:
+        - button "MESU26, 6,260.50, +0.07%" [ref=e14] [cursor=pointer]:
+          - strong [ref=e15]: MESU26
+          - generic [ref=e16]: 6,260.50
+          - generic [ref=e17]: +0.07%
+        - button "MNQU26, 23,048.50, -0.01%" [ref=e18] [cursor=pointer]:
+          - strong [ref=e19]: MNQU26
+          - generic [ref=e20]: 23,048.50
+          - generic [ref=e21]: "-0.01%"
+        - button "MCLU26, 68.42, +6.54%" [ref=e22] [cursor=pointer]:
+          - strong [ref=e23]: MCLU26
+          - generic [ref=e24]: "68.42"
+          - generic [ref=e25]: +6.54%
+        - button "MGCQ26, 3,478.20, +0.12%" [ref=e26] [cursor=pointer]:
+          - strong [ref=e27]: MGCQ26
+          - generic [ref=e28]: 3,478.20
+          - generic [ref=e29]: +0.12%
+        - button "MYMU26, 44,982.00, +0.01%" [ref=e30] [cursor=pointer]:
+          - strong [ref=e31]: MYMU26
+          - generic [ref=e32]: 44,982.00
+          - generic [ref=e33]: +0.01%
+    - generic "New York market time 16:49:11 EDT" [ref=e35]:
+      - generic [ref=e36]: NY
+      - time [ref=e37]: 16:49:11 EDT
+    - button "SIM" [ref=e38] [cursor=pointer]
+    - button "DEMO FEED" [ref=e42] [cursor=pointer]
+  - tablist "Chart tabs" [ref=e48]:
+    - tab [selected] [ref=e50]:
+      - button "@MES 1m chart" [ref=e51] [cursor=pointer]:
+        - strong [ref=e52]: "@MES"
+        - generic [ref=e53]: ·
+        - generic [ref=e54]: 1m
+        - generic "Shown in split layout" [ref=e55]
+      - button "Close @MES 1m chart" [disabled] [ref=e56]
+    - button "Add chart tab" [ref=e60] [cursor=pointer]
+  - navigation "Chart toolbar" [ref=e62]:
+    - button "@MES CME" [ref=e63] [cursor=pointer]:
+      - strong [ref=e67]: "@MES"
+      - generic [ref=e68]: CME
+    - generic [ref=e72]:
+      - button "1m" [ref=e73] [cursor=pointer]
+      - button "5m" [ref=e74] [cursor=pointer]
+      - button "15m" [ref=e75] [cursor=pointer]
+      - button "30m" [ref=e76] [cursor=pointer]
+      - button "1h" [ref=e77] [cursor=pointer]
+      - button "4h" [ref=e78] [cursor=pointer]
+      - button "D" [ref=e79] [cursor=pointer]
+      - button "W" [ref=e80] [cursor=pointer]
+      - button "M" [ref=e81] [cursor=pointer]
+    - button "Chart layout" [ref=e84] [cursor=pointer]
+    - button "Candles" [ref=e88] [cursor=pointer]
+    - button "Indicators" [ref=e95] [cursor=pointer]
+    - button "Alert" [ref=e98] [cursor=pointer]
+    - button "Trade journal" [ref=e104] [cursor=pointer]
+    - button "Entry rules" [ref=e107] [cursor=pointer]
+    - button "Settings" [ref=e111] [cursor=pointer]
+    - button "Enter fullscreen" [ref=e115] [cursor=pointer]
+  - generic [ref=e121]:
+    - complementary "Drawing tools" [ref=e122]:
+      - button "Cursor" [pressed] [ref=e123] [cursor=pointer]
+      - 'button "Magnet: snap crosshair to candle high or low" [ref=e126] [cursor=pointer]'
+      - button "Horizontal drawing tools" [ref=e132] [cursor=pointer]
+    - region "@MES chart" [ref=e136]:
+      - generic:
+        - generic: CME
+        - strong: Micro E-mini S&P 500 Continuous
+        - generic: ·
+        - generic: "@MES"
+      - table [ref=e139]:
+        - row [ref=e140]:
+          - cell
+          - cell [ref=e141]:
+            - link "Charting by TradingView" [ref=e145] [cursor=pointer]:
+              - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+          - cell [ref=e150]
+        - row [ref=e154]:
+          - cell
+          - cell [ref=e155]
+          - cell [ref=e159]
+      - generic: "@MES"
+      - combobox "Chart timezone" [ref=e162] [cursor=pointer]:
+        - option "EXCH · CDT" [selected]
+        - option "Computer local"
+        - option "UTC"
+        - option "New York"
+        - option "Chicago"
+        - option "Denver"
+        - option "Los Angeles"
+        - option "London"
+        - option "Tokyo"
+    - complementary [ref=e163]:
+      - generic [ref=e164]:
+        - strong [ref=e165]: Order Panel
+        - button "Open order panel" [ref=e166] [cursor=pointer]
+    - generic [ref=e170]:
+      - strong [ref=e171]: TradeStation
+      - generic [ref=e172]: Brokerage data active
+      - button "Open bottom drawer" [ref=e174] [cursor=pointer]
