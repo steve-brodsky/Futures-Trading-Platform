@@ -115,6 +115,7 @@ pub struct PreferenceSyncResult {
     pub state: String,
     pub records: Vec<storage::PreferenceRecord>,
     pub replaced_categories: Vec<String>,
+    pub conflicted_categories: Vec<String>,
     pub last_synced_at: Option<String>,
     pub message: Option<String>,
 }
@@ -272,6 +273,16 @@ struct CloudConfig {
     updated_at: String,
 }
 
+#[derive(Clone)]
+pub struct PreferenceRealtimeCredentials {
+    pub project_url: String,
+    pub publishable_key: String,
+    pub user_id: String,
+    pub access_token: String,
+    pub device_id: String,
+    pub refresh_after: StdDuration,
+}
+
 #[derive(Debug, Deserialize)]
 struct RemoteSettingsRow {
     backfill_start: String,
@@ -284,8 +295,37 @@ struct RemotePreferenceRow {
     category: String,
     schema_version: i64,
     payload: Value,
-    modified_at: String,
+    revision: i64,
+    mutation_id: String,
     device_id: String,
+    server_updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PreferenceCommitRow {
+    applied: bool,
+    category: String,
+    schema_version: i64,
+    payload: Value,
+    revision: i64,
+    mutation_id: String,
+    device_id: String,
+    server_updated_at: String,
+}
+
+impl PreferenceCommitRow {
+    fn into_record(self) -> storage::PreferenceRecord {
+        storage::PreferenceRecord {
+            category: self.category,
+            schema_version: self.schema_version,
+            payload: self.payload,
+            revision: self.revision,
+            mutation_id: self.mutation_id,
+            device_id: self.device_id,
+            server_updated_at: self.server_updated_at,
+            dirty: false,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2203,6 +2243,37 @@ async fn access_token(cfg: &CloudConfig) -> Result<String, AppError> {
     cache_access_token(cfg, token.clone(), auth.expires_in);
     Ok(token)
 }
+
+pub async fn preference_realtime_credentials(
+    path: &Path,
+) -> Result<PreferenceRealtimeCredentials, AppError> {
+    let cfg =
+        config(path)?.ok_or_else(|| AppError::Validation("Configure Supabase first".into()))?;
+    let token = access_token(&cfg).await?;
+    let refresh_after = access_token_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache.as_ref().and_then(|cached| {
+                (cached.project_url == cfg.project_url && cached.user_id == cfg.user_id).then(
+                    || {
+                        cached
+                            .refresh_after
+                            .saturating_duration_since(Instant::now())
+                    },
+                )
+            })
+        })
+        .unwrap_or_else(|| StdDuration::from_secs(15 * 60));
+    Ok(PreferenceRealtimeCredentials {
+        project_url: cfg.project_url,
+        publishable_key: cfg.publishable_key,
+        user_id: cfg.user_id,
+        access_token: token,
+        device_id: storage::local_preference_device_id(path)?,
+        refresh_after: refresh_after.max(StdDuration::from_secs(1)),
+    })
+}
 fn headers(cfg: &CloudConfig, token: &str, ignore_duplicates: bool) -> Result<HeaderMap, AppError> {
     let mut h = HeaderMap::new();
     h.insert(
@@ -2257,21 +2328,6 @@ async fn upload(
     Ok(())
 }
 
-fn preference_is_newer(
-    left_modified_at: &str,
-    left_device_id: &str,
-    right_modified_at: &str,
-    right_device_id: &str,
-) -> bool {
-    let left_time = DateTime::parse_from_rfc3339(left_modified_at).ok();
-    let right_time = DateTime::parse_from_rfc3339(right_modified_at).ok();
-    match (left_time, right_time) {
-        (Some(left), Some(right)) if left != right => left > right,
-        _ if left_modified_at != right_modified_at => left_modified_at > right_modified_at,
-        _ => left_device_id > right_device_id,
-    }
-}
-
 async fn pull_app_preferences(
     client: &reqwest::Client,
     cfg: &CloudConfig,
@@ -2282,7 +2338,7 @@ async fn pull_app_preferences(
         .headers(headers(cfg, token, false)?)
         .query(&[(
             "select",
-            "category,schema_version,payload,modified_at,device_id",
+            "category,schema_version,payload,revision,mutation_id,device_id,server_updated_at",
         )])
         .send()
         .await?;
@@ -2300,66 +2356,88 @@ fn valid_remote_preference(row: &RemotePreferenceRow) -> bool {
     storage::PREFERENCE_CATEGORIES.contains(&row.category.as_str())
         && row.schema_version == 1
         && row.payload.is_object()
+        && row.revision > 0
+        && uuid::Uuid::parse_str(&row.mutation_id).is_ok()
         && uuid::Uuid::parse_str(&row.device_id).is_ok()
-        && DateTime::parse_from_rfc3339(&row.modified_at).is_ok()
+        && DateTime::parse_from_rfc3339(&row.server_updated_at).is_ok()
 }
 
-fn local_preference_needs_upload(
+fn remote_preference_record(remote: RemotePreferenceRow) -> storage::PreferenceRecord {
+    storage::PreferenceRecord {
+        category: remote.category,
+        schema_version: remote.schema_version,
+        payload: remote.payload,
+        revision: remote.revision,
+        mutation_id: remote.mutation_id,
+        device_id: remote.device_id,
+        server_updated_at: remote.server_updated_at,
+        dirty: false,
+    }
+}
+
+fn remote_conflicts_with_dirty_local(
     local: &storage::PreferenceRecord,
     remote: Option<&RemotePreferenceRow>,
 ) -> bool {
     match remote {
-        Some(remote) => preference_is_newer(
-            &local.modified_at,
-            &local.device_id,
-            &remote.modified_at,
-            &remote.device_id,
-        ),
-        None => true,
+        Some(remote) => {
+            remote.mutation_id != local.mutation_id && remote.revision != local.revision
+        }
+        None => local.revision != 0,
     }
 }
 
-fn merge_remote_preference_rows(
-    path: &Path,
-    local: &mut HashMap<String, storage::PreferenceRecord>,
-    remote_rows: Vec<RemotePreferenceRow>,
-    replaced_categories: &mut Vec<String>,
-) -> Result<(), AppError> {
-    for remote in remote_rows.into_iter().filter(valid_remote_preference) {
-        let Some(current) = local.get(&remote.category) else {
-            continue;
-        };
-        let remote_is_newer = preference_is_newer(
-            &remote.modified_at,
-            &remote.device_id,
-            &current.modified_at,
-            &current.device_id,
-        );
-        let local_is_newer = preference_is_newer(
-            &current.modified_at,
-            &current.device_id,
-            &remote.modified_at,
-            &remote.device_id,
-        );
-        // If metadata is tied but payloads differ, the row already stored by
-        // Supabase is authoritative. This makes retries converge safely.
-        if !remote_is_newer && (local_is_newer || remote.payload == current.payload) {
-            continue;
-        }
-        if remote.payload != current.payload && !replaced_categories.contains(&remote.category) {
-            replaced_categories.push(remote.category.clone());
-        }
-        let record = storage::PreferenceRecord {
-            category: remote.category,
-            schema_version: remote.schema_version,
-            payload: remote.payload,
-            modified_at: remote.modified_at,
-            device_id: remote.device_id,
-        };
-        storage::replace_local_preference(path, &record)?;
-        local.insert(record.category.clone(), record);
+async fn commit_app_preference(
+    client: &reqwest::Client,
+    cfg: &CloudConfig,
+    token: &str,
+    local: &storage::PreferenceRecord,
+) -> Result<PreferenceCommitRow, AppError> {
+    let mut commit_headers = headers(cfg, token, false)?;
+    commit_headers.insert("Prefer", HeaderValue::from_static("return=representation"));
+    let response = client
+        .post(format!(
+            "{}/rest/v1/rpc/commit_app_preference",
+            cfg.project_url
+        ))
+        .headers(commit_headers)
+        .json(&json!({
+            "p_category": local.category,
+            "p_schema_version": local.schema_version,
+            "p_payload": local.payload,
+            "p_device_id": local.device_id,
+            "p_mutation_id": local.mutation_id,
+            "p_expected_revision": local.revision,
+        }))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await?;
+        return Err(AppError::Api(format!(
+            "Supabase preference commit failed ({status}): {body}. Apply the latest Supabase migration and update Northstar on every computer"
+        )));
     }
-    Ok(())
+    response
+        .json::<Vec<PreferenceCommitRow>>()
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::Api("Supabase preference commit returned no record".into()))
+}
+
+fn adopt_remote_preference(
+    path: &Path,
+    local: &storage::PreferenceRecord,
+    remote: RemotePreferenceRow,
+    replaced_categories: &mut Vec<String>,
+) -> Result<storage::PreferenceRecord, AppError> {
+    if remote.payload != local.payload && !replaced_categories.contains(&remote.category) {
+        replaced_categories.push(remote.category.clone());
+    }
+    let record = remote_preference_record(remote);
+    storage::replace_local_preference(path, &record)?;
+    Ok(record)
 }
 
 pub async fn sync_app_preferences(
@@ -2381,10 +2459,9 @@ pub async fn sync_app_preferences(
     let token = access_token(&cfg).await?;
     let client = reqwest::Client::new();
     let initial_remote = pull_app_preferences(&client, &cfg, &token).await?;
-    let remote_by_category: HashMap<_, _> = initial_remote
-        .iter()
+    let mut remote_by_category: HashMap<_, _> = initial_remote
+        .into_iter()
         .filter(|record| valid_remote_preference(record))
-        .cloned()
         .map(|record| (record.category.clone(), record))
         .collect();
     let mut local_by_category: HashMap<_, _> = storage::local_preferences(path)?
@@ -2392,47 +2469,55 @@ pub async fn sync_app_preferences(
         .map(|record| (record.category.clone(), record))
         .collect();
     let mut replaced_categories = Vec::new();
-    merge_remote_preference_rows(
-        path,
-        &mut local_by_category,
-        initial_remote,
-        &mut replaced_categories,
-    )?;
-    let mut uploads = Vec::new();
-    for local in local_by_category.values() {
-        if local_preference_needs_upload(local, remote_by_category.get(&local.category)) {
-            uploads.push(json!({
-                "user_id": cfg.user_id.clone(),
-                "category": local.category,
-                "schema_version": local.schema_version,
-                "payload": local.payload,
-                "modified_at": local.modified_at,
-                "device_id": local.device_id,
-            }));
-        }
-    }
-    let upload_count = uploads.len();
-    if upload_count > 0 {
-        upload(
-            &client,
-            &cfg,
-            &token,
-            "app_preferences",
-            "user_id,category",
-            uploads,
-            false,
-        )
-        .await?;
+    let mut conflicted_categories = Vec::new();
+    let mut upload_count = 0usize;
 
-        // Pull once more only after a write. The database trigger may have
-        // rejected a stale concurrent update, so Supabase remains authoritative.
-        let final_remote = pull_app_preferences(&client, &cfg, &token).await?;
-        merge_remote_preference_rows(
-            path,
-            &mut local_by_category,
-            final_remote,
-            &mut replaced_categories,
-        )?;
+    for category in storage::PREFERENCE_CATEGORIES {
+        let Some(local) = local_by_category.get(category).cloned() else {
+            continue;
+        };
+        let remote = remote_by_category.remove(category);
+
+        if local.dirty && remote_conflicts_with_dirty_local(&local, remote.as_ref()) {
+            if let Some(remote) = remote {
+                if !conflicted_categories.contains(&local.category) {
+                    conflicted_categories.push(local.category.clone());
+                }
+                let record =
+                    adopt_remote_preference(path, &local, remote, &mut replaced_categories)?;
+                local_by_category.insert(record.category.clone(), record);
+            }
+            continue;
+        }
+
+        let should_commit = local.dirty || remote.is_none();
+        if should_commit {
+            let committed = commit_app_preference(&client, &cfg, &token, &local).await?;
+            let applied = committed.applied;
+            let record = committed.into_record();
+            if !applied {
+                if !conflicted_categories.contains(&local.category) {
+                    conflicted_categories.push(local.category.clone());
+                }
+                if record.payload != local.payload && !replaced_categories.contains(&local.category)
+                {
+                    replaced_categories.push(local.category.clone());
+                }
+            } else {
+                upload_count += 1;
+            }
+            storage::replace_local_preference(path, &record)?;
+            local_by_category.insert(record.category.clone(), record);
+        } else if let Some(remote) = remote {
+            if remote.revision != local.revision
+                || remote.mutation_id != local.mutation_id
+                || remote.payload != local.payload
+            {
+                let record =
+                    adopt_remote_preference(path, &local, remote, &mut replaced_categories)?;
+                local_by_category.insert(record.category.clone(), record);
+            }
+        }
     }
     let mut records = storage::local_preferences(path)?;
     records.sort_by_key(|record| {
@@ -2446,6 +2531,7 @@ pub async fn sync_app_preferences(
         state: "synced".into(),
         records,
         replaced_categories,
+        conflicted_categories,
         last_synced_at: Some(synced_at),
         message: Some(if upload_count == 0 {
             "Preferences are up to date".into()
@@ -3933,49 +4019,52 @@ mod tests {
     }
 
     #[test]
-    fn preference_conflicts_use_timestamp_then_device_id() {
-        assert!(preference_is_newer(
-            "2026-07-15T20:00:01Z",
-            "00000000-0000-0000-0000-000000000001",
-            "2026-07-15T20:00:00Z",
-            "ffffffff-ffff-ffff-ffff-ffffffffffff",
-        ));
-        assert!(preference_is_newer(
-            "2026-07-15T20:00:00Z",
-            "ffffffff-ffff-ffff-ffff-ffffffffffff",
-            "2026-07-15T20:00:00Z",
-            "00000000-0000-0000-0000-000000000001",
-        ));
-        assert!(!preference_is_newer(
-            "2026-07-15T20:00:00Z",
-            "00000000-0000-0000-0000-000000000001",
-            "2026-07-15T20:00:00Z",
-            "ffffffff-ffff-ffff-ffff-ffffffffffff",
-        ));
-
+    fn preference_conflicts_use_server_revisions_not_device_clocks() {
         let local = storage::PreferenceRecord {
             category: "watchlist".into(),
             schema_version: 1,
             payload: json!({"symbols":["MESU26"]}),
-            modified_at: "2026-07-15T20:00:00Z".into(),
+            revision: 4,
+            mutation_id: "11111111-1111-1111-1111-111111111111".into(),
             device_id: "00000000-0000-0000-0000-000000000001".into(),
+            server_updated_at: "2026-07-15T20:00:00Z".into(),
+            dirty: true,
         };
         let same_remote = RemotePreferenceRow {
             category: local.category.clone(),
             schema_version: 1,
             payload: local.payload.clone(),
-            modified_at: local.modified_at.clone(),
+            revision: local.revision,
+            mutation_id: local.mutation_id.clone(),
             device_id: local.device_id.clone(),
+            server_updated_at: local.server_updated_at.clone(),
         };
-        assert!(!local_preference_needs_upload(&local, Some(&same_remote)));
-        assert!(local_preference_needs_upload(&local, None));
-
-        let mut newer_local = local.clone();
-        newer_local.modified_at = "2026-07-15T20:00:01Z".into();
-        assert!(local_preference_needs_upload(
-            &newer_local,
+        assert!(!remote_conflicts_with_dirty_local(
+            &local,
             Some(&same_remote)
         ));
+
+        let mut acknowledged_retry = same_remote.clone();
+        acknowledged_retry.revision += 1;
+        assert!(!remote_conflicts_with_dirty_local(
+            &local,
+            Some(&acknowledged_retry)
+        ));
+
+        let mut winning_remote = same_remote.clone();
+        winning_remote.revision += 1;
+        winning_remote.mutation_id = "22222222-2222-2222-2222-222222222222".into();
+        assert!(remote_conflicts_with_dirty_local(
+            &local,
+            Some(&winning_remote)
+        ));
+        assert!(remote_conflicts_with_dirty_local(&local, None));
+
+        let unseeded = storage::PreferenceRecord {
+            revision: 0,
+            ..local
+        };
+        assert!(!remote_conflicts_with_dirty_local(&unseeded, None));
     }
 
     fn screenshot_input(width: u32, height: u32) -> JournalScreenshotInput {

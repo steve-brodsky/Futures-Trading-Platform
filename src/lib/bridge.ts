@@ -136,8 +136,14 @@ export const api = {
     else localStorage.setItem("northstar-workspace", JSON.stringify(workspace));
   },
   async syncPreferences(cloudProfile: CloudPreferenceProfile): Promise<PreferenceSyncResult> {
-    if (!isTauri) return { state: "synced", records: [], replacedCategories: [], lastSyncedAt: new Date().toISOString(), message: "Browser preferences are local only" };
+    if (!isTauri) return { state: "synced", records: [], replacedCategories: [], conflictedCategories: [], lastSyncedAt: new Date().toISOString(), message: "Browser preferences are local only" };
     return native("sync_app_preferences", { cloudProfile });
+  },
+  async startPreferenceRealtime(): Promise<void> {
+    if (isTauri) await native("start_preference_realtime");
+  },
+  async stopPreferenceRealtime(): Promise<void> {
+    if (isTauri) await native("stop_preference_realtime");
   },
   async journalAuthStatus(): Promise<JournalAuthStatus> {
     return isTauri ? native("journal_auth_status") : { configured: false, authenticated: false };

@@ -26,5 +26,6 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 open = "5"
 futures-util = "0.3"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 base64 = "0.22"

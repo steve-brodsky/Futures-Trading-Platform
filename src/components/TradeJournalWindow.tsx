@@ -5,7 +5,7 @@ import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../lib/bridge";
 import { journalCalendarDates, journalProjectedTargetR, journalTimelineEvents } from "../lib/journal";
-import type { JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSyncStatus, JournalTrade } from "../types";
+import type { JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSyncStatus, JournalTrade, PreferenceRealtimeStateEvent } from "../types";
 
 const monthLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
 const dayHeading = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
@@ -35,11 +35,12 @@ function maskAccount(value: string): string {
   return `${value.slice(0, 3)} ··${value.slice(-4)}`;
 }
 
-export function JournalCloudSettings({ compact = false, onConfigured, onConnectionChanged, preferenceSync }: {
+export function JournalCloudSettings({ compact = false, onConfigured, onConnectionChanged, preferenceSync, preferenceRealtime }: {
   compact?: boolean;
   onConfigured?: () => void;
   onConnectionChanged?: () => void;
   preferenceSync?: { state: "idle" | "syncing" | "synced" | "offline" | "error"; lastSyncedAt?: string; message?: string };
+  preferenceRealtime?: PreferenceRealtimeStateEvent;
 }) {
   const today = new Date().toISOString().slice(0, 10);
   const defaultStart = `${new Date().getFullYear()}-01-01`;
@@ -102,6 +103,14 @@ export function JournalCloudSettings({ compact = false, onConfigured, onConnecti
     setConfirmReset(true);
   }
 
+  const preferenceVisualState = preferenceSync?.state === "offline" || preferenceSync?.state === "error"
+    ? preferenceSync.state
+    : preferenceRealtime?.state === "reconnecting"
+      ? "offline"
+      : preferenceRealtime?.state === "connected"
+        ? "synced"
+        : preferenceSync?.state ?? "idle";
+
   return <section className={`journal-cloud-settings ${compact ? "compact" : ""}`}>
     <header><div className="journal-cloud-icon"><ShieldCheck size={18} /></div><div><span>Private cloud</span><h3>Supabase connection</h3><p>Journal data and non-secret app preferences are owner-scoped. The refresh token stays in a separate operating-system vault record.</p></div><i className={status.authenticated ? "connected" : ""}>{status.authenticated ? "Connected" : "Not connected"}</i></header>
     {!api.isNative && <p className="journal-inline-notice">Cloud setup is disabled in browser demo mode.</p>}
@@ -114,8 +123,12 @@ export function JournalCloudSettings({ compact = false, onConfigured, onConnecti
     </div>
     <p className="journal-backfill-help">A backfill date includes that entire day through today. To ignore all earlier executions and begin at the current moment, use Start fresh now.</p>
     {status.recordFrom && <p className="journal-recording-cutoff">Recording from {new Date(status.recordFrom).toLocaleString()}.</p>}
-    {preferenceSync && <p className={`journal-settings-message preference-sync-${preferenceSync.state}`} role="status">
-      {preferenceSync.state === "syncing" ? "Syncing app preferences…"
+    {preferenceSync && <p className={`journal-settings-message preference-sync-${preferenceVisualState}`} role="status">
+      {preferenceSync.state === "offline" || preferenceSync.state === "error" ? preferenceSync.message ?? "App preference sync failed."
+        : preferenceRealtime?.state === "connected" ? `Live preference sync connected${preferenceSync.lastSyncedAt ? ` · Last synced ${new Date(preferenceSync.lastSyncedAt).toLocaleString()}` : ""}.`
+        : preferenceRealtime?.state === "connecting" ? "Connecting live preference sync…"
+        : preferenceRealtime?.state === "reconnecting" ? `Live preference sync is reconnecting; 30-second fallback checks are active${preferenceRealtime.message ? `: ${preferenceRealtime.message}` : "."}`
+        : preferenceSync.state === "syncing" ? "Syncing app preferences…"
         : preferenceSync.state === "synced" ? `App preferences synced${preferenceSync.lastSyncedAt ? ` ${new Date(preferenceSync.lastSyncedAt).toLocaleString()}` : ""}.`
         : preferenceSync.message ?? "App preference sync is idle."}
     </p>}

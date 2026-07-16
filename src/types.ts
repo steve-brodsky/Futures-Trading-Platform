@@ -331,15 +331,23 @@ export interface CloudPreferenceRecord {
   category: CloudPreferenceCategory;
   schemaVersion: 1;
   payload: Record<string, unknown>;
-  modifiedAt: string;
+  revision: number;
+  mutationId: string;
   deviceId: string;
+  serverUpdatedAt: string;
 }
 
 export interface PreferenceSyncResult {
   state: "synced" | "offline" | "error";
   records: CloudPreferenceRecord[];
   replacedCategories: CloudPreferenceCategory[];
+  conflictedCategories: CloudPreferenceCategory[];
   lastSyncedAt?: string;
+  message?: string;
+}
+
+export interface PreferenceRealtimeStateEvent {
+  state: "disabled" | "connecting" | "connected" | "reconnecting";
   message?: string;
 }
 

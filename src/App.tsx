@@ -15,7 +15,7 @@ import { ChartPaneGrid } from "./components/ChartPaneGrid";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { api } from "./lib/bridge";
-import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
+import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
@@ -35,10 +35,9 @@ import { reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
-const PREFERENCE_POLL_INTERVAL_MS = 5 * 60_000;
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
   { kind: "candles", label: "Candles", description: "Time-based OHLC" },
@@ -261,6 +260,7 @@ function TradingApp() {
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
   const [preferenceSync, setPreferenceSync] = useState<{ state: "idle" | "syncing" | PreferenceSyncResult["state"]; lastSyncedAt?: string; message?: string }>({ state: "idle" });
+  const [preferenceRealtime, setPreferenceRealtime] = useState<PreferenceRealtimeStateEvent>({ state: "disabled" });
   const [preferenceSyncEpoch, setPreferenceSyncEpoch] = useState(0);
   const preferenceSyncInFlightRef = useRef(false);
   const preferenceSyncPendingRef = useRef(false);
@@ -1232,12 +1232,40 @@ function TradingApp() {
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
+    let disposed = false;
+    const cleanups: Array<() => void> = [];
+    void listen<PreferenceRealtimeStateEvent>("app-preferences-realtime-state", ({ payload }) => {
+      if (!disposed) setPreferenceRealtime(payload);
+    }).then((unlisten) => disposed ? unlisten() : cleanups.push(unlisten));
+    void listen<{ category?: string; revision?: number }>("app-preferences-changed", () => {
+      if (!disposed) void syncCloudPreferences();
+    }).then((unlisten) => disposed ? unlisten() : cleanups.push(unlisten));
+    void api.journalAuthStatus().then((auth) => {
+      if (!disposed && auth.authenticated) {
+        setPreferenceRealtime({ state: "connecting" });
+        void api.startPreferenceRealtime().catch((error) => {
+          if (!disposed) setPreferenceRealtime({ state: "reconnecting", message: String(error) });
+        });
+      }
+    }).catch((error) => {
+      if (!disposed) setPreferenceRealtime({ state: "reconnecting", message: String(error) });
+    });
+    return () => {
+      disposed = true;
+      cleanups.forEach((unlisten) => unlisten());
+      void api.stopPreferenceRealtime();
+    };
+  }, [workspaceLoaded]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
     const sync = () => { void syncCloudPreferences(); };
     const focusSync = () => {
       if (Date.now() - preferenceLastSyncStartedAtRef.current < PREFERENCE_FOCUS_THROTTLE_MS) return;
       sync();
     };
-    const interval = window.setInterval(sync, PREFERENCE_POLL_INTERVAL_MS);
+    const pollInterval = preferencePollInterval(preferenceRealtime.state);
+    const interval = window.setInterval(sync, pollInterval);
     window.addEventListener("focus", focusSync);
     sync();
     return () => {
@@ -1245,7 +1273,7 @@ function TradingApp() {
       window.removeEventListener("focus", focusSync);
       if (preferenceSyncRetryRef.current != null) window.clearTimeout(preferenceSyncRetryRef.current);
     };
-  }, [workspaceLoaded, preferenceSyncEpoch]);
+  }, [workspaceLoaded, preferenceSyncEpoch, preferenceRealtime.state]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -1380,6 +1408,9 @@ function TradingApp() {
         if (result.replacedCategories.some((category) => eligible.has(category))) {
           showToast("Newer preferences from another computer were applied.");
         }
+      }
+      if (result.conflictedCategories.some((category) => eligible.has(category))) {
+        showToast("Another computer synced that setting first, so its version was kept.");
       }
       if (deferredLocalEdit) {
         // The native sync may have accepted a remote row while this request was
@@ -2386,7 +2417,7 @@ function TradingApp() {
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Chart display</h3><p>Configure tab signals and the values shown beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>EMA 200 tab status</strong><small>Green above EMA 200, red below</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showEma200TabDots} onChange={(event) => updateChartLabelSettings({ showEma200TabDots: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure risk sizing and projected swing stops.</p></header><label className="settings-control-row"><span><strong>Risk budget behavior</strong><small>Choose whether risk sizing may exceed the limit</small></span><select aria-label="Risk budget behavior" value={workspace.settings.orderTicket.riskSizingPolicy} onChange={(event) => updateOrderTicketSettings({ riskSizingPolicy: event.target.value as OrderTicketSettings["riskSizingPolicy"] })}><option value="strict">Stay within risk</option><option value="minimum-one">Always allow 1 contract</option></select></label><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
       <section className="settings-section" aria-labelledby="journal-fee-settings"><header><span>Journal</span><h3 id="journal-fee-settings">Commission and fees</h3><p>Used for journal net P&amp;L on every opening and closing fill.</p></header><label className="settings-control-row"><span><strong>Fee per contract, per side</strong><small>One contract opened and closed is charged twice</small></span><div className="settings-number-control"><input aria-label="Journal fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.commissionPerContractSide} onChange={(event) => updateJournalCommission(Number(event.target.value))} /><span>USD</span></div></label></section>
-      <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings preferenceSync={preferenceSync} onConnectionChanged={() => { void syncCloudPreferences(); }} /></section>
+      <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings preferenceSync={preferenceSync} preferenceRealtime={preferenceRealtime} onConnectionChanged={() => { void syncCloudPreferences(); }} /></section>
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
     </div></Modal>}
 

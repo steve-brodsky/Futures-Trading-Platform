@@ -4,7 +4,7 @@ mod storage;
 mod tradestation;
 
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use models::*;
 use serde_json::Value;
 use std::{
@@ -62,6 +62,7 @@ pub struct NativeState {
     bar_streams: Arc<tokio::sync::Mutex<BarStreamRegistry>>,
     quote_stream: tokio::sync::Mutex<Option<(String, tauri::async_runtime::JoinHandle<()>)>>,
     brokerage_streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+    preference_realtime: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 #[derive(Default)]
@@ -1242,6 +1243,206 @@ async fn sync_app_preferences(
     journal::sync_app_preferences(&state.db_path, &cloud_profile).await
 }
 
+fn emit_preference_realtime_state(app: &tauri::AppHandle, state: &str, message: Option<String>) {
+    let _ = app.emit(
+        "app-preferences-realtime-state",
+        serde_json::json!({"state":state,"message":message}),
+    );
+}
+
+fn preference_realtime_url(project_url: &str, publishable_key: &str) -> Result<url::Url, AppError> {
+    let mut url = url::Url::parse(project_url)?;
+    let scheme = match url.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        other => {
+            return Err(AppError::Validation(format!(
+                "Unsupported Supabase URL scheme: {other}"
+            )))
+        }
+    };
+    url.set_scheme(scheme)
+        .map_err(|_| AppError::Validation("Invalid Supabase Realtime URL".into()))?;
+    url.set_path("/realtime/v1/websocket");
+    url.set_query(None);
+    url.query_pairs_mut()
+        .append_pair("apikey", publishable_key)
+        .append_pair("vsn", "1.0.0");
+    Ok(url)
+}
+
+fn realtime_preference_record(payload: &Value) -> Option<&Value> {
+    payload
+        .pointer("/data/record")
+        .or_else(|| payload.pointer("/data/new"))
+        .or_else(|| payload.get("record"))
+}
+
+async fn run_preference_realtime_session(
+    app: &tauri::AppHandle,
+    credentials: &journal::PreferenceRealtimeCredentials,
+) -> Result<(), AppError> {
+    let url = preference_realtime_url(&credentials.project_url, &credentials.publishable_key)?;
+    let (socket, _) = tokio_tungstenite::connect_async(url.as_str())
+        .await
+        .map_err(|error| AppError::Api(format!("Supabase Realtime connection failed: {error}")))?;
+    let (mut writer, mut reader) = socket.split();
+    let topic = format!("realtime:app-preferences-{}", credentials.user_id);
+    let join_ref = "1";
+    let join = serde_json::json!({
+        "topic": topic,
+        "event": "phx_join",
+        "payload": {
+            "config": {
+                "broadcast": {"ack": false, "self": false},
+                "presence": {"enabled": false},
+                "postgres_changes": [{
+                    "event": "*",
+                    "schema": "public",
+                    "table": "app_preferences",
+                    "filter": format!("user_id=eq.{}", credentials.user_id)
+                }],
+                "private": false
+            },
+            "access_token": credentials.access_token
+        },
+        "ref": join_ref,
+        "join_ref": join_ref
+    });
+    writer
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            join.to_string().into(),
+        ))
+        .await
+        .map_err(|error| AppError::Api(format!("Supabase Realtime join failed: {error}")))?;
+
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(25));
+    heartbeat.tick().await;
+    let refresh = tokio::time::sleep(credentials.refresh_after);
+    tokio::pin!(refresh);
+    let mut heartbeat_ref = 1u64;
+
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                heartbeat_ref = heartbeat_ref.wrapping_add(1);
+                let message = serde_json::json!({
+                    "topic":"phoenix",
+                    "event":"heartbeat",
+                    "payload":{},
+                    "ref":heartbeat_ref.to_string()
+                });
+                writer.send(tokio_tungstenite::tungstenite::Message::Text(message.to_string().into()))
+                    .await
+                    .map_err(|error| AppError::Api(format!("Supabase Realtime heartbeat failed: {error}")))?;
+            }
+            _ = &mut refresh => return Ok(()),
+            incoming = reader.next() => {
+                let Some(incoming) = incoming else {
+                    return Err(AppError::Api("Supabase Realtime connection ended".into()));
+                };
+                let message = incoming
+                    .map_err(|error| AppError::Api(format!("Supabase Realtime read failed: {error}")))?;
+                match message {
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        let value: Value = serde_json::from_str(text.as_ref())?;
+                        let event = value.get("event").and_then(Value::as_str).unwrap_or_default();
+                        if event == "phx_reply" && value.get("ref").and_then(Value::as_str) == Some(join_ref) {
+                            let status = value.pointer("/payload/status").and_then(Value::as_str).unwrap_or("error");
+                            if status != "ok" {
+                                let reason = value.pointer("/payload/response/reason").and_then(Value::as_str).unwrap_or("subscription rejected");
+                                return Err(AppError::Api(format!("Supabase Realtime join failed: {reason}. Apply the latest Supabase migration")));
+                            }
+                            emit_preference_realtime_state(app, "connected", None);
+                        } else if event == "postgres_changes" {
+                            if let Some(record) = realtime_preference_record(value.get("payload").unwrap_or(&Value::Null)) {
+                                let device_id = record.get("device_id").and_then(Value::as_str).unwrap_or_default();
+                                if device_id != credentials.device_id {
+                                    let _ = app.emit(
+                                        "app-preferences-changed",
+                                        serde_json::json!({
+                                            "category":record.get("category").and_then(Value::as_str),
+                                            "revision":record.get("revision").and_then(Value::as_i64)
+                                        }),
+                                    );
+                                }
+                            }
+                        } else if matches!(event, "phx_error" | "phx_close") {
+                            return Err(AppError::Api(format!("Supabase Realtime channel closed ({event})")));
+                        }
+                    }
+                    tokio_tungstenite::tungstenite::Message::Ping(bytes) => {
+                        writer.send(tokio_tungstenite::tungstenite::Message::Pong(bytes))
+                            .await
+                            .map_err(|error| AppError::Api(format!("Supabase Realtime pong failed: {error}")))?;
+                    }
+                    tokio_tungstenite::tungstenite::Message::Close(_) => {
+                        return Err(AppError::Api("Supabase Realtime connection closed".into()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn run_preference_realtime(app: tauri::AppHandle, path: PathBuf) {
+    let mut attempt = 0u32;
+    loop {
+        emit_preference_realtime_state(
+            &app,
+            if attempt == 0 {
+                "connecting"
+            } else {
+                "reconnecting"
+            },
+            None,
+        );
+        let result = match journal::preference_realtime_credentials(&path).await {
+            Ok(credentials) => run_preference_realtime_session(&app, &credentials).await,
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => attempt = 0,
+            Err(error) => {
+                emit_preference_realtime_state(&app, "reconnecting", Some(error.to_string()));
+                attempt = attempt.saturating_add(1);
+            }
+        }
+        let delay = (1u64 << attempt.min(5)).min(30);
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+    }
+}
+
+async fn replace_preference_realtime_task(app: tauri::AppHandle, state: &NativeState) {
+    let task = tauri::async_runtime::spawn(run_preference_realtime(app, state.db_path.clone()));
+    let mut current = state.preference_realtime.lock().await;
+    if let Some(previous) = current.replace(task) {
+        previous.abort();
+    }
+}
+
+#[tauri::command]
+async fn start_preference_realtime(
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    replace_preference_realtime_task(app, &state).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_preference_realtime(
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    if let Some(task) = state.preference_realtime.lock().await.take() {
+        task.abort();
+    }
+    emit_preference_realtime_state(&app, "disabled", None);
+    Ok(())
+}
+
 fn schedule_journal_flush(app: tauri::AppHandle, path: PathBuf) {
     if !journal::auth_status(&path).is_ok_and(|status| status.configured) {
         return;
@@ -1287,15 +1488,20 @@ async fn configure_journal(
         "journal-updated",
         serde_json::json!({"reason":"cloud-configured"}),
     );
+    replace_preference_realtime_task(app, &state).await;
     Ok(result)
 }
 
 #[tauri::command]
-fn disconnect_journal(
+async fn disconnect_journal(
     app: tauri::AppHandle,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    if let Some(task) = state.preference_realtime.lock().await.take() {
+        task.abort();
+    }
     journal::disconnect(&state.db_path)?;
+    emit_preference_realtime_state(&app, "disabled", None);
     let _ = app.emit(
         "journal-updated",
         serde_json::json!({"reason":"cloud-disconnected"}),
@@ -2343,6 +2549,7 @@ pub fn run() {
                 bar_streams: Arc::new(tokio::sync::Mutex::new(BarStreamRegistry::default())),
                 quote_stream: tokio::sync::Mutex::new(None),
                 brokerage_streams: tokio::sync::Mutex::new(Vec::new()),
+                preference_realtime: tokio::sync::Mutex::new(None),
             });
             Ok(())
         })
@@ -2381,6 +2588,8 @@ pub fn run() {
             load_workspace,
             save_workspace,
             sync_app_preferences,
+            start_preference_realtime,
+            stop_preference_realtime,
             journal_auth_status,
             configure_journal,
             disconnect_journal,
@@ -2404,6 +2613,31 @@ pub fn run() {
 #[cfg(test)]
 mod stream_tests {
     use super::*;
+
+    #[test]
+    fn preference_realtime_url_uses_websocket_protocol_without_changing_the_host() {
+        let url =
+            preference_realtime_url("https://project.supabase.co", "sb_publishable_test").unwrap();
+        assert_eq!(url.scheme(), "wss");
+        assert_eq!(url.host_str(), Some("project.supabase.co"));
+        assert_eq!(url.path(), "/realtime/v1/websocket");
+        let query = url.query_pairs().collect::<HashMap<_, _>>();
+        assert_eq!(
+            query.get("apikey").map(|value| value.as_ref()),
+            Some("sb_publishable_test")
+        );
+        assert_eq!(query.get("vsn").map(|value| value.as_ref()), Some("1.0.0"));
+    }
+
+    #[test]
+    fn preference_realtime_payload_extracts_the_changed_record() {
+        let payload = serde_json::json!({
+            "data": {"record": {"category":"watchlist","revision":8}}
+        });
+        let record = realtime_preference_record(&payload).unwrap();
+        assert_eq!(record["category"], "watchlist");
+        assert_eq!(record["revision"], 8);
+    }
 
     #[test]
     fn decoder_preserves_fragmented_objects_and_reads_concatenated_values() {

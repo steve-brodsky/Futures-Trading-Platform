@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultEntryRules } from "./entryRules";
-import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferenceRetryDelay } from "./cloudPreferences";
+import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay } from "./cloudPreferences";
 import { defaultIndicators } from "./workspace";
 
 function workspace(): WorkspaceState {
@@ -102,5 +102,11 @@ describe("cloud preferences", () => {
     expect(preferenceRetryDelay(0)).toBe(1000);
     expect(preferenceRetryDelay(3)).toBe(8000);
     expect(preferenceRetryDelay(20)).toBe(60_000);
+  });
+
+  it("polls frequently while Realtime is degraded and sparsely while connected", () => {
+    expect(preferencePollInterval("connected")).toBe(5 * 60_000);
+    expect(preferencePollInterval("reconnecting")).toBe(30_000);
+    expect(preferencePollInterval("disabled")).toBe(30_000);
   });
 });

@@ -23,6 +23,10 @@ export function preferenceRetryDelay(attempt: number): number {
   return Math.min(60_000, 2 ** Math.min(Math.max(0, attempt), 6) * 1000);
 }
 
+export function preferencePollInterval(realtimeState: "disabled" | "connecting" | "connected" | "reconnecting"): number {
+  return realtimeState === "connected" ? 5 * 60_000 : 30_000;
+}
+
 type JsonObject = Record<string, unknown>;
 
 function object(value: unknown): JsonObject | undefined {

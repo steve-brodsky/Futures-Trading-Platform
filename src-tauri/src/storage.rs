@@ -1,5 +1,4 @@
 use crate::AppError;
-use chrono::Utc;
 use keyring::Entry;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -50,8 +49,12 @@ pub struct PreferenceRecord {
     pub category: String,
     pub schema_version: i64,
     pub payload: serde_json::Value,
-    pub modified_at: String,
+    pub revision: i64,
+    pub mutation_id: String,
     pub device_id: String,
+    pub server_updated_at: String,
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 static TRADESTATION_CREDENTIALS: OnceLock<Mutex<Option<TradeStationCredentials>>> = OnceLock::new();
@@ -233,6 +236,30 @@ fn connection(path: &Path) -> Result<Connection, AppError> {
     db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)", [])?;
     db.execute("CREATE TABLE IF NOT EXISTS bars (environment TEXT NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL, time INTEGER NOT NULL, open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL, realtime INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(environment,symbol,timeframe,time))", [])?;
     db.execute("CREATE TABLE IF NOT EXISTS app_preference_local (category TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, payload TEXT NOT NULL, modified_at TEXT NOT NULL, device_id TEXT NOT NULL)", [])?;
+    ensure_column(
+        &db,
+        "app_preference_local",
+        "revision",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        &db,
+        "app_preference_local",
+        "mutation_id",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        &db,
+        "app_preference_local",
+        "server_updated_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        &db,
+        "app_preference_local",
+        "dirty",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     let current_version = db.query_row(
         "SELECT value FROM settings WHERE key='bar_time_format_version'",
         [],
@@ -248,6 +275,25 @@ fn connection(path: &Path) -> Result<Connection, AppError> {
         tx.commit()?;
     }
     Ok(db)
+}
+
+fn ensure_column(
+    db: &Connection,
+    table: &str,
+    column: &str,
+    declaration: &str,
+) -> Result<(), AppError> {
+    let mut statement = db.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if !columns.iter().any(|existing| existing == column) {
+        db.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+        ))?;
+    }
+    Ok(())
 }
 
 fn preference_device_id(db: &Connection) -> Result<String, AppError> {
@@ -269,10 +315,14 @@ fn preference_device_id(db: &Connection) -> Result<String, AppError> {
     Ok(value)
 }
 
+pub fn local_preference_device_id(path: &Path) -> Result<String, AppError> {
+    let db = connection(path)?;
+    preference_device_id(&db)
+}
+
 fn record_preference_profile_in_transaction(
     tx: &rusqlite::Transaction<'_>,
     profile: &serde_json::Value,
-    seed_modified_at: Option<&str>,
     device_id: &str,
 ) -> Result<(), AppError> {
     let Some(categories) = profile
@@ -283,7 +333,6 @@ fn record_preference_profile_in_transaction(
             "Cloud preference profile is missing categories".into(),
         ));
     };
-    let now = Utc::now().to_rfc3339();
     for category in PREFERENCE_CATEGORIES {
         let Some(payload) = categories.get(category).filter(|value| value.is_object()) else {
             return Err(AppError::Validation(format!(
@@ -293,22 +342,31 @@ fn record_preference_profile_in_transaction(
         let payload = serde_json::to_string(payload)?;
         let existing = tx
             .query_row(
-                "SELECT payload FROM app_preference_local WHERE category=?1",
+                "SELECT payload,mutation_id,dirty FROM app_preference_local WHERE category=?1",
                 params![category],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)? != 0,
+                    ))
+                },
             )
             .optional()?;
-        if existing.as_deref() == Some(payload.as_str()) {
+        if existing
+            .as_ref()
+            .is_some_and(|(saved, mutation_id, _)| saved == &payload && !mutation_id.is_empty())
+        {
             continue;
         }
-        let modified_at = if existing.is_none() {
-            seed_modified_at.unwrap_or(&now)
-        } else {
-            &now
-        };
+        let mutation_id = uuid::Uuid::new_v4().to_string();
+        let dirty = existing
+            .as_ref()
+            .map(|(saved, _, already_dirty)| i32::from(saved != &payload || *already_dirty))
+            .unwrap_or(0);
         tx.execute(
-            "INSERT INTO app_preference_local(category,schema_version,payload,modified_at,device_id) VALUES(?1,1,?2,?3,?4) ON CONFLICT(category) DO UPDATE SET schema_version=1,payload=excluded.payload,modified_at=excluded.modified_at,device_id=excluded.device_id",
-            params![category, payload, modified_at, device_id],
+            "INSERT INTO app_preference_local(category,schema_version,payload,modified_at,device_id,revision,mutation_id,server_updated_at,dirty) VALUES(?1,1,?2,'1970-01-01T00:00:00Z',?3,0,?4,'',?5) ON CONFLICT(category) DO UPDATE SET schema_version=1,payload=excluded.payload,mutation_id=excluded.mutation_id,device_id=excluded.device_id,dirty=excluded.dirty",
+            params![category, payload, device_id, mutation_id, dirty],
         )?;
     }
     Ok(())
@@ -316,21 +374,9 @@ fn record_preference_profile_in_transaction(
 
 pub fn record_preference_profile(path: &Path, profile: &serde_json::Value) -> Result<(), AppError> {
     let mut db = connection(path)?;
-    let seed = db
-        .query_row(
-            "SELECT updated_at FROM settings WHERE key='workspace'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
     let device_id = preference_device_id(&db)?;
     let tx = db.transaction()?;
-    record_preference_profile_in_transaction(
-        &tx,
-        profile,
-        seed.as_deref().or(Some("1970-01-01T00:00:00Z")),
-        &device_id,
-    )?;
+    record_preference_profile_in_transaction(&tx, profile, &device_id)?;
     tx.commit()?;
     Ok(())
 }
@@ -341,13 +387,6 @@ pub fn save_workspace(
     profile: Option<&serde_json::Value>,
 ) -> Result<(), AppError> {
     let mut db = connection(path)?;
-    let previous_updated_at = db
-        .query_row(
-            "SELECT updated_at FROM settings WHERE key='workspace'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
     let device_id = preference_device_id(&db)?;
     let tx = db.transaction()?;
     tx.execute(
@@ -355,10 +394,7 @@ pub fn save_workspace(
         params![serde_json::to_string(value)?],
     )?;
     if let Some(profile) = profile {
-        let seed = previous_updated_at
-            .as_deref()
-            .or(Some("1970-01-01T00:00:00Z"));
-        record_preference_profile_in_transaction(&tx, profile, seed, &device_id)?;
+        record_preference_profile_in_transaction(&tx, profile, &device_id)?;
     }
     tx.commit()?;
     Ok(())
@@ -367,7 +403,7 @@ pub fn save_workspace(
 pub fn local_preferences(path: &Path) -> Result<Vec<PreferenceRecord>, AppError> {
     let db = connection(path)?;
     let mut statement = db.prepare(
-        "SELECT category,schema_version,payload,modified_at,device_id FROM app_preference_local",
+        "SELECT category,schema_version,payload,revision,mutation_id,device_id,server_updated_at,dirty FROM app_preference_local",
     )?;
     let rows = statement.query_map([], |row| {
         let payload = row.get::<_, String>(2)?;
@@ -375,18 +411,33 @@ pub fn local_preferences(path: &Path) -> Result<Vec<PreferenceRecord>, AppError>
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
             payload,
-            row.get::<_, String>(3)?,
+            row.get::<_, i64>(3)?,
             row.get::<_, String>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, i64>(7)? != 0,
         ))
     })?;
     rows.map(|row| {
-        let (category, schema_version, payload, modified_at, device_id) = row?;
+        let (
+            category,
+            schema_version,
+            payload,
+            revision,
+            mutation_id,
+            device_id,
+            server_updated_at,
+            dirty,
+        ) = row?;
         Ok(PreferenceRecord {
             category,
             schema_version,
             payload: serde_json::from_str(&payload)?,
-            modified_at,
+            revision,
+            mutation_id,
             device_id,
+            server_updated_at,
+            dirty,
         })
     })
     .collect()
@@ -402,8 +453,8 @@ pub fn replace_local_preference(path: &Path, record: &PreferenceRecord) -> Resul
         ));
     }
     connection(path)?.execute(
-        "INSERT INTO app_preference_local(category,schema_version,payload,modified_at,device_id) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(category) DO UPDATE SET schema_version=excluded.schema_version,payload=excluded.payload,modified_at=excluded.modified_at,device_id=excluded.device_id",
-        params![record.category, record.schema_version, serde_json::to_string(&record.payload)?, record.modified_at, record.device_id],
+        "INSERT INTO app_preference_local(category,schema_version,payload,modified_at,device_id,revision,mutation_id,server_updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0) ON CONFLICT(category) DO UPDATE SET schema_version=excluded.schema_version,payload=excluded.payload,device_id=excluded.device_id,revision=excluded.revision,mutation_id=excluded.mutation_id,server_updated_at=excluded.server_updated_at,dirty=0",
+        params![record.category, record.schema_version, serde_json::to_string(&record.payload)?, record.server_updated_at, record.device_id, record.revision, record.mutation_id, record.server_updated_at],
     )?;
     Ok(())
 }
@@ -576,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn new_workspace_preferences_seed_old_then_track_only_changed_categories() {
+    fn new_workspace_preferences_start_clean_then_track_only_changed_categories() {
         let path = std::env::temp_dir().join(format!(
             "northstar-preferences-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -587,25 +638,42 @@ mod tests {
         assert_eq!(seeded.len(), PREFERENCE_CATEGORIES.len());
         assert!(seeded
             .iter()
-            .all(|record| record.modified_at == "1970-01-01T00:00:00Z"));
+            .all(|record| !record.dirty && record.revision == 0));
+        assert!(seeded
+            .iter()
+            .all(|record| uuid::Uuid::parse_str(&record.mutation_id).is_ok()));
         let device_id = seeded[0].device_id.clone();
         assert!(seeded.iter().all(|record| record.device_id == device_id));
+        let seeded_watchlist_mutation = seeded
+            .iter()
+            .find(|record| record.category == "watchlist")
+            .unwrap()
+            .mutation_id
+            .clone();
 
         let second = profile("MNQU26");
         save_workspace(&path, &serde_json::json!({"revision":2}), Some(&second)).unwrap();
         let tracked = local_preferences(&path).unwrap();
-        assert_ne!(
-            tracked
-                .iter()
-                .find(|record| record.category == "watchlist")
-                .unwrap()
-                .modified_at,
-            "1970-01-01T00:00:00Z"
-        );
+        let tracked_watchlist = tracked
+            .iter()
+            .find(|record| record.category == "watchlist")
+            .unwrap();
+        assert!(tracked_watchlist.dirty);
+        assert_ne!(tracked_watchlist.mutation_id, seeded_watchlist_mutation);
         assert!(tracked
             .iter()
             .filter(|record| record.category != "watchlist")
-            .all(|record| record.modified_at == "1970-01-01T00:00:00Z"));
+            .all(|record| !record.dirty));
+
+        let retry_mutation = tracked_watchlist.mutation_id.clone();
+        save_workspace(&path, &serde_json::json!({"revision":3}), Some(&second)).unwrap();
+        let retried = local_preferences(&path)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.category == "watchlist")
+            .unwrap();
+        assert_eq!(retried.mutation_id, retry_mutation);
+        assert!(retried.dirty);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -620,8 +688,11 @@ mod tests {
             category: "watchlist".into(),
             schema_version: 1,
             payload: serde_json::json!({"symbols":["MCLU26"]}),
-            modified_at: "2026-07-15T20:00:00Z".into(),
+            revision: 7,
+            mutation_id: uuid::Uuid::new_v4().to_string(),
             device_id: uuid::Uuid::new_v4().to_string(),
+            server_updated_at: "2026-07-15T20:00:00Z".into(),
+            dirty: false,
         };
         replace_local_preference(&path, &record).unwrap();
         let saved = local_preferences(&path)
@@ -630,8 +701,10 @@ mod tests {
             .find(|item| item.category == "watchlist")
             .unwrap();
         assert_eq!(saved.payload, record.payload);
-        assert_eq!(saved.modified_at, record.modified_at);
+        assert_eq!(saved.revision, record.revision);
+        assert_eq!(saved.mutation_id, record.mutation_id);
         assert_eq!(saved.device_id, record.device_id);
+        assert!(!saved.dirty);
         std::fs::remove_file(path).unwrap();
     }
 
