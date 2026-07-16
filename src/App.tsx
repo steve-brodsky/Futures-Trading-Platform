@@ -2392,7 +2392,7 @@ function TradingApp() {
       <ChartPaneGrid
         layout={chartLayout}
         ratios={normalizeChartSplitRatio(chartLayout, windowState.splitRatios?.[chartLayout] ?? defaultChartSplitRatios(chartLayout))}
-        panes={visibleTabs.map((tab) => ({ id: tab.id, node: renderChartPane(tab) }))}
+        panes={visibleTabs.map((tab) => ({ id: tab.id, label: tab.symbol.symbol, node: renderChartPane(tab) }))}
         activePaneId={activeTab.id}
         onFocus={selectTab}
         onRatiosChange={changeChartSplitRatios}

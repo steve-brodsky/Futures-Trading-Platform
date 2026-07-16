@@ -130,7 +130,13 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .chart-pane-grid { position: relative; min-width: 0; min-height: 0; grid-column: 2; grid-row: 1; overflow: hidden; background: #080c12; }
 .chart-pane-frame { position: absolute; min-width: 0; min-height: 0; overflow: hidden; background: #0b0f17; box-shadow: inset 0 0 0 1px #1a2330; transition: box-shadow .14s ease; }
 .chart-pane-frame.active { z-index: 1; box-shadow: inset 0 0 0 1px rgba(55,213,232,.72), inset 0 0 0 2px rgba(55,213,232,.08); }
+.chart-pane-frame.expanded { z-index: 11; }
+.chart-pane-frame.expanded-hidden { visibility: hidden; pointer-events: none; }
 .chart-pane-frame > .chart-stage { position: absolute; inset: 1px; width: auto; height: auto; }
+.chart-pane-frame.has-expand-control .timezone-select { width: 36px; padding: 0 2px; }
+.chart-pane-expand-button { position: absolute; z-index: 13; right: 37px; bottom: 1px; width: 36px; height: 25px; display: grid; place-items: center; padding: 0; border: 0; border-top: 1px solid #232c39; border-left: 1px solid #232c39; color: #8e9aaa; background: #0f151e; cursor: pointer; transition: color .14s, background .14s, border-color .14s; }
+.chart-pane-expand-button:hover, .chart-pane-expand-button[aria-pressed="true"] { color: var(--cyan); border-color: #304150; background: #18202a; }
+.chart-pane-expand-button:focus-visible { color: #071116; border-color: var(--cyan); background: var(--cyan); outline: 2px solid var(--cyan); outline-offset: -2px; }
 .chart-pane-divider { position: absolute; z-index: 12; padding: 0; border: 0; background: transparent; touch-action: none; }
 .chart-pane-divider::after { content: ""; position: absolute; background: #273342; transition: background .14s, box-shadow .14s; }
 .chart-pane-divider.vertical { top: 0; bottom: 0; width: 9px; margin-left: -4px; cursor: col-resize; }

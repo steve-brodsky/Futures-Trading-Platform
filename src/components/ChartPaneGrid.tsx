@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { Maximize2, Minimize2 } from "lucide-react";
 import { defaultChartSplitRatios, normalizeChartSplitRatio } from "../lib/chartWorkspace";
 import type { ChartLayout } from "../types";
 
 interface ChartPaneGridProps {
   layout: ChartLayout;
   ratios?: number[];
-  panes: Array<{ id: string; node: ReactNode }>;
+  panes: Array<{ id: string; label: string; node: ReactNode }>;
   activePaneId: string;
   onFocus: (tabId: string) => void;
   onRatiosChange: (ratios: number[]) => void;
@@ -58,6 +59,7 @@ export function ChartPaneGrid({ layout, ratios, panes, activePaneId, onFocus, on
   const rootRef = useRef<HTMLDivElement>(null);
   const normalized = normalizeChartSplitRatio(layout, ratios ?? defaultChartSplitRatios(layout));
   const [draftRatios, setDraftRatios] = useState(normalized);
+  const [expanded, setExpanded] = useState(false);
   const draftRef = useRef(draftRatios);
   const dragRef = useRef<{ axis: Axis; ratioIndex: number; pointerId: number } | null>(null);
   draftRef.current = draftRatios;
@@ -67,6 +69,14 @@ export function ChartPaneGrid({ layout, ratios, panes, activePaneId, onFocus, on
     draftRef.current = next;
     setDraftRatios(next);
   }, [layout, JSON.stringify(ratios ?? [])]);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [layout]);
+
+  useEffect(() => {
+    if (panes.length <= 1) setExpanded(false);
+  }, [panes.length]);
 
   const updateRatio = (axis: Axis, ratioIndex: number, value: number, commit: boolean) => {
     const next = [...draftRef.current];
@@ -82,15 +92,39 @@ export function ChartPaneGrid({ layout, ratios, panes, activePaneId, onFocus, on
     if (!bounds) return 0.5;
     return axis === "x" ? (event.clientX - bounds.left) / Math.max(1, bounds.width) : (event.clientY - bounds.top) / Math.max(1, bounds.height);
   };
+  const hasExpandControl = layout !== "single" && panes.length > 1;
 
-  return <div ref={rootRef} className={`chart-pane-grid layout-${layout}`}>
-    {panes.map((pane, index) => <div
-      key={pane.id}
-      className={`chart-pane-frame ${pane.id === activePaneId ? "active" : ""}`}
-      style={paneStyle(layout, index, draftRatios)}
-      onPointerDownCapture={() => { if (pane.id !== activePaneId) onFocus(pane.id); }}
-    >{pane.node}</div>)}
-    {dividerDefinitions(layout, draftRatios).map(({ axis, ratioIndex, position }) => <div
+  return <div ref={rootRef} className={`chart-pane-grid layout-${layout} ${expanded ? "pane-expanded" : ""}`}>
+    {panes.map((pane, index) => {
+      const isExpandedPane = expanded && pane.id === activePaneId;
+      const isHiddenPane = expanded && !isExpandedPane;
+      return <div
+        key={pane.id}
+        className={`chart-pane-frame ${hasExpandControl ? "has-expand-control" : ""} ${pane.id === activePaneId ? "active" : ""} ${isExpandedPane ? "expanded" : ""} ${isHiddenPane ? "expanded-hidden" : ""}`}
+        style={isExpandedPane ? { inset: 0 } : paneStyle(layout, index, draftRatios)}
+        aria-hidden={isHiddenPane || undefined}
+        inert={isHiddenPane || undefined}
+        onPointerDownCapture={() => { if (!isHiddenPane && pane.id !== activePaneId) onFocus(pane.id); }}
+      >
+        {pane.node}
+        {hasExpandControl && <button
+          type="button"
+          className="chart-pane-expand-button"
+          aria-label={`${isExpandedPane ? "Restore" : "Expand"} ${pane.label} chart`}
+          aria-pressed={isExpandedPane}
+          title={`${isExpandedPane ? "Restore" : "Expand"} ${pane.label} chart`}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (isExpandedPane) setExpanded(false);
+            else {
+              if (pane.id !== activePaneId) onFocus(pane.id);
+              setExpanded(true);
+            }
+          }}
+        >{isExpandedPane ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>}
+      </div>;
+    })}
+    {!expanded && dividerDefinitions(layout, draftRatios).map(({ axis, ratioIndex, position }) => <div
       key={`${axis}-${ratioIndex}`}
       className={`chart-pane-divider ${axis === "x" ? "vertical" : "horizontal"}`}
       style={axis === "x" ? { left: `${position * 100}%` } : { top: `${position * 100}%` }}
