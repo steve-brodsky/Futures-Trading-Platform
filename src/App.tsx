@@ -22,6 +22,10 @@ import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
 import { calculateContractsForRisk, calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
+import {
+  defaultEntryRuleAlerts, entryRuleAlertEpoch, trackEntryRuleAlertTransitions,
+  type EntryRuleAlertTrackerState, type EntryRuleAlertTransition,
+} from "./lib/entryRuleAlerts";
 import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { quoteDayChangePercent } from "./lib/quotes";
 import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
@@ -69,7 +73,7 @@ const defaultWorkspace: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {},
-  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
+  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
   settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
@@ -132,6 +136,17 @@ interface EntryScreenshotCandidate {
   attempts: number;
   lastError?: string;
 }
+
+interface EntryRuleTabSignal {
+  symbol: string;
+  timeframe: Timeframe;
+  sides: EntryRuleSide[];
+  pulsing: boolean;
+}
+
+type EntryRuleTabSignalEvent =
+  | { action: "trigger"; signals: Array<{ tabId: string; symbol: string; timeframe: Timeframe; sides: EntryRuleSide[] }> }
+  | { action: "acknowledge"; tabIds: string[] };
 
 function activeProtectionIds(expirations: Map<string, number>, now = Date.now()): Set<string> {
   const active = new Set<string>();
@@ -229,6 +244,8 @@ function TradingApp() {
   const [brokerageError, setBrokerageError] = useState<string>();
   const [brokerageStreamStates, setBrokerageStreamStates] = useState<Record<"positions" | "orders", StreamConnectionState>>({ positions: api.isNative ? "disconnected" : "streaming", orders: api.isNative ? "disconnected" : "streaming" });
   const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
+  const [entryRuleTabSignals, setEntryRuleTabSignals] = useState<Record<string, EntryRuleTabSignal>>({});
+  const entryRuleTabSignalsRef = useRef(entryRuleTabSignals);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const quotesRef = useRef(quotes);
   const [orderProjection, setOrderProjection] = useState<(OrderProjection & { tradeSymbol?: string }) | null>(null);
@@ -290,6 +307,10 @@ function TradingApp() {
   const alertLoadedEpochRef = useRef(new Map<string, string>());
   const alertDesiredRef = useRef(new Set<string>());
   const alertDataEpochRef = useRef("");
+  const entryRuleAlertTrackerRef = useRef<EntryRuleAlertTrackerState | undefined>(undefined);
+  const entryRuleSignalTimersRef = useRef(new Map<string, number>());
+  const entryRuleAudioTimersRef = useRef(new Set<number>());
+  const entryRuleAudioAvailableAtRef = useRef(0);
   const vwapSubscriptionsRef = useRef(new Map<string, Omit<BarSubscription, "timeframe">>());
   const barSubscriptionGenerationRef = useRef(Date.now() * 1000);
   const vwapSymbolsRef = useRef(new Set<string>());
@@ -341,6 +362,7 @@ function TradingApp() {
   tabMarketsRef.current = tabMarkets;
   vwapMarketsRef.current = vwapMarkets;
   quotesRef.current = quotes;
+  entryRuleTabSignalsRef.current = entryRuleTabSignals;
 
   const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
     ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
@@ -396,6 +418,69 @@ function TradingApp() {
 
   function matchingAlertTabs(symbol: string, timeframe: Timeframe): ChartTabState[] {
     return workspaceRef.current.tabs.filter((tab) => tab.symbol.symbol === symbol && tab.ema200Alert[timeframe].enabled);
+  }
+
+  function applyEntryRuleTabSignal(event: EntryRuleTabSignalEvent) {
+    if (event.action === "acknowledge") {
+      event.tabIds.forEach((tabId) => {
+        const timer = entryRuleSignalTimersRef.current.get(tabId);
+        if (timer != null) window.clearTimeout(timer);
+        entryRuleSignalTimersRef.current.delete(tabId);
+      });
+      setEntryRuleTabSignals((current) => {
+        if (!event.tabIds.some((tabId) => current[tabId])) return current;
+        const next = { ...current };
+        event.tabIds.forEach((tabId) => { delete next[tabId]; });
+        return next;
+      });
+      return;
+    }
+
+    setEntryRuleTabSignals((current) => {
+      const next = { ...current };
+      event.signals.forEach((signal) => {
+        const existing = current[signal.tabId];
+        const sameMarket = existing?.symbol === signal.symbol && existing.timeframe === signal.timeframe;
+        const sides = [...new Set([...(sameMarket ? existing.sides : []), ...signal.sides])]
+          .sort((left, right) => left === right ? 0 : left === "long" ? -1 : 1) as EntryRuleSide[];
+        next[signal.tabId] = { symbol: signal.symbol, timeframe: signal.timeframe, sides, pulsing: true };
+      });
+      return next;
+    });
+    event.signals.forEach(({ tabId }) => {
+      const existing = entryRuleSignalTimersRef.current.get(tabId);
+      if (existing != null) window.clearTimeout(existing);
+      const timer = window.setTimeout(() => {
+        entryRuleSignalTimersRef.current.delete(tabId);
+        setEntryRuleTabSignals((current) => current[tabId]
+          ? { ...current, [tabId]: { ...current[tabId], pulsing: false } }
+          : current);
+      }, 1800);
+      entryRuleSignalTimersRef.current.set(tabId, timer);
+    });
+  }
+
+  function broadcastEntryRuleTabSignal(event: EntryRuleTabSignalEvent) {
+    applyEntryRuleTabSignal(event);
+    if (!api.isNative) return;
+    workspaceRef.current.windows.filter((window) => window.id !== currentWindowId)
+      .forEach((window) => { void emitTo(window.id, "entry-rule-tab-signal", event).catch(() => undefined); });
+  }
+
+  function queueEntryRuleAlertSounds(transitions: EntryRuleAlertTransition[]) {
+    const ordered = [...transitions].sort((left, right) => left.side === right.side ? 0 : left.side === "long" ? -1 : 1);
+    let availableAt = Math.max(Date.now(), entryRuleAudioAvailableAtRef.current);
+    ordered.forEach((transition) => {
+      const config = workspaceRef.current.entryRuleAlerts[transition.side];
+      const delay = Math.max(0, availableAt - Date.now());
+      const timer = window.setTimeout(() => {
+        entryRuleAudioTimersRef.current.delete(timer);
+        playAlertSound(config.sound, config.durationSeconds);
+      }, delay);
+      entryRuleAudioTimersRef.current.add(timer);
+      availableAt += config.durationSeconds * 1000 + 120;
+    });
+    entryRuleAudioAvailableAtRef.current = availableAt;
   }
 
   function primeAlertMarket(symbol: string, timeframe: Timeframe, incoming: Bar[], reset = true) {
@@ -648,6 +733,10 @@ function TradingApp() {
       void (async () => {
         await emitTo(payload.windowId, "workspace-sync", workspaceRef.current).catch(() => undefined);
         await emitTo(payload.windowId, "window-market-sync", marketSyncForWindow(payload.windowId)).catch(() => undefined);
+        const signals = Object.entries(entryRuleTabSignalsRef.current).map(([tabId, signal]) => ({
+          tabId, symbol: signal.symbol, timeframe: signal.timeframe, sides: signal.sides,
+        }));
+        if (signals.length) await emitTo(payload.windowId, "entry-rule-tab-signal", { action: "trigger", signals } satisfies EntryRuleTabSignalEvent).catch(() => undefined);
       })();
     }).then((unlisten) => cleanups.push(unlisten));
     listen<WindowMarketSyncEvent>("window-market-sync", ({ payload }) => {
@@ -677,6 +766,10 @@ function TradingApp() {
       });
       setQuotes((current) => ({ ...current, ...payload.quotes }));
     }).then((unlisten) => cleanups.push(unlisten));
+    if (api.isNative) {
+      listen<EntryRuleTabSignalEvent>("entry-rule-tab-signal", ({ payload }) => applyEntryRuleTabSignal(payload))
+        .then((unlisten) => cleanups.push(unlisten));
+    }
     listen<StripBounds>("chart-strip-bounds", ({ payload }) => stripBoundsRef.current.set(payload.windowId, payload)).then((unlisten) => cleanups.push(unlisten));
     listen<{ tabId: string; range: { from: number; to: number } }>("chart-viewport", ({ payload }) => viewRangesRef.current.set(payload.tabId, payload.range)).then((unlisten) => cleanups.push(unlisten));
     listen<{ reason?: string }>("journal-updated", ({ payload }) => {
@@ -690,6 +783,10 @@ function TradingApp() {
     return () => {
       if (brokerageFillReconcileTimerRef.current != null) window.clearTimeout(brokerageFillReconcileTimerRef.current);
       brokerageFillReconcileTimerRef.current = undefined;
+      entryRuleSignalTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      entryRuleSignalTimersRef.current.clear();
+      entryRuleAudioTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      entryRuleAudioTimersRef.current.clear();
       cleanups.forEach((unlisten) => unlisten());
     };
   }, []);
@@ -951,6 +1048,95 @@ function TradingApp() {
       });
     });
   }, [alertMarketsKey, alertOwnershipKey, tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    const inputs = workspace.tabs.flatMap((tab) => {
+      const tabMarket = tabMarkets[tab.id];
+      const quote = quotes[tab.symbol.symbol];
+      if (!isSameBarMarket(tabMarket, tab.symbol.symbol, tab.timeframe) || !tabMarket.bars.length || !quote) return [];
+      const enabledSides = (["long", "short"] as const).filter((side) => (
+        workspace.entryRuleAlerts[side].enabled && workspace.entryRules[side].children.length > 0
+      ));
+      if (!enabledSides.length || enabledSides.some((side) => {
+        const price = side === "long" ? quote.ask : quote.bid;
+        return !Number.isFinite(price) || price <= 0;
+      })) return [];
+      return [{
+        tabId: tab.id,
+        symbol: tab.symbol.symbol,
+        timeframe: tab.timeframe,
+        bars: tabMarket.bars,
+        quote,
+      }];
+    });
+    const epoch = entryRuleAlertEpoch(environment, workspace.entryRules, workspace.entryRuleAlerts);
+    const tracked = trackEntryRuleAlertTransitions(
+      entryRuleAlertTrackerRef.current,
+      epoch,
+      workspace.entryRules,
+      workspace.entryRuleAlerts,
+      inputs,
+    );
+    entryRuleAlertTrackerRef.current = tracked.state;
+    if (!tracked.transitions.length) return;
+
+    queueEntryRuleAlertSounds(tracked.transitions);
+    setNotifications((current) => [
+      ...tracked.transitions.map((transition) => ({
+        id: crypto.randomUUID(),
+        symbol: transition.symbol,
+        time: new Date().toISOString(),
+        title: `${transition.side === "long" ? "Long" : "Short"} entry allowed · ${transition.timeframe}`,
+        text: transition.reason,
+        level: "success" as const,
+      })),
+      ...current,
+    ].slice(0, 250));
+
+    const marketSignals = new Map<string, { tabIds: Set<string>; symbol: string; timeframe: Timeframe; sides: Set<EntryRuleSide> }>();
+    tracked.transitions.forEach((transition) => {
+      const key = alertMarketKey(transition.symbol, transition.timeframe);
+      const signal = marketSignals.get(key) ?? {
+        tabIds: new Set<string>(), symbol: transition.symbol, timeframe: transition.timeframe, sides: new Set<EntryRuleSide>(),
+      };
+      workspace.tabs.filter((tab) => tab.symbol.symbol === transition.symbol && tab.timeframe === transition.timeframe)
+        .forEach((tab) => signal.tabIds.add(tab.id));
+      signal.sides.add(transition.side);
+      marketSignals.set(key, signal);
+    });
+    broadcastEntryRuleTabSignal({
+      action: "trigger",
+      signals: [...marketSignals.values()].flatMap((signal) => [...signal.tabIds].map((tabId) => ({
+        tabId,
+        symbol: signal.symbol,
+        timeframe: signal.timeframe,
+        sides: [...signal.sides],
+      }))),
+    });
+    showToast(tracked.transitions.map((transition) => (
+      `${transition.symbol} ${transition.timeframe} ${transition.side === "long" ? "Long" : "Short"} entry allowed: ${transition.reason}`
+    )).join(" · "));
+  }, [workspaceLoaded, environment, tabStreamKey, workspace.entryRules, workspace.entryRuleAlerts, tabMarkets, quotes]);
+
+  useEffect(() => {
+    setEntryRuleTabSignals((current) => {
+      let changed = false;
+      const next: Record<string, EntryRuleTabSignal> = {};
+      Object.entries(current).forEach(([tabId, signal]) => {
+        const tab = workspace.tabs.find((item) => item.id === tabId);
+        if (!tab || tab.symbol.symbol !== signal.symbol || tab.timeframe !== signal.timeframe) {
+          const timer = entryRuleSignalTimersRef.current.get(tabId);
+          if (timer != null) window.clearTimeout(timer);
+          entryRuleSignalTimersRef.current.delete(tabId);
+          changed = true;
+          return;
+        }
+        next[tabId] = signal;
+      });
+      return changed ? next : current;
+    });
+  }, [tabStreamKey]);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
@@ -1660,6 +1846,7 @@ function TradingApp() {
   }
 
   function selectTab(tabId: string) {
+    broadcastEntryRuleTabSignal({ action: "acknowledge", tabIds: [tabId] });
     commitWorkspace((current) => focusChartTab(current, currentWindowId, tabId));
   }
 
@@ -2311,7 +2498,7 @@ function TradingApp() {
       <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
-    <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} visibleTabIds={visibleTabIds} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); if (api.isNative) emit("chart-strip-bounds", bounds); }} />
+    <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} visibleTabIds={visibleTabIds} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} entryRuleSignals={entryRuleTabSignals} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); if (api.isNative) emit("chart-strip-bounds", bounds); }} />
 
     <nav className={`toolbar ${hasWindowTabs ? "" : "empty"}`} aria-label="Chart toolbar">
       <button className="symbol-control" onClick={() => setSearchOpen(true)}><Search size={16} /><strong>{activeTab.symbol.symbol}</strong><span>{activeTab.symbol.exchange}</span><ChevronDown size={14} /></button>
@@ -2423,7 +2610,7 @@ function TradingApp() {
 
     {envConfirm && <Modal title={`Switch to ${envConfirm.toUpperCase()}?`} onClose={() => setEnvConfirm(null)}><div className={`environment-confirm ${envConfirm}`}><Zap size={22} /><div><strong>{envConfirm === "live" ? "Real orders and real money" : "Simulated execution"}</strong><p>{envConfirm === "live" ? "Changing to LIVE clears SIM account data." : "SIM uses a separate account environment and simulated fills."}</p></div></div><div className="modal-actions"><button className="secondary-button" onClick={() => setEnvConfirm(null)}>Cancel</button><button className={envConfirm === "live" ? "danger-button" : "primary-button"} disabled={busy} onClick={confirmEnvironment}>Switch to {envConfirm.toUpperCase()}</button></div></Modal>}
 
-    {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder rules={workspace.entryRules} bars={bars} quote={activeQuote} onClose={() => setEntryRulesOpen(false)} onSave={(entryRules) => { updateWorkspace({ entryRules }); setEntryRulesOpen(false); showToast("Entry rules saved."); }} /></Modal>}
+    {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder rules={workspace.entryRules} alerts={workspace.entryRuleAlerts} bars={bars} quote={activeQuote} onClose={() => setEntryRulesOpen(false)} onSave={(entryRules, entryRuleAlerts) => { updateWorkspace({ entryRules, entryRuleAlerts }); setEntryRulesOpen(false); showToast("Entry rules and alerts saved."); }} /></Modal>}
 
     {review && <Modal title={review.kind === "close-position" ? "Close position" : "Review order"} onClose={() => setReview(null)}><div className="review-hero"><span className={review.draft.side === "Buy" ? "buy" : "sell"}>{review.draft.side}</span><strong>{review.draft.quantity} {review.draft.symbol}</strong><small>{review.kind === "close-position" ? "Market close · cancels working exits first" : `${review.draft.type} · ${review.draft.duration}${review.chartSymbol !== review.draft.symbol ? ` · Chart ${review.chartSymbol} · Trading ${review.draft.symbol}` : ""}`}</small></div><dl className="review-list">{review.kind === "entry" && <><div><dt>Take profit</dt><dd>{formatPrice(review.draft.takeProfit)}</dd></div><div><dt>Stop loss</dt><dd>{formatPrice(review.draft.stopLoss)}</dd></div></>}<div><dt>Estimated commission</dt><dd>{review.preview.estimatedCommission ?? "—"}</dd></div><div><dt>Initial margin</dt><dd>{review.preview.initialMargin ?? "—"}</dd></div><div><dt>Environment</dt><dd className={environment === "live" ? "negative" : "cyan"}>{environment.toUpperCase()}</dd></div></dl><p className="preview-summary">{review.kind === "close-position" ? "All working close-side orders for this symbol will be cancelled and confirmed inactive before the market close is submitted." : review.preview.summary}</p>{reviewEntryEligibility && <p className={`entry-review-rule ${reviewEntryEligibility.status}`}>{reviewEntryEligibility.reason}</p>}<button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview.valid || busy || Boolean(reviewEntryEligibility && !reviewEntryEligibility.allowed)} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button></Modal>}
 
@@ -2431,13 +2618,14 @@ function TradingApp() {
   </main>;
 }
 
-function ChartTabStrip({ tabs, activeTabId, visibleTabIds, totalTabs, windowId, ema200Positions, onSelect, onAdd, onClose, onReorder, onDragEnd, onBounds }: {
+function ChartTabStrip({ tabs, activeTabId, visibleTabIds, totalTabs, windowId, ema200Positions, entryRuleSignals, onSelect, onAdd, onClose, onReorder, onDragEnd, onBounds }: {
   tabs: ChartTabState[];
   activeTabId: string;
   visibleTabIds: string[];
   totalTabs: number;
   windowId: string;
   ema200Positions: Partial<Record<string, EmaCrossSide>>;
+  entryRuleSignals: Record<string, EntryRuleTabSignal>;
   onSelect: (tabId: string) => void;
   onAdd: () => void;
   onClose: (tabId: string) => void;
@@ -2480,7 +2668,10 @@ function ChartTabStrip({ tabs, activeTabId, visibleTabIds, totalTabs, windowId, 
     setDropIndex(undefined);
   }}>
     <div className="chart-tab-scroll">
-      {tabs.map((tab, index) => <div key={tab.id} className={`chart-tab ${visibleTabIds.includes(tab.id) ? "visible" : ""} ${tab.id === activeTabId ? "active" : ""} ${dropIndex === index ? "drop-before" : ""}`} role="tab" aria-selected={tab.id === activeTabId} draggable onDragStart={(event) => {
+      {tabs.map((tab, index) => {
+        const entrySignal = entryRuleSignals[tab.id];
+        const entrySignalLabel = entrySignal?.sides.length === 2 ? "L/S" : entrySignal?.sides[0] === "long" ? "L" : "S";
+        return <div key={tab.id} className={`chart-tab ${visibleTabIds.includes(tab.id) ? "visible" : ""} ${tab.id === activeTabId ? "active" : ""} ${dropIndex === index ? "drop-before" : ""} ${entrySignal?.pulsing ? "entry-rule-pulsing" : ""}`} role="tab" aria-selected={tab.id === activeTabId} draggable onDragStart={(event) => {
         draggedRef.current = tab.id;
         droppedRef.current = false;
         event.dataTransfer.effectAllowed = "move";
@@ -2491,14 +2682,15 @@ function ChartTabStrip({ tabs, activeTabId, visibleTabIds, totalTabs, windowId, 
         droppedRef.current = false;
         setDropIndex(undefined);
       }}>
-        <button className="chart-tab-label" aria-label={`${tab.symbol.symbol} ${tab.timeframe} chart${ema200Positions[tab.id] ? `, price ${ema200Positions[tab.id]} EMA 200` : ""}`} tabIndex={tab.id === activeTabId ? 0 : -1} onClick={() => onSelect(tab.id)} onKeyDown={(event) => {
+        <button className="chart-tab-label" aria-label={`${tab.symbol.symbol} ${tab.timeframe} chart${ema200Positions[tab.id] ? `, price ${ema200Positions[tab.id]} EMA 200` : ""}${entrySignal ? `, ${entrySignal.sides.map((side) => side === "long" ? "Long" : "Short").join(" and ")} entry allowed` : ""}`} tabIndex={tab.id === activeTabId ? 0 : -1} onClick={() => onSelect(tab.id)} onKeyDown={(event) => {
           const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
           if (!direction) return;
           event.preventDefault();
           onSelect(tabs[(index + direction + tabs.length) % tabs.length].id);
-        }}><strong>{tab.symbol.symbol}</strong><span>·</span><span>{tab.timeframe}</span>{visibleTabIds.includes(tab.id) && <span className="chart-tab-visible-dot" aria-label="Shown in split layout" title="Shown in split layout" />}{ema200Positions[tab.id] && <span className={`chart-tab-ema-dot ${ema200Positions[tab.id]}`} role="img" aria-label={`Price ${ema200Positions[tab.id]} EMA 200`} title={`Price ${ema200Positions[tab.id]} EMA 200`} />}</button>
+        }}><strong>{tab.symbol.symbol}</strong><span>·</span><span>{tab.timeframe}</span>{visibleTabIds.includes(tab.id) && <span className="chart-tab-visible-dot" aria-label="Shown in split layout" title="Shown in split layout" />}{ema200Positions[tab.id] && <span className={`chart-tab-ema-dot ${ema200Positions[tab.id]}`} role="img" aria-label={`Price ${ema200Positions[tab.id]} EMA 200`} title={`Price ${ema200Positions[tab.id]} EMA 200`} />}{entrySignal && <span className={`chart-tab-entry-badge ${entrySignal.sides.length === 2 ? "both" : entrySignal.sides[0]}`} role="status" title={`${entrySignal.sides.map((side) => side === "long" ? "Long" : "Short").join(" and ")} entry allowed`}>{entrySignalLabel}</span>}</button>
         <button className="chart-tab-close" aria-label={`Close ${tab.symbol.symbol} ${tab.timeframe} chart`} disabled={totalTabs === 1} onClick={() => onClose(tab.id)}><X size={12} /></button>
-      </div>)}
+      </div>;
+      })}
       {dropIndex === tabs.length && <span className="tab-drop-end" />}
     </div>
     <button className="chart-tab-add" aria-label="Add chart tab" title={totalTabs >= MAX_CHART_TABS ? `Maximum ${MAX_CHART_TABS} tabs` : "Add chart tab"} disabled={totalTabs >= MAX_CHART_TABS} onClick={onAdd}><Plus size={15} /></button>

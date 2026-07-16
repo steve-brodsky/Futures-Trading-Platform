@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import { AlertCircle, Check, GitBranch, Plus, Trash2 } from "lucide-react";
 import type {
-  Bar, EntryRuleCondition, EntryRuleEmaCrossCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand,
-  EntryRules, EntryRuleSide, Quote,
+  AlertDurationSeconds, AlertSound, Bar, EntryRuleAlertConfig, EntryRuleCondition, EntryRuleEmaCrossCondition,
+  EntryRuleGroup, EntryRuleNode, EntryRuleOperand, EntryRules, EntryRuleSide, Quote,
 } from "../types";
+import { playAlertSound, prepareAlertAudio } from "../lib/alertAudio";
+import { ALERT_DURATIONS, ALERT_SOUNDS } from "../lib/emaAlerts";
 import {
   emptyEntryRuleGroup, evaluateEntryRules, MAX_ENTRY_RULE_DEPTH, MAX_ENTRY_RULE_NODES,
   MAX_EMA_CROSS_LOOKBACK, MAX_EMA_CROSS_PERIOD, MAX_MOVING_AVERAGE_PERIOD,
@@ -12,9 +14,10 @@ import {
 
 interface Props {
   rules: EntryRules;
+  alerts: EntryRuleAlertConfig;
   bars: Bar[];
   quote: Quote;
-  onSave: (rules: EntryRules) => void;
+  onSave: (rules: EntryRules, alerts: EntryRuleAlertConfig) => void;
   onClose: () => void;
 }
 
@@ -165,15 +168,25 @@ function GroupEditor({ group, root, depth, nodeResults, onChange, onRemove }: Gr
   </div>;
 }
 
-export function EntryRulesBuilder({ rules, bars, quote, onSave, onClose }: Props) {
+export function EntryRulesBuilder({ rules, alerts, bars, quote, onSave, onClose }: Props) {
   const [draft, setDraft] = useState<EntryRules>(() => structuredClone(rules));
+  const [draftAlerts, setDraftAlerts] = useState<EntryRuleAlertConfig>(() => structuredClone(alerts));
   const evaluation = useMemo(() => evaluateEntryRules(draft, bars, quote), [draft, bars, quote]);
   const error = validationError(draft.long) ?? validationError(draft.short)
     ?? (countNodes(draft.long) > MAX_ENTRY_RULE_NODES || countNodes(draft.short) > MAX_ENTRY_RULE_NODES ? `A direction can contain up to ${MAX_ENTRY_RULE_NODES} nodes.` : null);
 
-  const setSide = (side: EntryRuleSide, group: EntryRuleGroup) => setDraft((current) => ({ ...current, [side]: group }));
+  const setSide = (side: EntryRuleSide, group: EntryRuleGroup) => {
+    setDraft((current) => ({ ...current, [side]: group }));
+    if (!group.children.length) setDraftAlerts((current) => ({
+      ...current,
+      [side]: { ...current[side], enabled: false },
+    }));
+  };
+  const setAlert = (side: EntryRuleSide, patch: Partial<EntryRuleAlertConfig[EntryRuleSide]>) => {
+    setDraftAlerts((current) => ({ ...current, [side]: { ...current[side], ...patch } }));
+  };
   return <div className="entry-rules-builder">
-    <p className="entry-rules-intro">Rules use the active chart timeframe and live ask for Long or bid for Short. Empty directions stay unrestricted.</p>
+    <p className="entry-rules-intro">Rules use each open chart's timeframe and live ask for Long or bid for Short. Empty directions stay unrestricted.</p>
     {(["long", "short"] as const).map((side) => {
       const result = evaluation[side];
       return <section className={`entry-rule-side ${side}`} key={side}>
@@ -183,13 +196,22 @@ export function EntryRulesBuilder({ rules, bars, quote, onSave, onClose }: Props
           <button className="entry-rule-clear" onClick={() => setSide(side, emptyEntryRuleGroup(side))}>Clear</button>
         </header>
         <p className="entry-rule-reason">{result.reason}</p>
+        <div className={`entry-rule-alert-controls ${draftAlerts[side].enabled ? "enabled" : ""}`}>
+          <button type="button" className="entry-rule-alert-toggle" disabled={!draft[side].children.length} aria-pressed={draftAlerts[side].enabled} onClick={() => {
+            prepareAlertAudio();
+            setAlert(side, { enabled: !draftAlerts[side].enabled });
+          }}><span><strong>Alert when allowed</strong><small>{draft[side].children.length ? `Monitor ${side === "long" ? "Long" : "Short"} across every open chart` : "Add a rule condition to enable alerts"}</small></span><span className={`toggle ${draftAlerts[side].enabled ? "on" : ""}`} /></button>
+          <label><span>Sound</span><select aria-label={`${side} entry alert sound`} disabled={!draftAlerts[side].enabled} value={draftAlerts[side].sound} onChange={(event) => setAlert(side, { sound: event.target.value as AlertSound })}>{ALERT_SOUNDS.map((sound) => <option key={sound.value} value={sound.value}>{sound.label}</option>)}</select></label>
+          <label><span>Duration</span><select aria-label={`${side} entry alert duration`} disabled={!draftAlerts[side].enabled} value={draftAlerts[side].durationSeconds} onChange={(event) => setAlert(side, { durationSeconds: Number(event.target.value) as AlertDurationSeconds })}>{ALERT_DURATIONS.map((duration) => <option key={duration} value={duration}>{duration}s</option>)}</select></label>
+          <button type="button" className="entry-rule-alert-preview" disabled={!draftAlerts[side].enabled} onClick={() => playAlertSound(draftAlerts[side].sound, draftAlerts[side].durationSeconds)}>Preview</button>
+        </div>
         <GroupEditor group={draft[side]} root={draft[side]} depth={1} nodeResults={result.nodeResults} onChange={(group) => setSide(side, group)} />
       </section>;
     })}
     {error && <p className="entry-rule-validation"><AlertCircle size={14} />{error}</p>}
     <div className="entry-rule-actions">
       <button className="secondary-button" onClick={onClose}>Cancel</button>
-      <button className="primary-button" disabled={Boolean(error)} onClick={() => onSave(structuredClone(draft))}>Save rules</button>
+      <button className="primary-button" disabled={Boolean(error)} onClick={() => onSave(structuredClone(draft), structuredClone(draftAlerts))}>Save rules</button>
     </div>
   </div>;
 }

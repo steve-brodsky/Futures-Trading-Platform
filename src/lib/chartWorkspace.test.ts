@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
+import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAX_CHART_TABS, moveTab, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
@@ -11,7 +12,7 @@ const fallback: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: { symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
-  watchlist: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(),
+  watchlist: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
   settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
@@ -302,10 +303,16 @@ describe("chart workspace", () => {
     expect(manual.tabs[0].tradeContract).toBe("MESZ26");
   });
 
-  it("defaults legacy workspaces to unrestricted entry rules", () => {
-    const result = normalizeChartWorkspace({ ...fallback, entryRules: undefined }, fallback);
+  it("defaults legacy workspaces to unrestricted entry rules and disabled alerts", () => {
+    const result = normalizeChartWorkspace({ ...fallback, entryRules: undefined, entryRuleAlerts: undefined }, fallback);
     expect(result.entryRules.long.children).toEqual([]);
     expect(result.entryRules.short.children).toEqual([]);
+    expect(result.entryRuleAlerts).toEqual(defaultEntryRuleAlerts());
+    const inconsistent = normalizeChartWorkspace({
+      ...fallback,
+      entryRuleAlerts: { ...defaultEntryRuleAlerts(), long: { enabled: true, sound: "bell", durationSeconds: 5 } },
+    }, fallback);
+    expect(inconsistent.entryRuleAlerts.long).toEqual({ enabled: false, sound: "bell", durationSeconds: 5 });
   });
 
   it("stabilizes unchanged EMA cross rules and detects changes to their settings", () => {
@@ -320,6 +327,7 @@ describe("chart workspace", () => {
     const current = normalizeChartWorkspace({ ...fallback, entryRules }, fallback);
     const unchanged = stabilizeChartWorkspace(current, normalizeChartWorkspace({ ...current }, fallback));
     expect(unchanged.entryRules).toBe(current.entryRules);
+    expect(unchanged.entryRuleAlerts).toBe(current.entryRuleAlerts);
 
     const changed = normalizeChartWorkspace({
       ...current,

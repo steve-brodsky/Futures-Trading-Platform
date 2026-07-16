@@ -205,6 +205,8 @@ export interface EntryRules {
   short: EntryRuleGroup;
 }
 
+export type EntryRuleAlertConfig = Record<EntryRuleSide, TimeframeAlertConfig>;
+
 export interface EntryRuleResult {
   allowed: boolean;
   status: "allowed" | "blocked" | "waiting";
@@ -310,6 +312,7 @@ export interface WorkspaceState {
   selectedAccountId?: string;
   confirmOrders: boolean;
   entryRules: EntryRules;
+  entryRuleAlerts: EntryRuleAlertConfig;
   settings: WorkspaceSettings;
 }
 

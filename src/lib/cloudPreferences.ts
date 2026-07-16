@@ -8,6 +8,7 @@ import type {
 } from "../types";
 import { normalizeChartWorkspace } from "./chartWorkspace";
 import { normalizeEma200Alert } from "./emaAlerts";
+import { normalizeEntryRuleAlerts } from "./entryRuleAlerts";
 
 export const CLOUD_PREFERENCE_CATEGORIES: CloudPreferenceCategory[] = [
   "chart_workspace",
@@ -59,6 +60,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       },
       alerts: {
         byTabId: Object.fromEntries(workspace.tabs.map((tab) => [tab.id, tab.ema200Alert])),
+        entryRules: workspace.entryRuleAlerts,
       },
       drawings: { bySymbol: workspace.drawings },
       watchlist: { symbols: [...workspace.watchlist] },
@@ -144,6 +146,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     drawings: object(drawings?.bySymbol) as unknown as WorkspaceState["drawings"] ?? current.drawings,
     watchlist: Array.isArray(watchlist?.symbols) ? watchlist.symbols.filter((item): item is string => typeof item === "string") : current.watchlist,
     entryRules: object(orderEntry?.entryRules) as unknown as WorkspaceState["entryRules"] ?? current.entryRules,
+    entryRuleAlerts: normalizeEntryRuleAlerts(alerts?.entryRules ?? current.entryRuleAlerts),
     settings: {
       chartLabels: { ...current.settings.chartLabels, ...chartDisplay },
       orderTicket: { ...current.settings.orderTicket, ...object(orderEntry?.orderTicket) },

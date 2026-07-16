@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultEntryRules } from "./entryRules";
+import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay } from "./cloudPreferences";
 import { defaultIndicators } from "./workspace";
 
@@ -32,6 +33,7 @@ function workspace(): WorkspaceState {
     selectedAccountId: "secret-account-id",
     confirmOrders: false,
     entryRules: defaultEntryRules(),
+    entryRuleAlerts: defaultEntryRuleAlerts(),
     settings: {
       chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 12 },
       orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", riskAmount: 150 },
@@ -47,6 +49,7 @@ describe("cloud preferences", () => {
     const serialized = JSON.stringify(profile);
     expect(serialized).toContain("MESU26");
     expect(serialized).toContain("commissionPerContractSide");
+    expect(profile.categories.alerts.entryRules).toEqual(original.entryRuleAlerts);
     expect(serialized).not.toContain("secret-account-id");
     expect(serialized).not.toContain("confirmOrders");
     expect(serialized).not.toContain('"environment"');
@@ -73,12 +76,18 @@ describe("cloud preferences", () => {
       selectedAccountId: "other-account",
       confirmOrders: true,
       watchlist: ["MNQU26"],
+      entryRules: {
+        ...local.entryRules,
+        long: { ...local.entryRules.long, children: [{ id: "price", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } }] },
+      },
+      entryRuleAlerts: { ...local.entryRuleAlerts, long: { enabled: true, sound: "bell", durationSeconds: 5 } },
       windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", splitRatios: { "two-columns": [0.7] }, detached: false, x: 999, y: 999 }],
       settings: { ...local.settings, journal: { commissionPerContractSide: 1.25 } },
     });
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.watchlist).toEqual(["MNQU26"]);
     expect(merged.settings.journal.commissionPerContractSide).toBe(1.25);
+    expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "bell", durationSeconds: 5 });
     expect(merged.environment).toBe("live");
     expect(merged.selectedAccountId).toBe("secret-account-id");
     expect(merged.confirmOrders).toBe(false);
@@ -92,10 +101,16 @@ describe("cloud preferences", () => {
     profile.categories.chart_display.fontSize = 900;
     profile.categories.journal_fees.commissionPerContractSide = -20;
     profile.categories.watchlist.symbols = ["mesu26", 123, "mesu26"];
+    profile.categories.order_entry.entryRules = {
+      ...local.entryRules,
+      long: { ...local.entryRules.long, children: [{ id: "price", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } }] },
+    };
+    profile.categories.alerts.entryRules = { long: { enabled: true, sound: "invalid", durationSeconds: 99 } };
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.settings.chartLabels.fontSize).toBe(16);
     expect(merged.settings.journal.commissionPerContractSide).toBe(0);
     expect(merged.watchlist).toEqual(["MESU26"]);
+    expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "chime", durationSeconds: 3 });
   });
 
   it("caps automatic retry backoff at one minute", () => {

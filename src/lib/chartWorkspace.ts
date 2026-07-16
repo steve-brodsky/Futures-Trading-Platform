@@ -1,5 +1,6 @@
 import type { ChartLayout, ChartSplitRatios, ChartTabState, ChartWindowState, Drawing, EntryRuleNode, WorkspaceState } from "../types";
 import { normalizeEntryRules } from "./entryRules";
+import { normalizeEntryRuleAlerts, sameEntryRuleAlerts } from "./entryRuleAlerts";
 import { cloneEma200Alert, normalizeEma200Alert, sameEma200Alert } from "./emaAlerts";
 import { quoteSubscriptionSymbols } from "./futuresContracts";
 import { normalizeWatchlist } from "./watchlist";
@@ -302,6 +303,11 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   const savedChartLabels = value.settings?.chartLabels;
   const savedOrderTicket = value.settings?.orderTicket;
   const savedJournal = value.settings?.journal;
+  const entryRules = normalizeEntryRules(value.entryRules);
+  const entryRuleAlerts = normalizeEntryRuleAlerts(value.entryRuleAlerts);
+  (["long", "short"] as const).forEach((side) => {
+    if (!entryRules[side].children.length) entryRuleAlerts[side].enabled = false;
+  });
   const watchlist = normalizeWatchlist(
     Array.isArray(value.watchlist) ? value.watchlist : fallback.watchlist,
     quoteSubscriptionSymbols({ tabs, watchlist: [] }),
@@ -319,7 +325,8 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     bottomPanelHeight: value.bottomPanelHeight ?? fallback.bottomPanelHeight,
     selectedAccountId: value.selectedAccountId ?? fallback.selectedAccountId,
     confirmOrders: value.confirmOrders ?? true,
-    entryRules: normalizeEntryRules(value.entryRules),
+    entryRules,
+    entryRuleAlerts,
     settings: {
       chartLabels: {
         showEma200TabDots: typeof savedChartLabels?.showEma200TabDots === "boolean"
@@ -442,6 +449,9 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && sameEntryRuleNode(current.entryRules.short, incoming.entryRules.short)
     ? current.entryRules
     : incoming.entryRules;
+  const entryRuleAlerts = sameEntryRuleAlerts(current.entryRuleAlerts, incoming.entryRuleAlerts)
+    ? current.entryRuleAlerts
+    : incoming.entryRuleAlerts;
   const settings = current.settings.chartLabels.showEma200TabDots === incoming.settings.chartLabels.showEma200TabDots
     && current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
     && current.settings.chartLabels.showRMultiple === incoming.settings.chartLabels.showRMultiple
@@ -465,6 +475,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
       ? current.drawings
       : drawings,
     entryRules,
+    entryRuleAlerts,
     settings,
   };
 }

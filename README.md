@@ -35,6 +35,7 @@ Northstar Trader is a private futures charting and order-entry desktop client fo
 - Automatic or manually selected concrete trade contract when charting a continuous futures symbol. Continuous symbols themselves are never sent as order symbols.
 - Optional order-review step using TradeStation's confirmation endpoint, including commission and initial-margin estimates when supplied by the API.
 - Long and short entry rules built from nested AND/OR comparisons between market price, SMA, and EMA values.
+- Per-side entry-rule alerts across every open chart, with sound, toast/log output, and persistent Long/Short tab badges.
 - Position and protective-order lines on the chart, including dollar and R-multiple labels.
 - Drag-to-adjust bracket take-profit and stop-loss orders with optimistic UI rollback if TradeStation rejects the replacement.
 - Position close workflow that cancels working exit orders, waits for cancellation confirmation, refreshes the live quantity, and then submits the flattening market order.
