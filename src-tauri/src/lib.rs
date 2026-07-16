@@ -1614,6 +1614,28 @@ fn get_journal_trade(
     journal::trade(&state.db_path, &trade_id)
 }
 
+#[tauri::command]
+async fn save_journal_entry_screenshot(
+    input: journal::JournalScreenshotInput,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalScreenshotMetadata, AppError> {
+    let result = journal::save_entry_screenshot(&state.db_path, input).await?;
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"entry-screenshot"}),
+    );
+    Ok(result)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_journal_entry_screenshot(
+    trade_id: String,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalScreenshotImage, AppError> {
+    journal::entry_screenshot(&state.db_path, &trade_id).await
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn update_journal_annotation(
     trade_id: String,
@@ -2370,6 +2392,8 @@ pub fn run() {
             get_journal_month,
             get_journal_day,
             get_journal_trade,
+            save_journal_entry_screenshot,
+            get_journal_entry_screenshot,
             update_journal_annotation,
             ingest_journal_orders
         ])

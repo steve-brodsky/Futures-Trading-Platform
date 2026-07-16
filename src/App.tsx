@@ -10,7 +10,7 @@ import {
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
   Wifi, X, Zap,
 } from "lucide-react";
-import { TradingChart } from "./components/TradingChart";
+import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { api } from "./lib/bridge";
@@ -25,6 +25,7 @@ import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, qu
 import { quoteDayChangePercent } from "./lib/quotes";
 import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
 import { calculateSwingStop } from "./lib/swingStop";
+import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, ENTRY_SCREENSHOT_QUEUE_LIMIT } from "./lib/entryScreenshot";
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
@@ -108,6 +109,21 @@ interface BarSubscription {
 type ReviewState =
   | { kind: "entry"; draft: OrderDraft; preview: OrderPreview; sourceTabId: string; chartSymbol: string }
   | { kind: "close-position"; draft: OrderDraft; preview: OrderPreview; positionId: string };
+
+interface EntryScreenshotCandidate {
+  id: string;
+  sourceTabId: string;
+  chartSymbol: string;
+  tradeSymbol: string;
+  accountId: string;
+  environment: TradingEnvironment;
+  brokerOrderId?: string;
+  acceptedAt?: number;
+  positionSeen?: boolean;
+  capture?: TradingChartCapture;
+  attempts: number;
+  lastError?: string;
+}
 
 function activeProtectionIds(expirations: Map<string, number>, now = Date.now()): Set<string> {
   const active = new Set<string>();
@@ -269,6 +285,13 @@ function TradingApp() {
   const vwapSymbolsRef = useRef(new Set<string>());
   const vwapRangeTimersRef = useRef(new Map<string, number>());
   const vwapDataEpochRef = useRef("");
+  const chartCaptureRef = useRef<TradingChartHandle>(null);
+  const [entryScreenshotCandidates, setEntryScreenshotCandidates] = useState<EntryScreenshotCandidate[]>([]);
+  const entryScreenshotCandidatesRef = useRef<EntryScreenshotCandidate[]>([]);
+  const screenshotCapturingRef = useRef(new Set<string>());
+  const screenshotUploadingRef = useRef(new Set<string>());
+  const screenshotRetryTimersRef = useRef(new Map<string, number>());
+  const retryEntryScreenshotsRef = useRef<() => void>(() => undefined);
   const environmentRef = useRef(environment);
   const stripBoundsRef = useRef(new Map<string, StripBounds>());
   const viewRangesRef = useRef(new Map<string, { from: number; to: number }>());
@@ -324,6 +347,7 @@ function TradingApp() {
   alertDesiredRef.current = new Set(alertMarkets.map((market) => market.key));
   vwapSymbolsRef.current = new Set(vwapSymbolsKey.split("|").filter(Boolean));
   vwapDataEpochRef.current = `${environment}:${authEpoch}`;
+  entryScreenshotCandidatesRef.current = entryScreenshotCandidates;
   environmentRef.current = environment;
   const activeTradeQuote = activeTradeSymbol
     ? quotes[activeTradeSymbol] ?? (api.isNative
@@ -638,6 +662,9 @@ function TradingApp() {
     listen<{ reason?: string }>("journal-updated", ({ payload }) => {
       if (payload.reason === "cloud-configured" || payload.reason === "cloud-disconnected") {
         setPreferenceSyncEpoch((value) => value + 1);
+      }
+      if (payload.reason === "cloud-configured" || payload.reason === "cloud-sync" || payload.reason === "outbox-flushed") {
+        retryEntryScreenshotsRef.current();
       }
     }).then((unlisten) => cleanups.push(unlisten));
     return () => {
@@ -1349,6 +1376,137 @@ function TradingApp() {
     window.setTimeout(() => setToast(null), 3200);
   }
 
+  function screenshotNotification(title: string, text: string, level: ActivityNotification["level"] = "warning", symbol?: string) {
+    setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), symbol, title, text, level }, ...current].slice(0, 250));
+  }
+
+  function replaceScreenshotCandidate(id: string, update: (candidate: EntryScreenshotCandidate) => EntryScreenshotCandidate) {
+    const next = entryScreenshotCandidatesRef.current.map((candidate) => candidate.id === id ? update(candidate) : candidate);
+    entryScreenshotCandidatesRef.current = next;
+    setEntryScreenshotCandidates(next);
+  }
+
+  function removeScreenshotCandidate(id: string) {
+    const timer = screenshotRetryTimersRef.current.get(id);
+    if (timer != null) window.clearTimeout(timer);
+    screenshotRetryTimersRef.current.delete(id);
+    screenshotCapturingRef.current.delete(id);
+    screenshotUploadingRef.current.delete(id);
+    const next = entryScreenshotCandidatesRef.current.filter((candidate) => candidate.id !== id);
+    entryScreenshotCandidatesRef.current = next;
+    setEntryScreenshotCandidates(next);
+  }
+
+  function armEntryScreenshot(draft: OrderDraft, sourceTabId: string, chartSymbol: string): string | undefined {
+    if (!canArmEntryScreenshot({ environment, accountId: draft.accountId, tradeSymbol: draft.symbol }, positions, entryScreenshotCandidatesRef.current)) return undefined;
+    if (entryScreenshotCandidatesRef.current.length >= ENTRY_SCREENSHOT_QUEUE_LIMIT) {
+      screenshotNotification("Entry chart not queued", "The in-memory screenshot queue is full. The order will continue without blocking.", "error", draft.symbol);
+      return undefined;
+    }
+    const id = crypto.randomUUID();
+    const candidate: EntryScreenshotCandidate = { id, sourceTabId, chartSymbol, tradeSymbol: draft.symbol, accountId: draft.accountId, environment, attempts: 0 };
+    const next = [...entryScreenshotCandidatesRef.current, candidate];
+    entryScreenshotCandidatesRef.current = next;
+    setEntryScreenshotCandidates(next);
+    return id;
+  }
+
+  function acceptEntryScreenshot(id: string | undefined, brokerOrderId: string) {
+    if (!id) return;
+    replaceScreenshotCandidate(id, (candidate) => ({ ...candidate, brokerOrderId, acceptedAt: Date.now() }));
+  }
+
+  async function uploadEntryScreenshot(id: string) {
+    const candidate = entryScreenshotCandidatesRef.current.find((item) => item.id === id);
+    if (!candidate?.capture || !candidate.brokerOrderId || screenshotUploadingRef.current.has(id)) return;
+    screenshotUploadingRef.current.add(id);
+    try {
+      await api.saveJournalEntryScreenshot({
+        brokerOrderId: candidate.brokerOrderId,
+        environment: candidate.environment,
+        accountId: candidate.accountId,
+        symbol: candidate.tradeSymbol,
+        capturedAt: candidate.capture.capturedAt,
+        width: candidate.capture.width,
+        height: candidate.capture.height,
+        dataUrl: candidate.capture.dataUrl,
+      });
+      removeScreenshotCandidate(id);
+      screenshotNotification("Entry chart saved", "The chart is available in this trade's journal details.", "info", candidate.tradeSymbol);
+    } catch (error) {
+      const message = String(error);
+      const attempts = candidate.attempts + 1;
+      replaceScreenshotCandidate(id, (current) => ({ ...current, attempts, lastError: message }));
+      const delay = entryScreenshotRetryDelay(attempts);
+      if (delay != null) {
+        const previous = screenshotRetryTimersRef.current.get(id);
+        if (previous != null) window.clearTimeout(previous);
+        screenshotRetryTimersRef.current.set(id, window.setTimeout(() => {
+          screenshotRetryTimersRef.current.delete(id);
+          void uploadEntryScreenshot(id);
+        }, delay));
+      }
+      if (attempts === 1) screenshotNotification("Entry chart waiting for cloud", `${message}. The order was not affected and the image will be retried during this session.`, "warning", candidate.tradeSymbol);
+      if (attempts === 4) screenshotNotification("Entry chart not uploaded", "Automatic retries are exhausted. The image remains in memory until this app session ends and will retry on focus, cloud reconnect, or manual sync.", "error", candidate.tradeSymbol);
+    } finally {
+      screenshotUploadingRef.current.delete(id);
+    }
+  }
+
+  function retryEntryScreenshots() {
+    entryScreenshotCandidatesRef.current.filter((candidate) => candidate.capture && candidate.brokerOrderId).forEach((candidate) => { void uploadEntryScreenshot(candidate.id); });
+  }
+  retryEntryScreenshotsRef.current = retryEntryScreenshots;
+
+  useEffect(() => {
+    const retry = () => retryEntryScreenshotsRef.current();
+    window.addEventListener("focus", retry);
+    return () => {
+      window.removeEventListener("focus", retry);
+      screenshotRetryTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      screenshotRetryTimersRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    entryScreenshotCandidates.forEach((candidate) => {
+      const sourceTab = workspace.tabs.find((tab) => tab.id === candidate.sourceTabId);
+      if (!sourceTab || sourceTab.symbol.symbol !== candidate.chartSymbol || resolveTradeSymbol(sourceTab) !== candidate.tradeSymbol) {
+        screenshotNotification("Entry chart missed", "The originating chart was closed or changed before its trade lines could be captured.", "warning", candidate.tradeSymbol);
+        removeScreenshotCandidate(candidate.id);
+        return;
+      }
+      if (candidate.accountId !== selectedAccount?.id || candidate.environment !== environment) return;
+      if (candidate.capture || !candidate.brokerOrderId || candidate.sourceTabId !== activeTab.id || activeTradeSymbol !== candidate.tradeSymbol) return;
+      const hasPosition = hasOpenPosition(candidate.tradeSymbol, positions);
+      if (hasPosition && !candidate.positionSeen) {
+        replaceScreenshotCandidate(candidate.id, (current) => ({ ...current, positionSeen: true }));
+      }
+      const ready = entryScreenshotLinesReady(candidate.tradeSymbol, positions, orders);
+      if (!ready) {
+        if (!hasPosition && candidate.positionSeen) {
+          screenshotNotification("Entry chart missed", "The position closed before all three trade lines could be captured.", "warning", candidate.tradeSymbol);
+          removeScreenshotCandidate(candidate.id);
+        } else if (!hasPosition && candidate.acceptedAt != null && currentTime - candidate.acceptedAt > 30_000) {
+          screenshotNotification("Entry chart missed", "The position closed or never reached the chart before all three trade lines were available.", "warning", candidate.tradeSymbol);
+          removeScreenshotCandidate(candidate.id);
+        }
+        return;
+      }
+      if (!chartCaptureRef.current || screenshotCapturingRef.current.has(candidate.id)) return;
+      screenshotCapturingRef.current.add(candidate.id);
+      void chartCaptureRef.current.captureEntryScreenshot().then((capture) => {
+        replaceScreenshotCandidate(candidate.id, (current) => ({ ...current, capture }));
+        void uploadEntryScreenshot(candidate.id);
+      }).catch((error) => {
+        if (!String(error).includes("Waiting for the position")) {
+          screenshotNotification("Entry chart capture failed", `${String(error)} The order was not affected.`, "error", candidate.tradeSymbol);
+          removeScreenshotCandidate(candidate.id);
+        }
+      }).finally(() => screenshotCapturingRef.current.delete(candidate.id));
+    });
+  }, [entryScreenshotCandidates, workspace.tabs, activeTab.id, activeTradeSymbol, selectedAccount?.id, environment, positions, orders, currentTime]);
+
   function commitWorkspace(update: (current: WorkspaceState) => WorkspaceState) {
     setWorkspace((current) => {
       const next = currentWindowId === MAIN_WINDOW_ID
@@ -1811,15 +1969,21 @@ function TradingApp() {
     if (!eligibility.allowed) return showToast(`${draft.side} entry blocked: ${eligibility.reason}`);
     if (workspace.confirmOrders) return openReview(draft, sourceTabId, chartSymbol);
     if (!api.isNative) return showToast("Browser demo mode cannot place orders. Run the Tauri app to connect.");
+    const screenshotCandidateId = armEntryScreenshot(draft, sourceTabId, chartSymbol);
     setBusy(true);
     try {
       const update = await api.placeOrder(draft);
+      if (["Working", "Filled", "Pending"].includes(update.status)) acceptEntryScreenshot(screenshotCandidateId, update.id);
+      else if (screenshotCandidateId) removeScreenshotCandidate(screenshotCandidateId);
       recentOrderIdsRef.current.set(update.id, Date.now() + 15_000);
       setOrders((current) => upsertStreamOrder(current, update));
       brokerageRefreshRef.current(true);
       if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(draft.symbol);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
-    } catch (error) { showToast(String(error)); }
+    } catch (error) {
+      if (screenshotCandidateId) removeScreenshotCandidate(screenshotCandidateId);
+      showToast(String(error));
+    }
     finally { setBusy(false); }
   }
 
@@ -1946,16 +2110,22 @@ function TradingApp() {
     const side = review.draft.side === "Buy" ? "long" : "short";
     const eligibility = eligibilityForEntry(review.sourceTabId, review.chartSymbol, review.draft.symbol)[side];
     if (!eligibility.allowed) return showToast(`${review.draft.side} entry blocked: ${eligibility.reason}`);
+    const screenshotCandidateId = armEntryScreenshot(review.draft, review.sourceTabId, review.chartSymbol);
     setBusy(true);
     try {
       const update = await api.placeOrder(review.draft);
+      if (["Working", "Filled", "Pending"].includes(update.status)) acceptEntryScreenshot(screenshotCandidateId, update.id);
+      else if (screenshotCandidateId) removeScreenshotCandidate(screenshotCandidateId);
       recentOrderIdsRef.current.set(update.id, Date.now() + 15_000);
       setOrders((current) => upsertStreamOrder(current, update));
       brokerageRefreshRef.current(true);
       if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(review.draft.symbol);
       setReview(null);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
-    } catch (error) { showToast(String(error)); }
+    } catch (error) {
+      if (screenshotCandidateId) removeScreenshotCandidate(screenshotCandidateId);
+      showToast(String(error));
+    }
     finally { setBusy(false); }
   }
 
@@ -2064,7 +2234,7 @@ function TradingApp() {
         </div>
       </aside>
 
-      <TradingChart key={activeTab.id} bars={bars} vwapBars={vwapMarkets[activeTab.symbol.symbol]?.bars ?? []} kind={activeTab.chartKind} renkoSettings={activeTab.renkoSettings} pointAndFigureSettings={activeTab.pointAndFigureSettings} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} pointValue={activeTradeMeta?.pointValue ?? activeTab.symbol.pointValue} currentPrice={activeTradeQuote.last} projectedEntryPrice={activeOrderProjection ? projectedEntryPrice(activeOrderProjection) : undefined} chartLabelSettings={workspace.settings.chartLabels} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={editProjectedExit} onOrderProjectionRestore={restoreOrderProjection} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={requestVisibleVwap} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
+      <TradingChart ref={chartCaptureRef} key={activeTab.id} bars={bars} vwapBars={vwapMarkets[activeTab.symbol.symbol]?.bars ?? []} kind={activeTab.chartKind} renkoSettings={activeTab.renkoSettings} pointAndFigureSettings={activeTab.pointAndFigureSettings} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} pointValue={activeTradeMeta?.pointValue ?? activeTab.symbol.pointValue} currentPrice={activeTradeQuote.last} projectedEntryPrice={activeOrderProjection ? projectedEntryPrice(activeOrderProjection) : undefined} chartLabelSettings={workspace.settings.chartLabels} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={editProjectedExit} onOrderProjectionRestore={restoreOrderProjection} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={requestVisibleVwap} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
 
       {!isDetached && <aside className={`right-panel ${workspace.rightPanelOpen ? "open" : "collapsed"}`} aria-labelledby="order-panel-title">
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>

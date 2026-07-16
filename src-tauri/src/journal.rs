@@ -2,6 +2,7 @@ use crate::{
     models::{OrderDraft, OrderUpdate, SymbolMeta, TradingEnvironment},
     storage, AppError,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -178,6 +179,41 @@ pub struct JournalTrade {
     pub notes: String,
     pub tags: Vec<String>,
     pub events: Option<Vec<JournalEvent>>,
+    pub entry_screenshot: Option<JournalScreenshotMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalScreenshotMetadata {
+    pub trade_id: String,
+    pub captured_at: String,
+    pub width: u32,
+    pub height: u32,
+    pub content_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalScreenshotInput {
+    pub broker_order_id: String,
+    pub environment: TradingEnvironment,
+    pub account_id: String,
+    pub symbol: String,
+    pub captured_at: String,
+    pub width: u32,
+    pub height: u32,
+    pub data_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalScreenshotImage {
+    pub trade_id: String,
+    pub captured_at: String,
+    pub width: u32,
+    pub height: u32,
+    pub content_type: String,
+    pub data_url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -286,6 +322,15 @@ struct RemoteAnnotationRow {
     updated_at: String,
 }
 #[derive(Debug, Deserialize)]
+struct RemoteScreenshotRow {
+    trade_id: String,
+    object_path: String,
+    captured_at: String,
+    width: u32,
+    height: u32,
+    content_type: String,
+}
+#[derive(Debug, Deserialize)]
 struct RemoteEventRow {
     id: String,
     event_key: String,
@@ -326,6 +371,7 @@ pub fn init(path: &Path) -> Result<(), AppError> {
       CREATE TABLE IF NOT EXISTS journal_trades (id TEXT PRIMARY KEY, environment TEXT NOT NULL, account_id TEXT NOT NULL, symbol TEXT NOT NULL, direction TEXT NOT NULL, status TEXT NOT NULL, opened_at TEXT NOT NULL, closed_at TEXT, entry_quantity REAL NOT NULL DEFAULT 0, exit_quantity REAL NOT NULL DEFAULT 0, average_entry REAL NOT NULL DEFAULT 0, average_exit REAL, original_stop REAL, original_target REAL, planned_risk REAL, deployed_risk REAL, point_value REAL, gross_pnl REAL NOT NULL DEFAULT 0, fees REAL NOT NULL DEFAULT 0, net_pnl REAL NOT NULL DEFAULT 0, r_multiple REAL, risk_provenance TEXT NOT NULL DEFAULT 'unknown', updated_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS journal_trades_scope_time ON journal_trades(environment,account_id,opened_at);
       CREATE TABLE IF NOT EXISTS journal_annotations (trade_id TEXT PRIMARY KEY, notes TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS journal_screenshots (trade_id TEXT PRIMARY KEY, object_path TEXT NOT NULL UNIQUE, captured_at TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, content_type TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS journal_order_state (environment TEXT NOT NULL, account_id TEXT NOT NULL, order_id TEXT NOT NULL, filled_quantity REAL NOT NULL DEFAULT 0, commission REAL NOT NULL DEFAULT 0, PRIMARY KEY(environment,account_id,order_id));
       CREATE TABLE IF NOT EXISTS journal_protective_state (environment TEXT NOT NULL, account_id TEXT NOT NULL, order_id TEXT NOT NULL, order_type TEXT NOT NULL, last_price REAL NOT NULL, PRIMARY KEY(environment,account_id,order_id));
       CREATE TABLE IF NOT EXISTS journal_sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -1132,6 +1178,10 @@ pub fn repair_misclassified_close_campaigns(
             params![bad_id],
         )?;
         tx.execute(
+            "DELETE FROM journal_screenshots WHERE trade_id=?1",
+            params![bad_id],
+        )?;
+        tx.execute(
             "UPDATE journal_events SET trade_id=NULL WHERE trade_id=?1",
             params![bad_id],
         )?;
@@ -1183,6 +1233,10 @@ pub fn repair_mirrored_duplicate_trades(path: &Path) -> Result<usize, AppError> 
         )?;
         tx.execute(
             "DELETE FROM journal_annotations WHERE trade_id=?1",
+            params![trade_id],
+        )?;
+        tx.execute(
+            "DELETE FROM journal_screenshots WHERE trade_id=?1",
             params![trade_id],
         )?;
         tx.execute(
@@ -1259,6 +1313,7 @@ fn create_trade_from_fill(
         notes: String::new(),
         tags: vec![],
         events: None,
+        entry_screenshot: None,
     };
     save_trade(db, &trade)?;
     if let Some(intent) = intent.as_ref() {
@@ -1372,6 +1427,7 @@ fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JournalTrade> {
         notes: String::new(),
         tags: vec![],
         events: None,
+        entry_screenshot: None,
     })
 }
 
@@ -1407,6 +1463,19 @@ fn load_trades(path: &Path, scope: Option<&JournalScope>) -> Result<Vec<JournalT
             trade.notes = notes;
             trade.tags = serde_json::from_str(&tags).unwrap_or_default();
         }
+        trade.entry_screenshot = db
+            .query_row(
+                "SELECT captured_at,width,height,content_type FROM journal_screenshots WHERE trade_id=?1",
+                params![trade.id],
+                |row| Ok(JournalScreenshotMetadata {
+                    trade_id: trade.id.clone(),
+                    captured_at: row.get(0)?,
+                    width: row.get(1)?,
+                    height: row.get(2)?,
+                    content_type: row.get(3)?,
+                }),
+            )
+            .optional()?;
     }
     Ok(trades)
 }
@@ -1589,6 +1658,321 @@ pub fn update_annotation(
     Ok(())
 }
 
+const SCREENSHOT_BUCKET: &str = "trade-screenshots";
+const MAX_SCREENSHOT_BYTES: usize = 5 * 1024 * 1024;
+const MAX_SCREENSHOT_DIMENSION: u32 = 8192;
+
+fn screenshot_object_path(user_id: &str, trade_id: &str) -> String {
+    format!("{user_id}/{trade_id}/entry.png")
+}
+
+fn screenshot_metadata_from_row(
+    db: &Connection,
+    trade_id: &str,
+) -> Result<Option<(JournalScreenshotMetadata, String)>, AppError> {
+    db.query_row(
+        "SELECT captured_at,width,height,content_type,object_path FROM journal_screenshots WHERE trade_id=?1",
+        params![trade_id],
+        |row| Ok((JournalScreenshotMetadata {
+            trade_id: trade_id.into(),
+            captured_at: row.get(0)?,
+            width: row.get(1)?,
+            height: row.get(2)?,
+            content_type: row.get(3)?,
+        }, row.get(4)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn cache_screenshot_metadata(
+    path: &Path,
+    row: &RemoteScreenshotRow,
+) -> Result<JournalScreenshotMetadata, AppError> {
+    Connection::open(path)?.execute(
+        "INSERT INTO journal_screenshots(trade_id,object_path,captured_at,width,height,content_type) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(trade_id) DO UPDATE SET object_path=excluded.object_path,captured_at=excluded.captured_at,width=excluded.width,height=excluded.height,content_type=excluded.content_type",
+        params![row.trade_id,row.object_path,row.captured_at,row.width,row.height,row.content_type],
+    )?;
+    Ok(JournalScreenshotMetadata {
+        trade_id: row.trade_id.clone(),
+        captured_at: row.captured_at.clone(),
+        width: row.width,
+        height: row.height,
+        content_type: row.content_type.clone(),
+    })
+}
+
+fn storage_headers(
+    cfg: &CloudConfig,
+    token: &str,
+    content_type: &str,
+) -> Result<HeaderMap, AppError> {
+    let mut value = HeaderMap::new();
+    value.insert(
+        "apikey",
+        HeaderValue::from_str(&cfg.publishable_key)
+            .map_err(|error| AppError::Validation(error.to_string()))?,
+    );
+    value.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|error| AppError::Validation(error.to_string()))?,
+    );
+    value.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(content_type)
+            .map_err(|error| AppError::Validation(error.to_string()))?,
+    );
+    Ok(value)
+}
+
+async fn remote_screenshot(
+    client: &reqwest::Client,
+    cfg: &CloudConfig,
+    token: &str,
+    trade_id: &str,
+) -> Result<Option<RemoteScreenshotRow>, AppError> {
+    let response = client
+        .get(format!("{}/rest/v1/journal_screenshots", cfg.project_url))
+        .headers(headers(cfg, token, false)?)
+        .query(&[
+            (
+                "select",
+                "trade_id,object_path,captured_at,width,height,content_type".into(),
+            ),
+            ("trade_id", format!("eq.{trade_id}")),
+            ("limit", "1".into()),
+        ])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(AppError::Api(format!(
+            "Supabase screenshot lookup failed ({status}): {}. Apply the latest journal migration and retry",
+            response.text().await?
+        )));
+    }
+    Ok(response
+        .json::<Vec<RemoteScreenshotRow>>()
+        .await?
+        .into_iter()
+        .next())
+}
+
+fn validate_screenshot(input: &JournalScreenshotInput) -> Result<Vec<u8>, AppError> {
+    if DateTime::parse_from_rfc3339(&input.captured_at).is_err() {
+        return Err(AppError::Validation(
+            "Invalid screenshot capture time".into(),
+        ));
+    }
+    if input.width == 0
+        || input.height == 0
+        || input.width > MAX_SCREENSHOT_DIMENSION
+        || input.height > MAX_SCREENSHOT_DIMENSION
+    {
+        return Err(AppError::Validation("Invalid screenshot dimensions".into()));
+    }
+    let encoded = input
+        .data_url
+        .strip_prefix("data:image/png;base64,")
+        .ok_or_else(|| AppError::Validation("The entry chart must be a PNG image".into()))?;
+    if encoded.len() > (MAX_SCREENSHOT_BYTES * 4 / 3) + 8 {
+        return Err(AppError::Validation(
+            "The entry chart exceeds the 5 MB limit".into(),
+        ));
+    }
+    let bytes = BASE64
+        .decode(encoded)
+        .map_err(|_| AppError::Validation("The entry chart PNG is invalid".into()))?;
+    if bytes.len() > MAX_SCREENSHOT_BYTES {
+        return Err(AppError::Validation(
+            "The entry chart exceeds the 5 MB limit".into(),
+        ));
+    }
+    if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
+        return Err(AppError::Validation(
+            "The entry chart PNG is invalid".into(),
+        ));
+    }
+    let png_width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+    let png_height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+    if png_width != input.width || png_height != input.height {
+        return Err(AppError::Validation(
+            "The entry chart dimensions do not match the PNG".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn resolve_screenshot_trade(
+    path: &Path,
+    input: &JournalScreenshotInput,
+) -> Result<String, AppError> {
+    init(path)?;
+    let db = Connection::open(path)?;
+    let trade_id = db
+        .query_row(
+            "SELECT t.id FROM journal_events e JOIN journal_trades t ON t.id=e.trade_id WHERE e.broker_order_id=?1 AND e.trade_id IS NOT NULL AND t.environment=?2 AND t.account_id=?3 AND t.symbol=?4 ORDER BY e.occurred_at LIMIT 1",
+            params![input.broker_order_id,environment_key(&input.environment),input.account_id,input.symbol],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    trade_id.ok_or_else(|| {
+        AppError::Api("Entry chart trade is not ready; waiting for the opening fill".into())
+    })
+}
+
+pub async fn save_entry_screenshot(
+    path: &Path,
+    input: JournalScreenshotInput,
+) -> Result<JournalScreenshotMetadata, AppError> {
+    let bytes = validate_screenshot(&input)?;
+    let trade_id = resolve_screenshot_trade(path, &input)?;
+    if let Some((metadata, _)) = screenshot_metadata_from_row(&Connection::open(path)?, &trade_id)?
+    {
+        return Ok(metadata);
+    }
+    let cfg = config(path)?.ok_or_else(|| {
+        AppError::Api("Connect Trade Journal Cloud to save the entry chart".into())
+    })?;
+    let token = access_token(&cfg).await?;
+    let client = reqwest::Client::new();
+    if let Some(remote) = remote_screenshot(&client, &cfg, &token, &trade_id).await? {
+        if remote.object_path != screenshot_object_path(&cfg.user_id, &trade_id) {
+            return Err(AppError::Api(
+                "The entry chart object path is invalid".into(),
+            ));
+        }
+        return cache_screenshot_metadata(path, &remote);
+    }
+    let object_path = screenshot_object_path(&cfg.user_id, &trade_id);
+    let response = client
+        .post(format!(
+            "{}/storage/v1/object/{SCREENSHOT_BUCKET}/{object_path}",
+            cfg.project_url
+        ))
+        .headers(storage_headers(&cfg, &token, "image/png")?)
+        .header("x-upsert", "false")
+        .body(bytes)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(AppError::Api(format!(
+            "Entry chart upload failed ({status}): {}",
+            response.text().await?
+        )));
+    }
+    let row = json!({
+        "user_id": cfg.user_id.clone(),
+        "trade_id": trade_id.clone(),
+        "object_path": object_path.clone(),
+        "captured_at": input.captured_at.clone(),
+        "width": input.width,
+        "height": input.height,
+        "content_type": "image/png"
+    });
+    if let Err(error) = upload(
+        &client,
+        &cfg,
+        &token,
+        "journal_screenshots",
+        "user_id,trade_id",
+        vec![row],
+        true,
+    )
+    .await
+    {
+        let _ = client
+            .delete(format!(
+                "{}/storage/v1/object/{SCREENSHOT_BUCKET}",
+                cfg.project_url
+            ))
+            .headers(storage_headers(&cfg, &token, "application/json")?)
+            .json(&json!({"prefixes":[object_path]}))
+            .send()
+            .await;
+        return Err(error);
+    }
+    let remote = RemoteScreenshotRow {
+        trade_id,
+        object_path,
+        captured_at: input.captured_at,
+        width: input.width,
+        height: input.height,
+        content_type: "image/png".into(),
+    };
+    cache_screenshot_metadata(path, &remote)
+}
+
+pub async fn entry_screenshot(
+    path: &Path,
+    trade_id: &str,
+) -> Result<JournalScreenshotImage, AppError> {
+    init(path)?;
+    let cfg = config(path)?.ok_or_else(|| {
+        AppError::Api("Connect Trade Journal Cloud to load the entry chart".into())
+    })?;
+    let token = access_token(&cfg).await?;
+    let client = reqwest::Client::new();
+    let (metadata, object_path) =
+        match screenshot_metadata_from_row(&Connection::open(path)?, trade_id)? {
+            Some(value) => value,
+            None => {
+                let remote = remote_screenshot(&client, &cfg, &token, trade_id)
+                    .await?
+                    .ok_or_else(|| AppError::Validation("This trade has no entry chart".into()))?;
+                let object_path = remote.object_path.clone();
+                (cache_screenshot_metadata(path, &remote)?, object_path)
+            }
+        };
+    if object_path != screenshot_object_path(&cfg.user_id, trade_id) {
+        return Err(AppError::Api(
+            "The entry chart object path is invalid".into(),
+        ));
+    }
+    let response = client
+        .get(format!(
+            "{}/storage/v1/object/authenticated/{SCREENSHOT_BUCKET}/{object_path}",
+            cfg.project_url
+        ))
+        .headers(storage_headers(&cfg, &token, "application/octet-stream")?)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(AppError::Api(format!(
+            "Entry chart download failed ({status})"
+        )));
+    }
+    let bytes = response.bytes().await?;
+    if bytes.len() > MAX_SCREENSHOT_BYTES
+        || bytes.len() < 24
+        || &bytes[..8] != b"\x89PNG\r\n\x1a\n"
+        || &bytes[12..16] != b"IHDR"
+    {
+        return Err(AppError::Api("The stored entry chart is invalid".into()));
+    }
+    let png_width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+    let png_height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+    if metadata.content_type != "image/png"
+        || png_width != metadata.width
+        || png_height != metadata.height
+    {
+        return Err(AppError::Api(
+            "The stored entry chart metadata is invalid".into(),
+        ));
+    }
+    Ok(JournalScreenshotImage {
+        trade_id: metadata.trade_id,
+        captured_at: metadata.captured_at,
+        width: metadata.width,
+        height: metadata.height,
+        content_type: metadata.content_type,
+        data_url: format!("data:image/png;base64,{}", BASE64.encode(bytes)),
+    })
+}
+
 fn config(path: &Path) -> Result<Option<CloudConfig>, AppError> {
     init(path)?;
     let db = Connection::open(path)?;
@@ -1676,6 +2060,10 @@ fn purge_before_record_from(path: &Path, cutoff: &str) -> Result<(), AppError> {
     let mut db = Connection::open(path)?;
     let tx = db.transaction()?;
     tx.execute(
+        "DELETE FROM journal_screenshots WHERE trade_id IN (SELECT id FROM journal_trades WHERE julianday(opened_at)<julianday(?1))",
+        params![cutoff],
+    )?;
+    tx.execute(
         "DELETE FROM journal_annotations WHERE trade_id IN (SELECT id FROM journal_trades WHERE julianday(opened_at)<julianday(?1))",
         params![cutoff],
     )?;
@@ -1689,6 +2077,10 @@ fn purge_before_record_from(path: &Path, cutoff: &str) -> Result<(), AppError> {
     )?;
     tx.execute(
         "DELETE FROM journal_annotations WHERE trade_id NOT IN (SELECT id FROM journal_trades)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM journal_screenshots WHERE trade_id NOT IN (SELECT id FROM journal_trades)",
         [],
     )?;
     tx.execute(
@@ -1716,6 +2108,7 @@ fn reset_local_journal(path: &Path, cutoff: &str) -> Result<(), AppError> {
         .ok_or_else(|| AppError::Validation("Invalid journal recording cutoff".into()))?;
     let mut db = Connection::open(path)?;
     let tx = db.transaction()?;
+    tx.execute("DELETE FROM journal_screenshots", [])?;
     tx.execute("DELETE FROM journal_annotations", [])?;
     tx.execute("DELETE FROM journal_events", [])?;
     tx.execute("DELETE FROM journal_trades", [])?;
@@ -2078,6 +2471,13 @@ async fn delete_tombstoned_trades(
     };
     drop(db);
     for trade_id in tombstones {
+        delete_storage_paths(
+            client,
+            cfg,
+            token,
+            vec![format!("{}/{trade_id}/entry.png", cfg.user_id)],
+        )
+        .await?;
         let response = client
             .delete(format!("{}/rest/v1/journal_trades", cfg.project_url))
             .headers(headers(cfg, token, false)?)
@@ -2100,6 +2500,65 @@ async fn delete_tombstoned_trades(
         )?;
     }
     Ok(())
+}
+
+async fn delete_storage_paths(
+    client: &reqwest::Client,
+    cfg: &CloudConfig,
+    token: &str,
+    paths: Vec<String>,
+) -> Result<(), AppError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let response = client
+        .delete(format!(
+            "{}/storage/v1/object/{SCREENSHOT_BUCKET}",
+            cfg.project_url
+        ))
+        .headers(storage_headers(cfg, token, "application/json")?)
+        .json(&json!({"prefixes": paths}))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(AppError::Api(format!(
+            "Supabase entry-chart cleanup failed ({status}): {}",
+            response.text().await?
+        )));
+    }
+    Ok(())
+}
+
+async fn delete_all_cloud_screenshots(
+    client: &reqwest::Client,
+    cfg: &CloudConfig,
+    token: &str,
+) -> Result<(), AppError> {
+    let response = client
+        .get(format!("{}/rest/v1/journal_screenshots", cfg.project_url))
+        .headers(headers(cfg, token, false)?)
+        .query(&[("select", "object_path")])
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(AppError::Api(format!(
+            "Supabase entry-chart cleanup lookup failed ({status}): {}",
+            response.text().await?
+        )));
+    }
+    let paths = response
+        .json::<Vec<Value>>()
+        .await?
+        .into_iter()
+        .filter_map(|row| {
+            row.get("object_path")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    delete_storage_paths(client, cfg, token, paths).await
 }
 
 async fn pull_cloud_settings(
@@ -2175,6 +2634,7 @@ async fn pull_cloud(
         Vec<RemoteTradeRow>,
         Vec<RemoteAnnotationRow>,
         Vec<RemoteEventRow>,
+        Vec<RemoteScreenshotRow>,
     ),
     AppError,
 > {
@@ -2220,10 +2680,26 @@ async fn pull_cloud(
             events_response.text().await?
         )));
     }
+    let screenshots_response = client
+        .get(format!("{}/rest/v1/journal_screenshots", cfg.project_url))
+        .headers(headers(cfg, token, false)?)
+        .query(&[(
+            "select",
+            "trade_id,object_path,captured_at,width,height,content_type",
+        )])
+        .send()
+        .await?;
+    if !screenshots_response.status().is_success() {
+        return Err(AppError::Api(format!(
+            "Supabase screenshot metadata download failed: {}. Apply the latest journal migration and retry sync",
+            screenshots_response.text().await?
+        )));
+    }
     Ok((
         trades_response.json().await?,
         annotations_response.json().await?,
         events_response.json().await?,
+        screenshots_response.json().await?,
     ))
 }
 
@@ -2232,6 +2708,7 @@ fn merge_cloud(
     trades: Vec<RemoteTradeRow>,
     annotations: Vec<RemoteAnnotationRow>,
     events: Vec<RemoteEventRow>,
+    screenshots: Vec<RemoteScreenshotRow>,
 ) -> Result<(), AppError> {
     let mut db = Connection::open(path)?;
     let tx = db.transaction()?;
@@ -2243,6 +2720,12 @@ fn merge_cloud(
     }
     for e in events {
         tx.execute("INSERT OR IGNORE INTO journal_events(id,event_key,trade_id,environment,account_id,broker_order_id,event_type,occurred_at,source,status,old_price,new_price,quantity,price,note,synced) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,1)",params![e.id,e.event_key,e.trade_id,e.environment,e.account_id,e.broker_order_id,e.event_type,e.occurred_at,e.source,e.status,e.old_price,e.new_price,e.quantity,e.price,e.note])?;
+    }
+    for screenshot in screenshots {
+        tx.execute(
+            "INSERT INTO journal_screenshots(trade_id,object_path,captured_at,width,height,content_type) SELECT ?1,?2,?3,?4,?5,?6 WHERE EXISTS(SELECT 1 FROM journal_trades WHERE id=?1) ON CONFLICT(trade_id) DO UPDATE SET object_path=excluded.object_path,captured_at=excluded.captured_at,width=excluded.width,height=excluded.height,content_type=excluded.content_type",
+            params![screenshot.trade_id,screenshot.object_path,screenshot.captured_at,screenshot.width,screenshot.height,screenshot.content_type],
+        )?;
     }
     hydrate_order_state_from_events(&tx)?;
     tx.commit()?;
@@ -2298,9 +2781,15 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
     let user_id = cfg.user_id.clone();
     repair_mirrored_duplicate_trades(path)?;
     delete_tombstoned_trades(&client, &cfg, &token, path).await?;
-    let (remote_trades, remote_annotations, remote_events) =
+    let (remote_trades, remote_annotations, remote_events, remote_screenshots) =
         pull_cloud(&client, &cfg, &token).await?;
-    merge_cloud(path, remote_trades, remote_annotations, remote_events)?;
+    merge_cloud(
+        path,
+        remote_trades,
+        remote_annotations,
+        remote_events,
+        remote_screenshots,
+    )?;
     repair_mirrored_duplicate_trades(path)?;
     delete_tombstoned_trades(&client, &cfg, &token, path).await?;
     let (events, annotations, trades) = {
@@ -2465,6 +2954,8 @@ pub async fn reset_now(path: &Path) -> Result<JournalAuthStatus, AppError> {
         false,
     )
     .await?;
+    delete_all_cloud_screenshots(&client, &cfg, &token).await?;
+    delete_cloud_journal_table(&client, &cfg, &token, "journal_screenshots").await?;
     delete_cloud_journal_table(&client, &cfg, &token, "journal_events").await?;
     delete_cloud_journal_table(&client, &cfg, &token, "journal_annotations").await?;
     delete_cloud_journal_table(&client, &cfg, &token, "journal_trades").await?;
@@ -2926,6 +3417,7 @@ mod tests {
             notes: String::new(),
             tags: vec![],
             events: None,
+            entry_screenshot: None,
         };
         save_trade(&Connection::open(&path).unwrap(), &local_replay).unwrap();
 
@@ -2956,6 +3448,7 @@ mod tests {
                 risk_provenance: "exact".into(),
                 updated_at: "2020-01-01T00:00:00Z".into(),
             }],
+            vec![],
             vec![],
             vec![],
         )
@@ -3468,5 +3961,97 @@ mod tests {
             &newer_local,
             Some(&same_remote)
         ));
+    }
+
+    fn screenshot_input(width: u32, height: u32) -> JournalScreenshotInput {
+        let mut png = vec![0u8; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[12..16].copy_from_slice(b"IHDR");
+        png[16..20].copy_from_slice(&width.to_be_bytes());
+        png[20..24].copy_from_slice(&height.to_be_bytes());
+        JournalScreenshotInput {
+            broker_order_id: "entry-1".into(),
+            environment: TradingEnvironment::Sim,
+            account_id: "A1".into(),
+            symbol: "MESU26".into(),
+            captured_at: "2026-07-15T20:00:00Z".into(),
+            width,
+            height,
+            data_url: format!("data:image/png;base64,{}", BASE64.encode(png)),
+        }
+    }
+
+    #[test]
+    fn validates_entry_chart_png_type_dimensions_and_limit() {
+        assert_eq!(
+            validate_screenshot(&screenshot_input(1512, 720))
+                .unwrap()
+                .len(),
+            24
+        );
+        let mut mismatch = screenshot_input(1512, 720);
+        mismatch.width = 1511;
+        assert!(validate_screenshot(&mismatch).is_err());
+        let mut wrong_type = screenshot_input(1512, 720);
+        wrong_type.data_url = wrong_type.data_url.replacen("image/png", "image/jpeg", 1);
+        assert!(validate_screenshot(&wrong_type).is_err());
+        assert!(validate_screenshot(&screenshot_input(8193, 720)).is_err());
+    }
+
+    #[test]
+    fn entry_chart_object_path_is_owner_scoped_and_deterministic() {
+        assert_eq!(
+            screenshot_object_path("user-1", "trade-1"),
+            "user-1/trade-1/entry.png"
+        );
+    }
+
+    #[test]
+    fn resolves_entry_chart_only_through_the_matching_trade_scope() {
+        let path = temp();
+        init(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
+        db.execute("INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,entry_quantity,exit_quantity,average_entry,gross_pnl,fees,net_pnl,risk_provenance,updated_at) VALUES('trade-1','sim','A1','MESU26','Long','open','2026-07-15T20:00:00Z',1,0,6250,0,.4,-.4,'exact','2026-07-15T20:00:00Z')", []).unwrap();
+        db.execute("INSERT INTO journal_events(id,event_key,trade_id,environment,account_id,broker_order_id,event_type,occurred_at,source,status) VALUES('event-1','intent:entry-1','trade-1','sim','A1','entry-1','entry-intent','2026-07-15T20:00:00Z','northstar','confirmed')", []).unwrap();
+        let input = screenshot_input(1512, 720);
+        assert_eq!(resolve_screenshot_trade(&path, &input).unwrap(), "trade-1");
+        let mut wrong_account = input;
+        wrong_account.account_id = "A2".into();
+        assert!(resolve_screenshot_trade(&path, &wrong_account)
+            .unwrap_err()
+            .to_string()
+            .contains("not ready"));
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn screenshot_cache_contains_metadata_but_no_image_bytes() {
+        let path = temp();
+        init(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
+        let columns = db
+            .prepare("PRAGMA table_info(journal_screenshots)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            columns,
+            vec![
+                "trade_id",
+                "object_path",
+                "captured_at",
+                "width",
+                "height",
+                "content_type"
+            ]
+        );
+        assert!(!columns
+            .iter()
+            .any(|column| column.contains("data") || column.contains("blob")));
+        drop(db);
+        std::fs::remove_file(path).unwrap();
     }
 }

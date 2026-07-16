@@ -46,6 +46,7 @@ Northstar Trader is a private futures charting and order-entry desktop client fo
 - Flat-to-flat reconstruction across partial fills, scale-ins, scale-outs, commissions, and position reversals.
 - Durable SQLite outbox for entry intent, fills, closes, and observed stop-loss or take-profit moves.
 - Exact initial-risk provenance for Northstar entries, with inferred or unknown labels for incomplete broker history.
+- One private entry-chart screenshot per Northstar campaign, captured after the live position, stop-loss, and take-profit lines appear and shown in the trade detail drawer.
 - Owner-scoped Supabase synchronization, editable notes/tags, and immutable execution history.
 
 ### Browser demo
@@ -162,6 +163,8 @@ The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes,
 
 The password is used only for the initial token exchange. Northstar stores the Supabase refresh token in its own operating-system vault record, keeps access tokens in memory, and never accepts a service-role key. Journal and preference tables use row-level security keyed to the authenticated Supabase user.
 
+Entry-chart PNGs use the private `trade-screenshots` Supabase Storage bucket created by migration `202607150006_trade_screenshots.sql`. Images are uploaded and downloaded with the authenticated journal user, are limited to 5 MB, and are never written to SQLite or the local filesystem. If cloud access is unavailable after an entry, the order continues normally and the image is retried only while that desktop session remains open.
+
 Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EMA alert configuration, drawings, the watchlist, order-entry preferences and entry rules, and the journal fee rate. Monitor geometry, panel layout, SIM/LIVE selection, selected broker account, order-confirmation safety state, transient order drafts, and alert history remain local to each computer.
 
 ## Security and local data
@@ -170,6 +173,7 @@ Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EM
 - The Supabase refresh token is stored in a separate Supabase-only vault record. The Supabase password is never retained, and no Supabase connection fields or tokens are included in synchronized preference payloads.
 - The access token is kept in native process memory and refreshed shortly before expiration.
 - Chart workspace state and cached bars are stored in `northstar.sqlite3` under the operating system's Tauri application-data directory. The local workspace continues to work while Supabase is offline.
+- Entry-chart image bytes are cloud-only; SQLite caches only their private object path, dimensions, and capture time.
 - SIM and LIVE bar caches are separated by environment.
 - TradeStation account IDs are masked before they are displayed by the app.
 - Native HTTP calls and order validation live in Rust; the frontend invokes a constrained set of Tauri commands.

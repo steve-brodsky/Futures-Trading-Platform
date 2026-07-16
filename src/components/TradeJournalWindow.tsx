@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, BookOpen, CalendarDays, ChevronLeft, ChevronRight, Cloud, CloudOff, RefreshCw, Save, ShieldCheck, Tag, TrendingUp, X } from "lucide-react";
+import { ArrowLeft, BookOpen, CalendarDays, ChevronLeft, ChevronRight, Cloud, CloudOff, Expand, Image as ImageIcon, RefreshCw, Save, ShieldCheck, Tag, TrendingUp, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -292,8 +292,41 @@ function TradeDrawer({ trade, onClose, onSaved }: { trade: JournalTrade; onClose
   const [notes, setNotes] = useState(trade.notes);
   const [tags, setTags] = useState(trade.tags.join(", "));
   const [saving, setSaving] = useState(false);
+  const [entryImage, setEntryImage] = useState<string>();
+  const [imageLoading, setImageLoading] = useState(false);
+  const [imageError, setImageError] = useState<string>();
+  const [imageExpanded, setImageExpanded] = useState(false);
   const timelineEvents = useMemo(() => journalTimelineEvents(trade.events ?? []), [trade.events]);
   useEffect(() => { setNotes(trade.notes); setTags(trade.tags.join(", ")); }, [trade.id]);
+
+  const loadEntryImage = useCallback(async () => {
+    if (!trade.entryScreenshot || !api.isNative) return;
+    setImageLoading(true);
+    setImageError(undefined);
+    try {
+      const image = await api.journalEntryScreenshot(trade.id);
+      setEntryImage(image.dataUrl);
+    } catch (error) {
+      setEntryImage(undefined);
+      setImageError(String(error));
+    } finally {
+      setImageLoading(false);
+    }
+  }, [trade.id, trade.entryScreenshot?.capturedAt]);
+
+  useEffect(() => {
+    setEntryImage(undefined);
+    setImageExpanded(false);
+    if (trade.entryScreenshot) void loadEntryImage();
+    else { setImageLoading(false); setImageError(undefined); }
+  }, [trade.id, trade.entryScreenshot?.capturedAt, loadEntryImage]);
+
+  useEffect(() => {
+    if (!imageExpanded) return;
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setImageExpanded(false); };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [imageExpanded]);
 
   async function save() {
     const nextTags = tags.split(",").map((tag) => tag.trim()).filter(Boolean).slice(0, 12);
@@ -302,14 +335,20 @@ function TradeDrawer({ trade, onClose, onSaved }: { trade: JournalTrade; onClose
     finally { setSaving(false); }
   }
 
-  return <div className="journal-drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="journal-trade-drawer">
+  return <><div className="journal-drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="journal-trade-drawer">
     <header><div><span>{trade.status === "open" ? "Open Trade" : "Closed Trade"}</span><h2>{trade.symbol} <em className={trade.direction.toLowerCase()}>{trade.direction}</em></h2><p>{journalTime.format(new Date(trade.openedAt))}{trade.closedAt ? ` – ${journalTime.format(new Date(trade.closedAt))} ET` : " – Open"}</p></div><button aria-label="Close trade details" onClick={onClose}><X size={18} /></button></header>
     <dl className="journal-drawer-metrics"><div><dt>Net P&L</dt><dd className={metricClass(trade.netPnl)}>{trade.status === "open" ? "Open" : money(trade.netPnl)}</dd></div><div><dt>R multiple</dt><dd className={metricClass(trade.rMultiple)}>{multiple(trade.rMultiple)}</dd></div><div><dt>Initial risk</dt><dd>{money(trade.deployedRisk)}</dd></div><div><dt>Risk source</dt><dd className={`provenance ${trade.riskProvenance}`}>{trade.riskProvenance}</dd></div></dl>
     <section className="journal-drawer-section"><span>Execution plan</span><dl className="journal-plan-grid"><div><dt>Entry</dt><dd>{trade.entryQuantity} @ {price(trade.averageEntry)}</dd></div><div><dt>Exit</dt><dd>{trade.exitQuantity || "—"} @ {price(trade.averageExit)}</dd></div><div><dt>Original stop</dt><dd>{price(trade.originalStop)}</dd></div><div><dt>Original target</dt><dd>{price(trade.originalTarget)} · {multiple(journalProjectedTargetR(trade, trade.originalTarget))}</dd></div><div><dt>Gross P&L</dt><dd>{money(trade.grossPnl)}</dd></div><div><dt>Fees</dt><dd>{money(-trade.fees)}</dd></div></dl></section>
+    <section className="journal-drawer-section journal-entry-chart"><span>Entry chart</span>
+      {imageLoading && <div className="journal-entry-chart-loading"><i /><small>Loading private chart image…</small></div>}
+      {!imageLoading && entryImage && <button type="button" className="journal-entry-chart-image" onClick={() => setImageExpanded(true)} aria-label={`Expand ${trade.symbol} entry chart`}><img src={entryImage} alt={`${trade.symbol} ${trade.direction.toLowerCase()} entry chart`} /><span><Expand size={13} />Expand</span></button>}
+      {!imageLoading && imageError && <div className="journal-entry-chart-state error"><ImageIcon size={18} /><p>Entry chart unavailable</p><small>{imageError}</small><button type="button" onClick={() => { void loadEntryImage(); }}><RefreshCw size={13} />Retry</button></div>}
+      {!imageLoading && !entryImage && !imageError && <div className="journal-entry-chart-state"><ImageIcon size={18} /><p>No entry chart was captured.</p></div>}
+    </section>
     <section className="journal-drawer-section"><span>Order and risk history</span><div className="journal-timeline">{timelineEvents.map((event) => {
       const targetR = event.eventType === "target-move" ? ` · ${multiple(journalProjectedTargetR(trade, event.newPrice))}` : "";
       return <article key={event.id}><i className={`${event.status ?? "confirmed"}`} /><div><header><strong>{event.eventType.replaceAll("-", " ")}</strong><time>{journalTime.format(new Date(event.occurredAt))} ET</time></header><p>{event.oldPrice != null || event.newPrice != null ? `${price(event.oldPrice)} → ${price(event.newPrice)}${targetR}` : event.price != null ? `${event.quantity ?? ""} @ ${price(event.price)}` : event.note ?? event.source}</p><small>{event.source} · {event.status ?? "confirmed"}</small></div></article>;
     })}{!timelineEvents.length && <p className="journal-no-events">No detailed events are available for this imported campaign.</p>}</div></section>
     <section className="journal-drawer-section journal-notes"><span>Review notes</span><label><textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="What happened in this trade?" rows={5} /></label><label><Tag size={14} /><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="setup, session, mistake" /></label><button onClick={save} disabled={saving || !api.isNative}><Save size={15} />{saving ? "Saving…" : api.isNative ? "Save notes" : "Demo is read-only"}</button></section>
-  </aside></div>;
+  </aside></div>{imageExpanded && entryImage && <div className="journal-image-lightbox" role="dialog" aria-modal="true" aria-label={`${trade.symbol} entry chart`} onMouseDown={(event) => { if (event.target === event.currentTarget) setImageExpanded(false); }}><button type="button" aria-label="Close expanded entry chart" onClick={() => setImageExpanded(false)}><X size={19} /></button><img src={entryImage} alt={`${trade.symbol} ${trade.direction.toLowerCase()} entry chart`} /></div>}</>;
 }

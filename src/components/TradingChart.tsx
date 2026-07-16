@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, X } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
@@ -15,6 +15,7 @@ import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, forma
 import { NySessionVwapPrimitive } from "../lib/nySessionVwapPrimitive";
 import { buildPointAndFigure, buildRenko, type PointAndFigureColumn, type RenkoBrick } from "../lib/priceBasedCharts";
 import { PointAndFigureSeries, type PointAndFigureSeriesData } from "../lib/pointAndFigureSeries";
+import { approximateDataUrlBytes, ENTRY_SCREENSHOT_MAX_BYTES } from "../lib/entryScreenshot";
 
 interface Props {
   bars: Bar[];
@@ -57,6 +58,17 @@ interface Props {
   onLoadOlder: () => void;
 }
 
+export interface TradingChartCapture {
+  dataUrl: string;
+  width: number;
+  height: number;
+  capturedAt: string;
+}
+
+export interface TradingChartHandle {
+  captureEntryScreenshot: () => Promise<TradingChartCapture>;
+}
+
 const asTime = (time: number) => time as Time;
 const isIntraday = (timeframe: Timeframe) => !["D", "W", "M"].includes(timeframe);
 const pricePrecision = (minMove: number) => {
@@ -66,7 +78,7 @@ const pricePrecision = (minMove: number) => {
 
 type DisplayItem = Bar | RenkoBrick | PointAndFigureColumn;
 
-export function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -127,6 +139,66 @@ export function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigu
         : line.price,
   ]));
   const tradeLineMetrics = buildTradeLineMetrics(tradeLines.map((line) => ({ ...line, price: displayPrices.get(line.id) ?? line.price })), pointValue, currentPrice, projectedEntryPrice);
+
+  useImperativeHandle(ref, () => ({
+    captureEntryScreenshot: async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const chart = chartRef.current;
+      const stage = host.current?.parentElement;
+      if (!chart || !stage || stage.clientWidth <= 0 || stage.clientHeight <= 0) throw new Error("The originating chart is not ready for capture.");
+      const required = (["position", "take-profit", "stop-loss"] as const).map((lineKind) => tradeLines.find((line) => line.kind === lineKind));
+      if (required.some((line) => !line || tradeLineTops[line.id] == null || tradeLineTops[line.id] < 0 || tradeLineTops[line.id] > stage.clientHeight)) throw new Error("Waiting for the position, stop-loss, and take-profit lines to be visible.");
+
+      const source = chart.takeScreenshot(true, false);
+      const output = document.createElement("canvas");
+      output.width = source.width;
+      output.height = source.height;
+      const context = output.getContext("2d");
+      if (!context) throw new Error("Chart image rendering is unavailable.");
+      context.drawImage(source, 0, 0);
+      const scaleX = source.width / stage.clientWidth;
+      const scaleY = source.height / stage.clientHeight;
+      const headerHeight = Math.round(31 * scaleY);
+      context.fillStyle = "rgba(11,15,23,.9)";
+      context.fillRect(0, 0, source.width, headerHeight);
+      context.fillStyle = "#d8dee8";
+      context.font = `600 ${Math.max(11, Math.round(11 * scaleY))}px DM Mono, monospace`;
+      context.textBaseline = "middle";
+      context.fillText(`${symbol}${tradeSymbol && tradeSymbol !== symbol ? `  ·  ${tradeSymbol}` : ""}  ·  ${timeframe}  ·  ${exchange}`, Math.round(13 * scaleX), headerHeight / 2);
+
+      required.forEach((line) => {
+        if (!line) return;
+        const top = (tradeLineTops[line.id] ?? 0) * scaleY;
+        const priceValue = displayPrices.get(line.id) ?? line.price;
+        const metric = tradeLineMetrics.get(line.id);
+        const metricText = metric ? formatTradeLineMetrics(metric, chartLabelSettings) : null;
+        const name = line.kind === "position" ? `${line.side.toUpperCase()} POSITION ${line.quantity}`
+          : line.kind === "take-profit" ? `TAKE PROFIT ${line.quantity}` : `STOP LOSS ${line.quantity}`;
+        const textValue = `${name}  ${priceValue.toFixed(pricePrecision(minMove))}${metricText ? `  ${metricText}` : ""}`;
+        context.font = `600 ${Math.max(10, Math.round(chartLabelSettings.fontSize * scaleY))}px DM Mono, monospace`;
+        const paddingX = Math.round(8 * scaleX);
+        const labelHeight = Math.round((chartLabelSettings.fontSize + 14) * scaleY);
+        const labelWidth = Math.min(source.width - Math.round(24 * scaleX), Math.ceil(context.measureText(textValue).width + paddingX * 2));
+        const x = source.width - Math.round(76 * scaleX) - labelWidth;
+        const y = Math.round(top - labelHeight / 2);
+        const negative = line.kind === "stop-loss" || (line.kind === "position" && line.side === "Short");
+        const color = negative ? "#ef466f" : "#16c79a";
+        context.fillStyle = negative ? "rgba(42,12,20,.96)" : "rgba(8,34,28,.96)";
+        context.fillRect(x, y, labelWidth, labelHeight);
+        context.strokeStyle = color;
+        context.lineWidth = Math.max(1, scaleX);
+        context.strokeRect(x + .5, y + .5, labelWidth - 1, labelHeight - 1);
+        context.fillStyle = "#eef3f8";
+        context.textBaseline = "middle";
+        context.fillText(textValue, x + paddingX, y + labelHeight / 2);
+      });
+
+      const dataUrl = output.toDataURL("image/png");
+      if (approximateDataUrlBytes(dataUrl) > ENTRY_SCREENSHOT_MAX_BYTES) throw new Error("The entry chart exceeds the 5 MB cloud limit.");
+      return { dataUrl, width: output.width, height: output.height, capturedAt: new Date().toISOString() };
+    },
+  }));
 
   barsRef.current = bars;
   displayItemsRef.current = displayMap;
@@ -691,4 +763,4 @@ export function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigu
       </select>
     </section>
   );
-}
+});

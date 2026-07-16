@@ -421,6 +421,18 @@ export interface JournalAnnotation {
   updatedAt?: string;
 }
 
+export interface JournalScreenshotMetadata {
+  tradeId: string;
+  capturedAt: string;
+  width: number;
+  height: number;
+  contentType: "image/png";
+}
+
+export interface JournalScreenshotImage extends JournalScreenshotMetadata {
+  dataUrl: string;
+}
+
 export interface JournalTrade {
   id: string;
   environment: TradingEnvironment;
@@ -447,6 +459,7 @@ export interface JournalTrade {
   notes: string;
   tags: string[];
   events?: JournalEvent[];
+  entryScreenshot?: JournalScreenshotMetadata;
 }
 
 export interface JournalSummaryMetrics {

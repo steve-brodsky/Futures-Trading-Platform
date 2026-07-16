@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSyncStatus, JournalTrade, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalSyncStatus, JournalTrade, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, monthSummary } from "./journal";
 import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, futures, makeDemoBars, quoteFor } from "./demo";
@@ -176,6 +176,14 @@ export const api = {
     const trade = demoJournalTrades().find((item) => item.id === tradeId);
     if (!trade) throw new Error("Trade not found");
     return trade;
+  },
+  async saveJournalEntryScreenshot(input: { brokerOrderId: string; environment: TradingEnvironment; accountId: string; symbol: string; capturedAt: string; width: number; height: number; dataUrl: string }): Promise<JournalScreenshotMetadata> {
+    if (!isTauri) throw new Error("Entry chart screenshots are available in the desktop app.");
+    return native("save_journal_entry_screenshot", { input });
+  },
+  async journalEntryScreenshot(tradeId: string): Promise<JournalScreenshotImage> {
+    if (!isTauri) throw new Error("Entry chart screenshots are available in the desktop app.");
+    return native("get_journal_entry_screenshot", { tradeId });
   },
   async updateJournalAnnotation(tradeId: string, notes: string, tags: string[]): Promise<void> {
     if (isTauri) await native("update_journal_annotation", { tradeId, notes, tags });
