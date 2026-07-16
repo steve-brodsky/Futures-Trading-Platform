@@ -40,6 +40,8 @@ function cloudWindow(window: ChartWindowState): JsonObject {
     tabIds: [...window.tabIds],
     activeTabId: window.activeTabId,
     detached: window.detached,
+    chartLayout: window.chartLayout,
+    visibleTabIds: [...(window.visibleTabIds ?? [])],
   };
 }
 
@@ -81,6 +83,7 @@ function localWindowGeometry(remote: JsonObject, current?: ChartWindowState): Js
     physicalY: current.physicalY,
     physicalWidth: current.physicalWidth,
     physicalHeight: current.physicalHeight,
+    splitRatios: current.splitRatios,
   };
 }
 

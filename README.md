@@ -21,7 +21,7 @@ Northstar Trader is a private futures charting and order-entry desktop client fo
 
 ### Workspace
 
-- Up to six chart tabs with persisted symbols, timeframes, indicators, alert settings, and visible preferences.
+- Up to twelve chart tabs with persisted symbols, timeframes, indicators, alert settings, and visible preferences.
 - Native detached chart windows with drag-to-detach, cross-window tab movement, redocking, and restored window geometry.
 - Horizontal lines and horizontal rays with color, width, lock, move, delete, and high/low magnet snapping.
 - Persistent drawings by symbol.
@@ -237,7 +237,7 @@ The main window owns shared streams and persisted workspace state. Detached wind
 - Both a valid take-profit and stop-loss are required for a new entry.
 - Drawing UI currently exposes horizontal lines and horizontal rays only.
 - The watchlist is persisted but does not yet have add, remove, reorder, or remote-symbol management controls.
-- Chart tabs are capped at six.
+- Chart tabs are capped at twelve.
 - Browser demo data is illustrative and is not a broker simulator or execution test.
 - Market-data availability, real-time status, account access, and streaming behavior depend on TradeStation permissions and entitlements.
 

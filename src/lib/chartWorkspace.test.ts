@@ -3,7 +3,7 @@ import type { WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
-import { claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, detachedSourceWindowToClose, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
+import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAX_CHART_TABS, moveTab, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
 
 const fallback: WorkspaceState = {
   revision: 0,
@@ -154,10 +154,53 @@ describe("chart workspace", () => {
   });
 
   it("limits tabs, repairs assignments, and selects a valid active tab", () => {
-    const tabs = Array.from({ length: 8 }, (_, index) => cloneChartTab(fallback.tabs[0], `tab-${index}`));
+    const tabs = Array.from({ length: 14 }, (_, index) => cloneChartTab(fallback.tabs[0], `tab-${index}`));
     const result = normalizeChartWorkspace({ ...fallback, tabs, windows: [{ id: "main", detached: false, tabIds: tabs.map((tab) => tab.id), activeTabId: "missing" }] }, fallback);
     expect(result.tabs).toHaveLength(MAX_CHART_TABS);
     expect(result.windows[0].activeTabId).toBe("tab-0");
+  });
+
+  it("migrates legacy windows to a normalized single-chart layout", () => {
+    const result = normalizeChartWorkspace(fallback, fallback);
+    expect(result.windows[0]).toMatchObject({ chartLayout: "single", visibleTabIds: ["chart-1"], splitRatios: {} });
+  });
+
+  it("normalizes divider ratios and enforces a fifteen-percent pane minimum", () => {
+    expect(chartLayoutCapacity("four-grid")).toBe(4);
+    expect(defaultChartSplitRatios("three-columns")).toEqual([1 / 3, 2 / 3]);
+    expect(normalizeChartSplitRatio("two-columns", [-5])).toEqual([0.15]);
+    expect(normalizeChartSplitRatio("three-rows", [0.9, 0.1])).toEqual([0.7, 0.85]);
+    expect(normalizeChartSplitRatio("four-grid", [0.99, 0.01])).toEqual([0.85, 0.15]);
+  });
+
+  it("auto-fills larger layouts from window tabs before cloning the focused tab", () => {
+    const second = cloneChartTab(fallback.tabs[0], "chart-2");
+    const workspace = { ...fallback, tabs: [fallback.tabs[0], second], windows: [{ ...fallback.windows[0], tabIds: ["chart-1", "chart-2"], chartLayout: "single" as const, visibleTabIds: ["chart-1"] }] };
+    let suffix = 2;
+    const result = setChartWindowLayout(workspace, "main", "four-grid", () => `chart-${++suffix}`);
+    expect(result.tabs).toHaveLength(4);
+    expect(result.windows[0]).toMatchObject({ chartLayout: "four-grid", visibleTabIds: ["chart-1", "chart-2", "chart-3", "chart-4"] });
+    expect(result.tabs[2].symbol).toEqual(fallback.tabs[0].symbol);
+  });
+
+  it("keeps the focused chart visible when shrinking and replaces its pane for a hidden tab", () => {
+    const tabs = [fallback.tabs[0], ...[2, 3, 4].map((index) => cloneChartTab(fallback.tabs[0], `chart-${index}`))];
+    const expanded = { ...fallback, tabs, windows: [{ ...fallback.windows[0], tabIds: tabs.map((tab) => tab.id), activeTabId: "chart-4", chartLayout: "four-grid" as const, visibleTabIds: tabs.map((tab) => tab.id) }] };
+    const shrunk = setChartWindowLayout(expanded, "main", "two-columns");
+    expect(shrunk.windows[0].visibleTabIds).toContain("chart-4");
+    const focused = focusChartTab(shrunk, "main", "chart-2");
+    expect(focused.windows[0].activeTabId).toBe("chart-2");
+    expect(focused.windows[0].visibleTabIds).toContain("chart-2");
+    expect(focused.windows[0].visibleTabIds).not.toContain("chart-4");
+  });
+
+  it("persists normalized ratios and downgrades layouts after tabs disappear", () => {
+    const tabs = [fallback.tabs[0], cloneChartTab(fallback.tabs[0], "chart-2"), cloneChartTab(fallback.tabs[0], "chart-3")];
+    const split = setChartWindowSplitRatio({ ...fallback, tabs, windows: [{ ...fallback.windows[0], tabIds: tabs.map((tab) => tab.id), chartLayout: "three-columns", visibleTabIds: tabs.map((tab) => tab.id) }] }, "main", "three-columns", [0.05, 0.95]);
+    expect(split.windows[0].splitRatios?.["three-columns"]).toEqual([0.15, 0.85]);
+    const reconciled = reconcileChartWindow({ ...split.windows[0], tabIds: ["chart-1", "chart-2"] }, tabs.map((tab) => tab.id));
+    expect(reconciled.chartLayout).toBe("two-columns");
+    expect(reconciled.visibleTabIds).toHaveLength(2);
   });
 
   it("deep clones mutable chart settings", () => {
@@ -219,9 +262,11 @@ describe("chart workspace", () => {
 
   it("accounts for the removed source slot when reordering in one strip", () => {
     const tabs = [fallback.tabs[0], cloneChartTab(fallback.tabs[0], "b"), cloneChartTab(fallback.tabs[0], "c")];
-    const workspace = { ...fallback, tabs, windows: [{ id: "main", detached: false, tabIds: ["chart-1", "b", "c"], activeTabId: "b" }] };
+    const workspace = { ...fallback, tabs, windows: [{ id: "main", detached: false, tabIds: ["chart-1", "b", "c"], activeTabId: "b", chartLayout: "three-columns" as const, visibleTabIds: ["chart-1", "b", "c"] }] };
     expect(moveTab(workspace, "b", "main", 2).windows[0].tabIds).toEqual(["chart-1", "b", "c"]);
-    expect(moveTab(workspace, "b", "main", 3).windows[0].tabIds).toEqual(["chart-1", "c", "b"]);
+    const moved = moveTab(workspace, "b", "main", 3);
+    expect(moved.windows[0].tabIds).toEqual(["chart-1", "c", "b"]);
+    expect(moved.windows[0].visibleTabIds).toEqual(["chart-1", "b", "c"]);
   });
 
   it("deletes detached tabs when their window closes", () => {

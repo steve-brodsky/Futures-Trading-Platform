@@ -22,7 +22,7 @@ function workspace(): WorkspaceState {
       magnetEnabled: true,
       tradeContract: "MESU26",
     }],
-    windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false, x: 120, y: 90, width: 1400, height: 900, maximized: true }],
+    windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", splitRatios: { "two-columns": [0.42] }, detached: false, x: 120, y: 90, width: 1400, height: 900, maximized: true }],
     watchlist: ["MESU26"],
     drawings: { "@MES": [{ id: "line-1", kind: "horizontal", points: [{ time: 1, price: 6200 }], color: "#fff" }] },
     rightPanelOpen: true,
@@ -51,6 +51,8 @@ describe("cloud preferences", () => {
     expect(serialized).not.toContain("confirmOrders");
     expect(serialized).not.toContain('"environment"');
     expect(serialized).not.toContain('"x":120');
+    expect(serialized).not.toContain("splitRatios");
+    expect(serialized).toContain("chartLayout");
     expect(serialized).not.toMatch(/password|refreshToken|clientSecret|publishableKey|projectUrl/i);
 
     const deviceLocalChange = {
@@ -58,7 +60,7 @@ describe("cloud preferences", () => {
       environment: "sim" as const,
       selectedAccountId: "another-local-account",
       confirmOrders: true,
-      windows: original.windows.map((window) => ({ ...window, x: 999, y: 777, width: 800, height: 600 })),
+      windows: original.windows.map((window) => ({ ...window, x: 999, y: 777, width: 800, height: 600, splitRatios: { "two-columns": [0.7] } })),
     };
     expect(cloudPreferenceProfile(deviceLocalChange)).toEqual(profile);
   });
@@ -71,7 +73,7 @@ describe("cloud preferences", () => {
       selectedAccountId: "other-account",
       confirmOrders: true,
       watchlist: ["MNQU26"],
-      windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false, x: 999, y: 999 }],
+      windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", splitRatios: { "two-columns": [0.7] }, detached: false, x: 999, y: 999 }],
       settings: { ...local.settings, journal: { commissionPerContractSide: 1.25 } },
     });
     const merged = applyCloudPreferenceProfile(local, profile);
@@ -81,6 +83,7 @@ describe("cloud preferences", () => {
     expect(merged.selectedAccountId).toBe("secret-account-id");
     expect(merged.confirmOrders).toBe(false);
     expect(merged.windows[0]).toMatchObject({ x: 120, y: 90, width: 1400, height: 900, maximized: true });
+    expect(merged.windows[0].splitRatios?.["two-columns"]).toEqual([0.42]);
   });
 
   it("normalizes malformed downloaded values", () => {

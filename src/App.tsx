@@ -6,11 +6,12 @@ import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } fr
 import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
   GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
-  Magnet, MousePointer2, Plus,
+  Magnet, MousePointer2, PanelsTopLeft, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
   Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
+import { ChartPaneGrid } from "./components/ChartPaneGrid";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { api } from "./lib/bridge";
@@ -32,9 +33,9 @@ import { defaultIndicators } from "./lib/workspace";
 import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndFigureSettings, normalizeRenkoSettings } from "./lib/priceBasedCharts";
 import { reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
-import { claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, detachedSourceWindowToClose, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizeChartWorkspace, rememberWindowGeometry, savedPhysicalWindowGeometry, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
+import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_POLL_INTERVAL_MS = 5 * 60_000;
@@ -45,6 +46,14 @@ const chartStyles: Array<{ kind: ChartKind; label: string; description: string }
   { kind: "area", label: "Area", description: "Filled close price" },
   { kind: "renko", label: "Renko", description: "Fixed price bricks" },
   { kind: "point-and-figure", label: "Point & Figure", description: "X/O price columns" },
+];
+const chartLayouts: Array<{ layout: ChartLayout; label: string }> = [
+  { layout: "single", label: "Single" },
+  { layout: "two-columns", label: "2 columns" },
+  { layout: "two-rows", label: "2 rows" },
+  { layout: "three-columns", label: "3 columns" },
+  { layout: "three-rows", label: "3 rows" },
+  { layout: "four-grid", label: "4 grid" },
 ];
 const newYorkClock = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
@@ -59,7 +68,7 @@ const defaultWorkspace: WorkspaceState = {
   revision: 0,
   environment: "sim",
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
-  windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
+  windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {},
   watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(),
   settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
@@ -234,6 +243,7 @@ function TradingApp() {
   const [searchResults, setSearchResults] = useState<SymbolMeta[]>(futures);
   const [indicatorOpen, setIndicatorOpen] = useState(false);
   const [chartStyleOpen, setChartStyleOpen] = useState(false);
+  const [chartLayoutOpen, setChartLayoutOpen] = useState(false);
   const [alertOpen, setAlertOpen] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -285,7 +295,7 @@ function TradingApp() {
   const vwapSymbolsRef = useRef(new Set<string>());
   const vwapRangeTimersRef = useRef(new Map<string, number>());
   const vwapDataEpochRef = useRef("");
-  const chartCaptureRef = useRef<TradingChartHandle>(null);
+  const chartCaptureRefs = useRef(new Map<string, TradingChartHandle>());
   const [entryScreenshotCandidates, setEntryScreenshotCandidates] = useState<EntryScreenshotCandidate[]>([]);
   const entryScreenshotCandidatesRef = useRef<EntryScreenshotCandidate[]>([]);
   const screenshotCapturingRef = useRef(new Set<string>());
@@ -299,6 +309,9 @@ function TradingApp() {
   const isDetached = currentWindowId !== MAIN_WINDOW_ID;
   const hasWindowTabs = windowState.tabIds.length > 0;
   const activeTab = workspace.tabs.find((item) => item.id === windowState?.activeTabId) ?? workspace.tabs[0];
+  const chartLayout = normalizedChartLayout(windowState.chartLayout);
+  const visibleTabIds = (windowState.visibleTabIds ?? [activeTab.id]).filter((id) => windowState.tabIds.includes(id)).slice(0, chartLayoutCapacity(chartLayout));
+  const visibleTabs = visibleTabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab));
   const activeMarket = tabMarkets[activeTab.id];
   const market = isSameBarMarket(activeMarket, activeTab.symbol.symbol, activeTab.timeframe)
     ? activeMarket
@@ -316,6 +329,13 @@ function TradingApp() {
     window.addEventListener("keydown", closeChartStyle);
     return () => window.removeEventListener("keydown", closeChartStyle);
   }, [chartStyleOpen]);
+
+  useEffect(() => {
+    if (!chartLayoutOpen) return;
+    const closeChartLayout = (event: KeyboardEvent) => { if (event.key === "Escape") setChartLayoutOpen(false); };
+    window.addEventListener("keydown", closeChartLayout);
+    return () => window.removeEventListener("keydown", closeChartLayout);
+  }, [chartLayoutOpen]);
 
   workspaceRef.current = workspace;
   tabMarketsRef.current = tabMarkets;
@@ -1129,41 +1149,58 @@ function TradingApp() {
     vwapRangeTimersRef.current.set(symbol, timer);
   }
 
-  function requestVisibleVwap(range: { from: number; to: number }) {
-    viewRangesRef.current.set(activeTab.id, range);
-    emit("chart-viewport", { tabId: activeTab.id, range });
-    if (activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure" || !isIntradayTimeframe(activeTab.timeframe) || !activeTab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible) || !bars.length) return;
-    const firstIndex = Math.max(0, Math.min(bars.length - 1, Math.floor(range.from)));
-    const lastIndex = Math.max(firstIndex, Math.min(bars.length - 1, Math.ceil(range.to)));
-    queueVwapRange(activeTab.symbol.symbol, bars[firstIndex].time, bars[lastIndex].time + 60);
+  function requestVisibleVwap(tabId: string, range: { from: number; to: number }) {
+    viewRangesRef.current.set(tabId, range);
+    if (api.isNative) emit("chart-viewport", { tabId, range });
+    const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
+    const tabBars = tabMarketsRef.current[tabId]?.bars ?? [];
+    if (!tab || tab.chartKind === "renko" || tab.chartKind === "point-and-figure" || !isIntradayTimeframe(tab.timeframe) || !tab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible) || !tabBars.length) return;
+    const firstIndex = Math.max(0, Math.min(tabBars.length - 1, Math.floor(range.from)));
+    const lastIndex = Math.max(firstIndex, Math.min(tabBars.length - 1, Math.ceil(range.to)));
+    queueVwapRange(tab.symbol.symbol, tabBars[firstIndex].time, tabBars[lastIndex].time + 60);
   }
 
+  const visibleVwapKey = visibleTabs.map((tab) => `${tab.id}:${tab.symbol.symbol}:${tab.timeframe}:${tab.chartKind}:${tab.indicators.map((indicator) => `${indicator.id}-${indicator.visible}`).join(",")}:${tabMarkets[tab.id]?.bars.length ?? 0}`).join("|");
   useEffect(() => {
-    if (!workspaceLoaded || !bars.length || activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure" || !isIntradayTimeframe(activeTab.timeframe) || !activeTab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible)) return;
-    const saved = viewRangesRef.current.get(activeTab.id);
-    const firstIndex = saved ? Math.max(0, Math.min(bars.length - 1, Math.floor(saved.from))) : Math.max(0, bars.length - 180);
-    const lastIndex = saved ? Math.max(firstIndex, Math.min(bars.length - 1, Math.ceil(saved.to))) : bars.length - 1;
-    queueVwapRange(activeTab.symbol.symbol, bars[firstIndex].time, bars[lastIndex].time + 60);
-  }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe, activeTab.chartKind, activeTab.indicators, bars.length]);
+    if (!workspaceLoaded) return;
+    visibleTabs.forEach((tab) => {
+      const tabBars = tabMarketsRef.current[tab.id]?.bars ?? [];
+      if (!tabBars.length || tab.chartKind === "renko" || tab.chartKind === "point-and-figure" || !isIntradayTimeframe(tab.timeframe) || !tab.indicators.some((indicator) => indicator.kind === "VWAP" && indicator.visible)) return;
+      const saved = viewRangesRef.current.get(tab.id);
+      const firstIndex = saved ? Math.max(0, Math.min(tabBars.length - 1, Math.floor(saved.from))) : Math.max(0, tabBars.length - 180);
+      const lastIndex = saved ? Math.max(firstIndex, Math.min(tabBars.length - 1, Math.ceil(saved.to))) : tabBars.length - 1;
+      queueVwapRange(tab.symbol.symbol, tabBars[firstIndex].time, tabBars[lastIndex].time + 60);
+    });
+  }, [workspaceLoaded, visibleVwapKey]);
 
   useEffect(() => {
-    if (api.isNative || activeTab.timeframe !== "1m" || !vwapSymbolsRef.current.has(activeTab.symbol.symbol) || !bars.length) return;
-    setVwapMarkets((current) => ({
-      ...current,
-      [activeTab.symbol.symbol]: {
-        ...(current[activeTab.symbol.symbol] ?? { loadedRanges: [], pendingRanges: [] }),
-        bars: mergeVwapBars(current[activeTab.symbol.symbol]?.bars ?? [], bars),
-      },
-    }));
-  }, [activeTab.symbol.symbol, activeTab.timeframe, bars]);
+    if (api.isNative) return;
+    setVwapMarkets((current) => {
+      let changed = false;
+      const next = { ...current };
+      visibleTabs.forEach((tab) => {
+        const tabBars = tabMarketsRef.current[tab.id]?.bars ?? [];
+        if (tab.timeframe !== "1m" || !vwapSymbolsRef.current.has(tab.symbol.symbol) || !tabBars.length) return;
+        next[tab.symbol.symbol] = {
+          ...(next[tab.symbol.symbol] ?? { loadedRanges: [], pendingRanges: [] }),
+          bars: mergeVwapBars(next[tab.symbol.symbol]?.bars ?? [], tabBars),
+        };
+        changed = true;
+      });
+      return changed ? next : current;
+    });
+  }, [visibleVwapKey]);
 
-  async function loadOlder() {
-    if (!api.isNative || market.loadingOlder || !market.hasOlder || !bars.length) return;
-    const tabId = activeTab.id;
-    const symbol = activeTab.symbol.symbol;
-    const timeframe = activeTab.timeframe;
-    const before = bars[0].time;
-    setTabMarkets((current) => ({ ...current, [tabId]: { ...market, loadingOlder: true } }));
+  async function loadOlder(tabId: string) {
+    const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const tabMarket = tabMarketsRef.current[tabId] ?? emptyTabMarket(tab.symbol.symbol, tab.timeframe);
+    const tabBars = tabMarket.bars;
+    if (!api.isNative || tabMarket.loadingOlder || !tabMarket.hasOlder || !tabBars.length) return;
+    const symbol = tab.symbol.symbol;
+    const timeframe = tab.timeframe;
+    const before = tabBars[0].time;
+    setTabMarkets((current) => ({ ...current, [tabId]: { ...tabMarket, loadingOlder: true } }));
     try {
       const older = await api.olderBars(symbol, timeframe, before);
       const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === tabId);
@@ -1477,7 +1514,7 @@ function TradingApp() {
         return;
       }
       if (candidate.accountId !== selectedAccount?.id || candidate.environment !== environment) return;
-      if (candidate.capture || !candidate.brokerOrderId || candidate.sourceTabId !== activeTab.id || activeTradeSymbol !== candidate.tradeSymbol) return;
+      if (candidate.capture || !candidate.brokerOrderId || resolveTradeSymbol(sourceTab) !== candidate.tradeSymbol) return;
       const hasPosition = hasOpenPosition(candidate.tradeSymbol, positions);
       if (hasPosition && !candidate.positionSeen) {
         replaceScreenshotCandidate(candidate.id, (current) => ({ ...current, positionSeen: true }));
@@ -1493,9 +1530,10 @@ function TradingApp() {
         }
         return;
       }
-      if (!chartCaptureRef.current || screenshotCapturingRef.current.has(candidate.id)) return;
+      const chartCapture = chartCaptureRefs.current.get(candidate.sourceTabId);
+      if (!chartCapture || screenshotCapturingRef.current.has(candidate.id)) return;
       screenshotCapturingRef.current.add(candidate.id);
-      void chartCaptureRef.current.captureEntryScreenshot().then((capture) => {
+      void chartCapture.captureEntryScreenshot().then((capture) => {
         replaceScreenshotCandidate(candidate.id, (current) => ({ ...current, capture }));
         void uploadEntryScreenshot(candidate.id);
       }).catch((error) => {
@@ -1505,7 +1543,7 @@ function TradingApp() {
         }
       }).finally(() => screenshotCapturingRef.current.delete(candidate.id));
     });
-  }, [entryScreenshotCandidates, workspace.tabs, activeTab.id, activeTradeSymbol, selectedAccount?.id, environment, positions, orders, currentTime]);
+  }, [entryScreenshotCandidates, workspace.tabs, visibleTabIds.join("|"), selectedAccount?.id, environment, positions, orders, currentTime]);
 
   function commitWorkspace(update: (current: WorkspaceState) => WorkspaceState) {
     setWorkspace((current) => {
@@ -1544,8 +1582,12 @@ function TradingApp() {
     }));
   }
 
+  function updateTab(tabId: string, patch: Partial<ChartTabState>) {
+    commitWorkspace((current) => ({ ...current, tabs: current.tabs.map((tab) => tab.id === tabId ? { ...tab, ...patch } : tab) }));
+  }
+
   function updateActiveTab(patch: Partial<ChartTabState>) {
-    commitWorkspace((current) => ({ ...current, tabs: current.tabs.map((tab) => tab.id === activeTab.id ? { ...tab, ...patch } : tab) }));
+    updateTab(activeTab.id, patch);
   }
 
   function updateChartStyle(chartKind: ChartKind) {
@@ -1587,17 +1629,28 @@ function TradingApp() {
   }
 
   function selectTab(tabId: string) {
-    commitWorkspace((current) => ({ ...current, windows: current.windows.map((item) => item.id === currentWindowId ? { ...item, activeTabId: tabId } : item) }));
+    commitWorkspace((current) => focusChartTab(current, currentWindowId, tabId));
   }
 
   function addTab() {
     if (workspace.tabs.length >= MAX_CHART_TABS) return showToast(`A maximum of ${MAX_CHART_TABS} chart tabs is supported.`);
     const id = `chart-${crypto.randomUUID()}`;
-    commitWorkspace((current) => ({
+    commitWorkspace((current) => focusChartTab({
       ...current,
       tabs: [...current.tabs, cloneChartTab(activeTab, id)],
-      windows: current.windows.map((item) => item.id === currentWindowId ? { ...item, tabIds: [...item.tabIds, id], activeTabId: id } : item),
-    }));
+      windows: current.windows.map((item) => item.id === currentWindowId ? { ...item, tabIds: [...item.tabIds, id] } : item),
+    }, currentWindowId, id));
+  }
+
+  function changeChartLayout(layout: ChartLayout) {
+    const required = Math.max(0, chartLayoutCapacity(layout) - windowState.tabIds.length);
+    if (workspace.tabs.length + required > MAX_CHART_TABS) return showToast(`This layout needs ${required} more chart tab${required === 1 ? "" : "s"}; the ${MAX_CHART_TABS}-tab limit has been reached.`);
+    commitWorkspace((current) => setChartWindowLayout(current, currentWindowId, layout));
+    setChartLayoutOpen(false);
+  }
+
+  function changeChartSplitRatios(ratios: number[]) {
+    commitWorkspace((current) => setChartWindowSplitRatio(current, currentWindowId, chartLayout, ratios));
   }
 
   async function closeTab(tabId: string) {
@@ -1617,6 +1670,8 @@ function TradingApp() {
         }
       }
       if (!owner.tabIds.includes(owner.activeTabId)) owner.activeTabId = owner.tabIds[Math.min(index, owner.tabIds.length - 1)] ?? "";
+      const validTabIds = next.tabs.map((tab) => tab.id);
+      next.windows = next.windows.map((window) => reconcileChartWindow(window, validTabIds));
       return next;
     });
     if (removedWindow && api.isNative && currentWindowId === MAIN_WINDOW_ID) {
@@ -2158,6 +2213,63 @@ function TradingApp() {
     setOrderProjection({ ...next, tradeSymbol: activeTradeSymbol });
   };
 
+  function renderChartPane(tab: ChartTabState) {
+    const tabMarket = isSameBarMarket(tabMarkets[tab.id], tab.symbol.symbol, tab.timeframe)
+      ? tabMarkets[tab.id]
+      : emptyTabMarket(tab.symbol.symbol, tab.timeframe);
+    const tabTradeSymbol = resolveTradeSymbol(tab);
+    const tabTradeMeta = isContinuousFuture(tab.symbol)
+      ? tabTradeSymbol ? tradeDetails[tabTradeSymbol] : undefined
+      : tab.symbol;
+    const tabTradeQuote = tabTradeSymbol
+      ? quotes[tabTradeSymbol] ?? (api.isNative
+        ? { symbol: tabTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+        : quoteFor(tabTradeSymbol))
+      : { symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
+    const focused = tab.id === activeTab.id;
+    return <TradingChart
+      ref={(handle) => { if (handle) chartCaptureRefs.current.set(tab.id, handle); else chartCaptureRefs.current.delete(tab.id); }}
+      bars={tabMarket.bars}
+      vwapBars={vwapMarkets[tab.symbol.symbol]?.bars ?? []}
+      kind={tab.chartKind}
+      renkoSettings={tab.renkoSettings}
+      pointAndFigureSettings={tab.pointAndFigureSettings}
+      magnetEnabled={tab.magnetEnabled}
+      symbol={tab.symbol.symbol}
+      tradeSymbol={tabTradeSymbol}
+      description={tab.symbol.description}
+      exchange={tab.symbol.exchange}
+      minMove={tab.symbol.minMove}
+      pointValue={tabTradeMeta?.pointValue ?? tab.symbol.pointValue}
+      currentPrice={tabTradeQuote.last}
+      projectedEntryPrice={focused && activeOrderProjection ? projectedEntryPrice(activeOrderProjection) : undefined}
+      chartLabelSettings={workspace.settings.chartLabels}
+      timeframe={tab.timeframe}
+      indicators={tab.indicators}
+      orders={orders}
+      positions={positions}
+      orderProjection={focused ? activeOrderProjection : undefined}
+      onOrderProjectionChange={editProjectedExit}
+      onOrderProjectionRestore={restoreOrderProjection}
+      closingPositionIds={closingPositionIds}
+      replacingOrderIds={replacingOrderIds}
+      onClosePosition={requestClosePosition}
+      onReplaceOrder={replaceChartOrder}
+      timezone={tab.chartTimezone}
+      activeTool={focused ? activeTool : "cursor"}
+      drawings={workspace.drawings[tab.symbol.symbol] ?? []}
+      onToolComplete={() => { if (focused) setActiveTool("cursor"); }}
+      onCreateDrawing={(drawing) => updateSymbolDrawings(tab.symbol.symbol, (items) => [...items, drawing])}
+      onUpdateDrawing={(id, patch) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))}
+      onDeleteDrawing={(id) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.filter((item) => item.id !== id))}
+      initialVisibleRange={viewRangesRef.current.get(tab.id)}
+      onVisibleRangeChange={(range) => requestVisibleVwap(tab.id, range)}
+      onTimezoneChange={(chartTimezone) => updateTab(tab.id, { chartTimezone })}
+      onLoadOlder={() => loadOlder(tab.id)}
+      loadingOlder={tabMarket.loadingOlder}
+    />;
+  }
+
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
       <div className="brand"><div className="brand-glyph"><TrendingUp size={16} strokeWidth={2.4} /></div><span>NORTHSTAR</span><small>TRADER</small></div>
@@ -2168,7 +2280,7 @@ function TradingApp() {
       <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
-    <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); emit("chart-strip-bounds", bounds); }} />
+    <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} visibleTabIds={visibleTabIds} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); if (api.isNative) emit("chart-strip-bounds", bounds); }} />
 
     <nav className={`toolbar ${hasWindowTabs ? "" : "empty"}`} aria-label="Chart toolbar">
       <button className="symbol-control" onClick={() => setSearchOpen(true)}><Search size={16} /><strong>{activeTab.symbol.symbol}</strong><span>{activeTab.symbol.exchange}</span><ChevronDown size={14} /></button>
@@ -2217,6 +2329,18 @@ function TradingApp() {
       </div>}
       <div className="divider" />
       <span className="toolbar-spacer" />
+      <div className="toolbar-popover-anchor chart-layout-anchor">
+        <IconButton label="Chart layout" active={chartLayoutOpen || chartLayout !== "single"} onClick={() => { setIndicatorOpen(false); setChartStyleOpen(false); setAlertOpen(false); setChartLayoutOpen((value) => !value); }}><PanelsTopLeft size={17} /></IconButton>
+        {chartLayoutOpen && <><button className="popover-backdrop" aria-label="Close chart layout menu" onClick={() => setChartLayoutOpen(false)} /><div className="popover chart-layout-popover" role="menu" aria-label="Chart layout">
+          <header><strong>Chart layout</strong><span>{visibleTabs.length} visible</span></header>
+          <div className="chart-layout-list">{chartLayouts.map((item) => {
+            const missing = Math.max(0, chartLayoutCapacity(item.layout) - windowState.tabIds.length);
+            const unavailable = workspace.tabs.length + missing > MAX_CHART_TABS;
+            return <button key={item.layout} type="button" role="menuitemradio" aria-checked={chartLayout === item.layout} disabled={unavailable} title={unavailable ? `Needs ${missing} more tabs; maximum ${MAX_CHART_TABS}` : item.label} onClick={() => changeChartLayout(item.layout)}><ChartLayoutGlyph layout={item.layout} /><span>{item.label}</span>{chartLayout === item.layout && <i />}</button>;
+          })}</div>
+          <small className="chart-layout-hint">Drag dividers to resize · double-click to reset</small>
+        </div></>}
+      </div>
       {!isDetached && <><IconButton label="Trade journal" onClick={openTradeJournal}><BookOpen size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
       <IconButton label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} active={isFullscreen} onClick={toggleFullscreen}>{isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</IconButton>
     </nav>
@@ -2234,7 +2358,14 @@ function TradingApp() {
         </div>
       </aside>
 
-      <TradingChart ref={chartCaptureRef} key={activeTab.id} bars={bars} vwapBars={vwapMarkets[activeTab.symbol.symbol]?.bars ?? []} kind={activeTab.chartKind} renkoSettings={activeTab.renkoSettings} pointAndFigureSettings={activeTab.pointAndFigureSettings} magnetEnabled={activeTab.magnetEnabled} symbol={activeTab.symbol.symbol} tradeSymbol={activeTradeSymbol} description={activeTab.symbol.description} exchange={activeTab.symbol.exchange} minMove={activeTab.symbol.minMove} pointValue={activeTradeMeta?.pointValue ?? activeTab.symbol.pointValue} currentPrice={activeTradeQuote.last} projectedEntryPrice={activeOrderProjection ? projectedEntryPrice(activeOrderProjection) : undefined} chartLabelSettings={workspace.settings.chartLabels} timeframe={activeTab.timeframe} indicators={activeTab.indicators} orders={orders} positions={positions} orderProjection={activeOrderProjection} onOrderProjectionChange={editProjectedExit} onOrderProjectionRestore={restoreOrderProjection} closingPositionIds={closingPositionIds} replacingOrderIds={replacingOrderIds} onClosePosition={requestClosePosition} onReplaceOrder={replaceChartOrder} timezone={activeTab.chartTimezone} activeTool={activeTool} drawings={workspace.drawings[activeTab.symbol.symbol] ?? []} onToolComplete={() => setActiveTool("cursor")} onCreateDrawing={(drawing) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => [...items, drawing])} onUpdateDrawing={(id, patch) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))} onDeleteDrawing={(id) => updateSymbolDrawings(activeTab.symbol.symbol, (items) => items.filter((item) => item.id !== id))} initialVisibleRange={viewRangesRef.current.get(activeTab.id)} onVisibleRangeChange={requestVisibleVwap} onTimezoneChange={(chartTimezone) => updateActiveTab({ chartTimezone })} onLoadOlder={loadOlder} loadingOlder={market.loadingOlder} />
+      <ChartPaneGrid
+        layout={chartLayout}
+        ratios={normalizeChartSplitRatio(chartLayout, windowState.splitRatios?.[chartLayout] ?? defaultChartSplitRatios(chartLayout))}
+        panes={visibleTabs.map((tab) => ({ id: tab.id, node: renderChartPane(tab) }))}
+        activePaneId={activeTab.id}
+        onFocus={selectTab}
+        onRatiosChange={changeChartSplitRatios}
+      />
 
       {!isDetached && <aside className={`right-panel ${workspace.rightPanelOpen ? "open" : "collapsed"}`} aria-labelledby="order-panel-title">
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>
@@ -2269,9 +2400,10 @@ function TradingApp() {
   </main>;
 }
 
-function ChartTabStrip({ tabs, activeTabId, totalTabs, windowId, ema200Positions, onSelect, onAdd, onClose, onReorder, onDragEnd, onBounds }: {
+function ChartTabStrip({ tabs, activeTabId, visibleTabIds, totalTabs, windowId, ema200Positions, onSelect, onAdd, onClose, onReorder, onDragEnd, onBounds }: {
   tabs: ChartTabState[];
   activeTabId: string;
+  visibleTabIds: string[];
   totalTabs: number;
   windowId: string;
   ema200Positions: Partial<Record<string, EmaCrossSide>>;
@@ -2317,7 +2449,7 @@ function ChartTabStrip({ tabs, activeTabId, totalTabs, windowId, ema200Positions
     setDropIndex(undefined);
   }}>
     <div className="chart-tab-scroll">
-      {tabs.map((tab, index) => <div key={tab.id} className={`chart-tab ${tab.id === activeTabId ? "active" : ""} ${dropIndex === index ? "drop-before" : ""}`} role="tab" aria-selected={tab.id === activeTabId} draggable onDragStart={(event) => {
+      {tabs.map((tab, index) => <div key={tab.id} className={`chart-tab ${visibleTabIds.includes(tab.id) ? "visible" : ""} ${tab.id === activeTabId ? "active" : ""} ${dropIndex === index ? "drop-before" : ""}`} role="tab" aria-selected={tab.id === activeTabId} draggable onDragStart={(event) => {
         draggedRef.current = tab.id;
         droppedRef.current = false;
         event.dataTransfer.effectAllowed = "move";
@@ -2333,7 +2465,7 @@ function ChartTabStrip({ tabs, activeTabId, totalTabs, windowId, ema200Positions
           if (!direction) return;
           event.preventDefault();
           onSelect(tabs[(index + direction + tabs.length) % tabs.length].id);
-        }}><strong>{tab.symbol.symbol}</strong><span>·</span><span>{tab.timeframe}</span>{ema200Positions[tab.id] && <span className={`chart-tab-ema-dot ${ema200Positions[tab.id]}`} role="img" aria-label={`Price ${ema200Positions[tab.id]} EMA 200`} title={`Price ${ema200Positions[tab.id]} EMA 200`} />}</button>
+        }}><strong>{tab.symbol.symbol}</strong><span>·</span><span>{tab.timeframe}</span>{visibleTabIds.includes(tab.id) && <span className="chart-tab-visible-dot" aria-label="Shown in split layout" title="Shown in split layout" />}{ema200Positions[tab.id] && <span className={`chart-tab-ema-dot ${ema200Positions[tab.id]}`} role="img" aria-label={`Price ${ema200Positions[tab.id]} EMA 200`} title={`Price ${ema200Positions[tab.id]} EMA 200`} />}</button>
         <button className="chart-tab-close" aria-label={`Close ${tab.symbol.symbol} ${tab.timeframe} chart`} disabled={totalTabs === 1} onClick={() => onClose(tab.id)}><X size={12} /></button>
       </div>)}
       {dropIndex === tabs.length && <span className="tab-drop-end" />}
@@ -2373,6 +2505,12 @@ function ChartStyleGlyph({ kind, size = 16 }: { kind: ChartKind; size?: number }
   if (kind === "renko") return <SquareStack size={size} />;
   if (kind === "point-and-figure") return <TrendingUp size={size} />;
   return <BarChart3 size={size} />;
+}
+
+function ChartLayoutGlyph({ layout }: { layout: ChartLayout }) {
+  return <span className={`chart-layout-glyph glyph-${layout}`} aria-hidden="true">
+    {Array.from({ length: chartLayoutCapacity(layout) }, (_, index) => <i key={index} />)}
+  </span>;
 }
 
 function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: WorkspaceState; onChange: (symbols: string[]) => void; onNotify: (message: string) => void }) {

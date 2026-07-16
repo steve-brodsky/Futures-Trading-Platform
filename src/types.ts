@@ -4,6 +4,8 @@ export type Timeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "D" | "W" | 
 export type AlertSound = "chime" | "bell" | "pulse" | "siren";
 export type AlertDurationSeconds = 1 | 3 | 5 | 10;
 export type ChartKind = "candles" | "line" | "area" | "renko" | "point-and-figure";
+export type ChartLayout = "single" | "two-columns" | "two-rows" | "three-columns" | "three-rows" | "four-grid";
+export type ChartSplitRatios = Partial<Record<ChartLayout, number[]>>;
 export type SyntheticPriceSource = "close" | "high-low";
 export type OrderType = "Market" | "Limit" | "StopMarket" | "StopLimit";
 export type ChartTimezone = "exchange" | "local" | "UTC" | "America/New_York" | "America/Chicago" | "America/Denver" | "America/Los_Angeles" | "Europe/London" | "Asia/Tokyo";
@@ -240,6 +242,12 @@ export interface ChartWindowState {
   tabIds: string[];
   activeTabId: string;
   detached: boolean;
+  /** Visible chart tabs, ordered by their pane position. Legacy saves omit this. */
+  visibleTabIds?: string[];
+  /** Saved pane arrangement. Legacy saves omit this and normalize to a single chart. */
+  chartLayout?: ChartLayout;
+  /** Device-local divider positions, keyed by layout. */
+  splitRatios?: ChartSplitRatios;
   maximized?: boolean;
   /** Legacy logical-pixel geometry retained for backward compatibility. */
   x?: number;

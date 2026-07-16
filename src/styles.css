@@ -68,6 +68,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .chart-tab:hover { color: #dce3eb; background: #171e28; }
 .chart-tab.active { color: #eef3f8; border-color: #263140; background: #1a222d; }
 .chart-tab.active::after { content: ""; position: absolute; right: 6px; bottom: 0; left: 6px; height: 2px; background: var(--cyan); }
+.chart-tab.visible:not(.active) { color: #b8c3d0; background: #141b24; }
 .chart-tab.drop-before::before, .tab-drop-end { content: ""; position: absolute; z-index: 3; top: 2px; bottom: 2px; left: -2px; width: 2px; border-radius: 2px; background: var(--cyan); }
 .tab-drop-end { position: relative; left: auto; flex: 0 0 2px; }
 .chart-tab-label { min-width: 0; height: 100%; flex: 1; display: flex; align-items: center; gap: 5px; padding: 0 5px 0 9px; border: 0; background: transparent; color: inherit; font: 500 10px DM Mono, monospace; cursor: pointer; }
@@ -76,6 +77,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .chart-tab-label .chart-tab-ema-dot { width: 6px; height: 6px; flex: 0 0 6px; margin-left: 1px; border-radius: 50%; }
 .chart-tab-label .chart-tab-ema-dot.above { color: var(--green); background: var(--green); box-shadow: 0 0 6px var(--green); }
 .chart-tab-label .chart-tab-ema-dot.below { color: var(--red); background: var(--red); box-shadow: 0 0 6px var(--red); }
+.chart-tab-visible-dot { width: 4px; height: 4px; flex: 0 0 4px; margin-left: auto; border-radius: 50%; background: #627287; }
+.chart-tab.active .chart-tab-visible-dot { background: var(--cyan); box-shadow: 0 0 5px rgba(55,213,232,.55); }
 .chart-tab-close, .chart-tab-add { width: 25px; height: 25px; display: grid; place-items: center; align-self: center; padding: 0; border: 0; border-radius: 4px; color: #738093; background: transparent; cursor: pointer; }
 .chart-tab-close:hover, .chart-tab-add:hover { color: #eef3f8; background: #242d39; }
 .chart-tab-close:disabled, .chart-tab-add:disabled { opacity: .3; cursor: default; }
@@ -100,6 +103,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .alert-tool-button.active { color: var(--cyan); background: rgba(55,213,232,.09); }
 .toolbar-spacer { flex: 1; }
 .toolbar-popover-anchor { position: relative; }
+.chart-layout-anchor { z-index: 31; }
 .popover-backdrop { position: fixed; z-index: 29; inset: 0; padding: 0; border: 0; background: transparent; }
 .toolbar.empty > * { display: none; }
 .toolbar.empty::after { content: "No chart in this window — add a tab or drag one here"; color: var(--muted); font-size: 10px; }
@@ -123,6 +127,18 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .drawing-flyout small { color: var(--muted); font-size: 8px; }
 
 .chart-stage { position: relative; min-width: 0; min-height: 0; grid-column: 2; grid-row: 1; overflow: hidden; background: #0b0f17; }
+.chart-pane-grid { position: relative; min-width: 0; min-height: 0; grid-column: 2; grid-row: 1; overflow: hidden; background: #080c12; }
+.chart-pane-frame { position: absolute; min-width: 0; min-height: 0; overflow: hidden; background: #0b0f17; box-shadow: inset 0 0 0 1px #1a2330; transition: box-shadow .14s ease; }
+.chart-pane-frame.active { z-index: 1; box-shadow: inset 0 0 0 1px rgba(55,213,232,.72), inset 0 0 0 2px rgba(55,213,232,.08); }
+.chart-pane-frame > .chart-stage { position: absolute; inset: 1px; width: auto; height: auto; }
+.chart-pane-divider { position: absolute; z-index: 12; padding: 0; border: 0; background: transparent; touch-action: none; }
+.chart-pane-divider::after { content: ""; position: absolute; background: #273342; transition: background .14s, box-shadow .14s; }
+.chart-pane-divider.vertical { top: 0; bottom: 0; width: 9px; margin-left: -4px; cursor: col-resize; }
+.chart-pane-divider.vertical::after { top: 0; bottom: 0; left: 4px; width: 1px; }
+.chart-pane-divider.horizontal { right: 0; left: 0; height: 9px; margin-top: -4px; cursor: row-resize; }
+.chart-pane-divider.horizontal::after { top: 4px; right: 0; left: 0; height: 1px; }
+.chart-pane-divider:hover::after, .chart-pane-divider:focus-visible::after { background: var(--cyan); box-shadow: 0 0 7px rgba(55,213,232,.42); }
+.chart-pane-divider:focus-visible { outline: none; }
 .chart-host { position: absolute; inset: 0; }
 .current-price-label { position: absolute; z-index: 7; right: 0; width: 72px; height: 32px; display: grid; grid-template-rows: 18px 14px; transform: translateY(-9px); color: #071116; background: #34d6e9; font-family: DM Mono, monospace; pointer-events: none; }
 .current-price-label strong, .current-price-label span { display: grid; place-items: center; }
@@ -362,6 +378,26 @@ td button { border: 0; color: var(--cyan); background: transparent; font-size: 8
 .chart-style-list strong { color: #dce3eb; font-size: 10px; font-weight: 600; }
 .chart-style-list small { color: var(--muted); font-size: 8px; }
 .chart-style-list button.selected i { width: 6px; height: 6px; justify-self: center; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 7px rgba(55,213,232,.7); }
+.chart-layout-popover { right: 0; left: auto; width: 254px; }
+.chart-layout-popover > header { height: 42px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 10px; }
+.chart-layout-popover > header span { color: var(--muted); font-size: 8px; }
+.chart-layout-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px; padding: 5px; }
+.chart-layout-list > button { position: relative; min-width: 0; height: 50px; display: grid; grid-template-columns: 34px minmax(0, 1fr) 8px; align-items: center; gap: 7px; padding: 0 8px; border: 0; border-radius: 5px; color: #9aa6b5; background: transparent; font: 550 9px DM Mono, monospace; text-align: left; cursor: pointer; }
+.chart-layout-list > button:hover { color: #eef3f8; background: #19212c; }
+.chart-layout-list > button[aria-checked="true"] { color: var(--cyan); background: rgba(55,213,232,.075); }
+.chart-layout-list > button:disabled { opacity: .3; cursor: not-allowed; }
+.chart-layout-list > button > i { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px rgba(55,213,232,.65); }
+.chart-layout-hint { display: block; padding: 2px 10px 10px; color: #687587; font: 500 8px DM Mono, monospace; }
+.chart-layout-glyph { width: 30px; height: 23px; display: grid; gap: 2px; padding: 2px; border: 1px solid #334052; border-radius: 3px; }
+.chart-layout-glyph i { min-width: 0; min-height: 0; border-radius: 1px; background: #566477; }
+button[aria-checked="true"] .chart-layout-glyph { border-color: rgba(55,213,232,.55); }
+button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,.75); }
+.glyph-single { grid-template-columns: 1fr; }
+.glyph-two-columns { grid-template-columns: repeat(2, 1fr); }
+.glyph-two-rows { grid-template-rows: repeat(2, 1fr); }
+.glyph-three-columns { grid-template-columns: repeat(3, 1fr); }
+.glyph-three-rows { grid-template-rows: repeat(3, 1fr); }
+.glyph-four-grid { grid-template-columns: repeat(2, 1fr); grid-template-rows: repeat(2, 1fr); }
 .synthetic-chart-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 11px 12px 13px; border-top: 1px solid var(--line); background: #0f151d; }
 .synthetic-settings-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; margin-bottom: 1px; }
 .synthetic-settings-heading strong { color: #dce4ed; font-size: 9px; }

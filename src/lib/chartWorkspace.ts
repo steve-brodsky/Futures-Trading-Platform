@@ -1,4 +1,4 @@
-import type { ChartTabState, ChartWindowState, Drawing, EntryRuleNode, WorkspaceState } from "../types";
+import type { ChartLayout, ChartSplitRatios, ChartTabState, ChartWindowState, Drawing, EntryRuleNode, WorkspaceState } from "../types";
 import { normalizeEntryRules } from "./entryRules";
 import { cloneEma200Alert, normalizeEma200Alert, sameEma200Alert } from "./emaAlerts";
 import { quoteSubscriptionSymbols } from "./futuresContracts";
@@ -6,8 +6,149 @@ import { normalizeWatchlist } from "./watchlist";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./priceBasedCharts";
 
-export const MAX_CHART_TABS = 6;
+export const MAX_CHART_TABS = 12;
 export const MAIN_WINDOW_ID = "main";
+export const CHART_LAYOUTS: ChartLayout[] = ["single", "two-columns", "two-rows", "three-columns", "three-rows", "four-grid"];
+export const MIN_CHART_PANE_RATIO = 0.15;
+
+export function chartLayoutCapacity(layout: ChartLayout): number {
+  if (layout === "single") return 1;
+  if (layout === "two-columns" || layout === "two-rows") return 2;
+  if (layout === "three-columns" || layout === "three-rows") return 3;
+  return 4;
+}
+
+export function defaultChartSplitRatios(layout: ChartLayout): number[] {
+  if (layout === "two-columns" || layout === "two-rows") return [0.5];
+  if (layout === "three-columns" || layout === "three-rows") return [1 / 3, 2 / 3];
+  if (layout === "four-grid") return [0.5, 0.5];
+  return [];
+}
+
+function finiteRatios(value: unknown): number[] {
+  return Array.isArray(value) ? value.filter((item): item is number => typeof item === "number" && Number.isFinite(item)) : [];
+}
+
+export function normalizeChartSplitRatio(layout: ChartLayout, value: unknown): number[] {
+  const ratios = finiteRatios(value);
+  if (layout === "single") return [];
+  if (layout === "two-columns" || layout === "two-rows") {
+    return [Math.max(MIN_CHART_PANE_RATIO, Math.min(1 - MIN_CHART_PANE_RATIO, ratios[0] ?? 0.5))];
+  }
+  if (layout === "three-columns" || layout === "three-rows") {
+    let first = Math.max(MIN_CHART_PANE_RATIO, Math.min(1 - MIN_CHART_PANE_RATIO * 2, ratios[0] ?? 1 / 3));
+    let second = Math.max(first + MIN_CHART_PANE_RATIO, Math.min(1 - MIN_CHART_PANE_RATIO, ratios[1] ?? 2 / 3));
+    if (second > 1 - MIN_CHART_PANE_RATIO) {
+      second = 1 - MIN_CHART_PANE_RATIO;
+      first = Math.min(first, second - MIN_CHART_PANE_RATIO);
+    }
+    return [first, second];
+  }
+  return [
+    Math.max(MIN_CHART_PANE_RATIO, Math.min(1 - MIN_CHART_PANE_RATIO, ratios[0] ?? 0.5)),
+    Math.max(MIN_CHART_PANE_RATIO, Math.min(1 - MIN_CHART_PANE_RATIO, ratios[1] ?? 0.5)),
+  ];
+}
+
+export function normalizeChartSplitRatios(value: unknown): ChartSplitRatios {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return Object.fromEntries(CHART_LAYOUTS.filter((layout) => layout !== "single" && source[layout] != null)
+    .map((layout) => [layout, normalizeChartSplitRatio(layout, source[layout])])) as ChartSplitRatios;
+}
+
+export function normalizedChartLayout(value: unknown): ChartLayout {
+  return CHART_LAYOUTS.includes(value as ChartLayout) ? value as ChartLayout : "single";
+}
+
+function preferredLayoutForCount(count: number, preferred: ChartLayout): ChartLayout {
+  if (count <= 1) return "single";
+  if (count === 2) return preferred.endsWith("rows") ? "two-rows" : "two-columns";
+  if (count === 3) return preferred.endsWith("rows") ? "three-rows" : "three-columns";
+  return "four-grid";
+}
+
+export function reconcileChartWindow(window: ChartWindowState, validTabIds: Iterable<string>): ChartWindowState {
+  const valid = new Set(validTabIds);
+  const tabIds = window.tabIds.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  let activeTabId = tabIds.includes(window.activeTabId) ? window.activeTabId : tabIds[0] ?? "";
+  const requestedLayout = normalizedChartLayout(window.chartLayout);
+  const layout = preferredLayoutForCount(Math.min(chartLayoutCapacity(requestedLayout), Math.max(1, tabIds.length)), requestedLayout);
+  const capacity = Math.min(chartLayoutCapacity(layout), tabIds.length);
+  const requestedVisible = Array.isArray(window.visibleTabIds) ? window.visibleTabIds : [activeTabId];
+  const visibleTabIds = requestedVisible.filter((id, index, items) => tabIds.includes(id) && items.indexOf(id) === index).slice(0, capacity);
+  if (activeTabId && !visibleTabIds.includes(activeTabId)) {
+    if (visibleTabIds.length >= capacity) visibleTabIds[Math.max(0, capacity - 1)] = activeTabId;
+    else visibleTabIds.push(activeTabId);
+  }
+  for (const id of tabIds) {
+    if (visibleTabIds.length >= capacity) break;
+    if (!visibleTabIds.includes(id)) visibleTabIds.push(id);
+  }
+  if (!activeTabId && visibleTabIds.length) activeTabId = visibleTabIds[0];
+  return {
+    ...window,
+    tabIds,
+    activeTabId,
+    chartLayout: layout,
+    visibleTabIds,
+    splitRatios: normalizeChartSplitRatios(window.splitRatios),
+  };
+}
+
+export function focusChartTab(workspace: WorkspaceState, windowId: string, tabId: string): WorkspaceState {
+  const next = structuredClone(workspace);
+  const window = next.windows.find((item) => item.id === windowId);
+  if (!window || !window.tabIds.includes(tabId)) return workspace;
+  const normalized = reconcileChartWindow(window, next.tabs.map((tab) => tab.id));
+  const visible = [...(normalized.visibleTabIds ?? [])];
+  if (!visible.includes(tabId)) {
+    const focusedIndex = Math.max(0, visible.indexOf(normalized.activeTabId));
+    visible[focusedIndex] = tabId;
+  }
+  Object.assign(window, normalized, { activeTabId: tabId, visibleTabIds: visible });
+  return next;
+}
+
+export function setChartWindowLayout(workspace: WorkspaceState, windowId: string, layout: ChartLayout, createId: () => string = () => `chart-${crypto.randomUUID()}`): WorkspaceState {
+  const desiredCapacity = chartLayoutCapacity(layout);
+  const window = workspace.windows.find((item) => item.id === windowId);
+  if (!window) return workspace;
+  const normalized = reconcileChartWindow(window, workspace.tabs.map((tab) => tab.id));
+  const missing = Math.max(0, desiredCapacity - normalized.tabIds.length);
+  if (workspace.tabs.length + missing > MAX_CHART_TABS) return workspace;
+  const source = workspace.tabs.find((tab) => tab.id === normalized.activeTabId) ?? workspace.tabs[0];
+  if (!source) return workspace;
+  const next = structuredClone(workspace);
+  const target = next.windows.find((item) => item.id === windowId)!;
+  for (let index = 0; index < missing; index += 1) {
+    let id = createId();
+    while (next.tabs.some((tab) => tab.id === id)) id = createId();
+    next.tabs.push(cloneChartTab(source, id));
+    target.tabIds.push(id);
+  }
+  const currentVisible = (normalized.visibleTabIds ?? []).filter((id) => target.tabIds.includes(id));
+  const visibleTabIds = currentVisible.slice(0, desiredCapacity);
+  if (!visibleTabIds.includes(normalized.activeTabId)) {
+    if (visibleTabIds.length >= desiredCapacity) visibleTabIds[desiredCapacity - 1] = normalized.activeTabId;
+    else visibleTabIds.push(normalized.activeTabId);
+  }
+  for (const id of target.tabIds) {
+    if (visibleTabIds.length >= desiredCapacity) break;
+    if (!visibleTabIds.includes(id)) visibleTabIds.push(id);
+  }
+  target.chartLayout = layout;
+  target.visibleTabIds = visibleTabIds;
+  target.splitRatios = normalizeChartSplitRatios(target.splitRatios);
+  return next;
+}
+
+export function setChartWindowSplitRatio(workspace: WorkspaceState, windowId: string, layout: ChartLayout, ratios: number[]): WorkspaceState {
+  const next = structuredClone(workspace);
+  const window = next.windows.find((item) => item.id === windowId);
+  if (!window) return workspace;
+  window.splitRatios = { ...normalizeChartSplitRatios(window.splitRatios), [layout]: normalizeChartSplitRatio(layout, ratios) };
+  return next;
+}
 
 export interface ScreenRect { x: number; y: number; width: number; height: number; }
 
@@ -145,6 +286,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     if (windows[index].id !== MAIN_WINDOW_ID && !windows[index].tabIds.length) windows.splice(index, 1);
   }
   if (!main.tabIds.includes(main.activeTabId)) main.activeTabId = main.tabIds[0] ?? "";
+  const normalizedWindows = windows.map((window) => reconcileChartWindow(window, tabIds));
   const savedBottomTab = value.bottomTab as string | undefined;
   const legacyBottomTab = savedBottomTab === "fills" ? "history" : savedBottomTab === "balances" ? "summary" : savedBottomTab;
   const drawings = Object.fromEntries(Object.entries(value.drawings ?? {}).flatMap(([symbol, items]) => {
@@ -168,7 +310,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     revision: typeof value.revision === "number" ? value.revision : 0,
     environment: value.environment === "live" || value.environment === "sim" ? value.environment : fallback.environment,
     tabs,
-    windows,
+    windows: normalizedWindows,
     watchlist,
     drawings,
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
@@ -280,6 +422,9 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
       && prior.physicalX === window.physicalX && prior.physicalY === window.physicalY
       && prior.physicalWidth === window.physicalWidth && prior.physicalHeight === window.physicalHeight
       && sameArray(prior.tabIds, window.tabIds, (a, b) => a === b)
+      && prior.chartLayout === window.chartLayout
+      && sameArray(prior.visibleTabIds ?? [], window.visibleTabIds ?? [], (a, b) => a === b)
+      && JSON.stringify(prior.splitRatios ?? {}) === JSON.stringify(window.splitRatios ?? {})
       ? prior
       : window;
   });
@@ -328,6 +473,9 @@ export function moveTab(workspace: WorkspaceState, tabId: string, targetWindowId
   const next = structuredClone(workspace);
   let source: ChartWindowState | undefined;
   let sourceIndex = -1;
+  const originalTarget = next.windows.find((window) => window.id === targetWindowId);
+  const originalTargetVisible = [...(originalTarget?.visibleTabIds ?? (originalTarget?.activeTabId ? [originalTarget.activeTabId] : []))];
+  const originalTargetActive = originalTarget?.activeTabId ?? "";
   next.windows.forEach((window) => {
     if (window.tabIds.includes(tabId)) {
       source = window;
@@ -339,8 +487,18 @@ export function moveTab(workspace: WorkspaceState, tabId: string, targetWindowId
   if (!target) return workspace;
   if (source?.id === targetWindowId && sourceIndex < targetIndex) targetIndex -= 1;
   target.tabIds.splice(Math.max(0, Math.min(targetIndex, target.tabIds.length)), 0, tabId);
+  const targetVisible = originalTargetVisible.filter((id) => id !== tabId);
+  if (originalTargetVisible.includes(tabId)) targetVisible.splice(originalTargetVisible.indexOf(tabId), 0, tabId);
+  else {
+    const focusedIndex = Math.max(0, targetVisible.indexOf(originalTargetActive));
+    if (targetVisible.length < chartLayoutCapacity(normalizedChartLayout(target.chartLayout))) targetVisible.push(tabId);
+    else targetVisible[focusedIndex] = tabId;
+  }
   target.activeTabId = tabId;
+  target.visibleTabIds = targetVisible;
   if (source && !source.tabIds.length && source.id !== MAIN_WINDOW_ID) next.windows = next.windows.filter((window) => window.id !== source!.id);
+  const validTabIds = next.tabs.map((tab) => tab.id);
+  next.windows = next.windows.map((window) => reconcileChartWindow(window, validTabIds));
   return next;
 }
 
