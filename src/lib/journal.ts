@@ -46,6 +46,18 @@ export function journalTimelineEvents(events: JournalEvent[]): JournalEvent[] {
   return groups.map((group) => group.event).sort((left, right) => Date.parse(left.occurredAt) - Date.parse(right.occurredAt));
 }
 
+export function journalProjectedTargetR(
+  trade: Pick<JournalTrade, "direction" | "averageEntry" | "originalStop">,
+  target?: number,
+): number | undefined {
+  const { averageEntry: entry, originalStop: stop } = trade;
+  if (target == null || stop == null || !Number.isFinite(target) || !Number.isFinite(entry) || !Number.isFinite(stop)) return undefined;
+  const direction = trade.direction === "Long" ? 1 : -1;
+  const initialPriceRisk = direction * (entry - stop);
+  if (initialPriceRisk <= 0) return undefined;
+  return direction * (target - entry) / initialPriceRisk;
+}
+
 export function journalMetrics(trades: JournalTrade[]): JournalSummaryMetrics {
   const closed = trades.filter((trade) => trade.status === "closed");
   const wins = closed.filter((trade) => trade.netPnl > 0);

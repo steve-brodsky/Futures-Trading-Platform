@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { daySummary, demoJournalTrades, journalCalendarDates, journalDate, journalMetrics, journalTimelineEvents, monthSummary } from "./journal";
+import { daySummary, demoJournalTrades, journalCalendarDates, journalDate, journalMetrics, journalProjectedTargetR, journalTimelineEvents, monthSummary } from "./journal";
 import type { JournalEvent, JournalScope, JournalTrade } from "../types";
 
 const scope: JournalScope = { environment: "sim", accountId: "a", accountLabel: "SIM ••01" };
@@ -59,5 +59,31 @@ describe("journal analytics", () => {
       { id: "later", brokerOrderId: "target-1", eventType: "target-move", occurredAt: "2026-07-16T02:10:00Z", source: "northstar", status: "confirmed", oldPrice: 7629, newPrice: 7627 },
     ];
     expect(journalTimelineEvents(events)).toHaveLength(2);
+  });
+
+  it("calculates projected target R for long and short trades", () => {
+    expect(journalProjectedTargetR({ direction: "Long", averageEntry: 100, originalStop: 95 }, 110)).toBe(2);
+    expect(journalProjectedTargetR({ direction: "Long", averageEntry: 100, originalStop: 95 }, 90)).toBe(-2);
+    expect(journalProjectedTargetR({ direction: "Short", averageEntry: 100, originalStop: 105 }, 90)).toBe(2);
+    expect(journalProjectedTargetR({ direction: "Short", averageEntry: 100, originalStop: 105 }, 110)).toBe(-2);
+  });
+
+  it("omits projected target R when initial price risk is unavailable or invalid", () => {
+    expect(journalProjectedTargetR({ direction: "Long", averageEntry: 100, originalStop: undefined }, 110)).toBeUndefined();
+    expect(journalProjectedTargetR({ direction: "Long", averageEntry: 100, originalStop: 100 }, 110)).toBeUndefined();
+    expect(journalProjectedTargetR({ direction: "Long", averageEntry: 100, originalStop: 101 }, 110)).toBeUndefined();
+    expect(journalProjectedTargetR({ direction: "Short", averageEntry: 100, originalStop: 99 }, 90)).toBeUndefined();
+    expect(journalProjectedTargetR({ direction: "Long", averageEntry: 100, originalStop: 95 }, undefined)).toBeUndefined();
+    expect(journalProjectedTargetR({ direction: "Long", averageEntry: Number.NaN, originalStop: 95 }, 110)).toBeUndefined();
+  });
+
+  it("keeps moved-target R anchored to the original stop", () => {
+    const trade = { direction: "Long" as const, averageEntry: 100, originalStop: 95 };
+    const events: JournalEvent[] = [
+      { id: "stop", eventType: "stop-move", occurredAt: "2026-07-16T02:00:00Z", source: "northstar", status: "confirmed", oldPrice: 95, newPrice: 100 },
+      { id: "target", eventType: "target-move", occurredAt: "2026-07-16T02:01:00Z", source: "northstar", status: "confirmed", oldPrice: 110, newPrice: 115 },
+    ];
+    const targetMove = journalTimelineEvents(events).find((event) => event.eventType === "target-move");
+    expect(journalProjectedTargetR(trade, targetMove?.newPrice)).toBe(3);
   });
 });
