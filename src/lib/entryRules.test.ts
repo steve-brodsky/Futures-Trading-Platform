@@ -110,6 +110,15 @@ describe("entry rules", () => {
     expect(result.nodeResults["ema-cross"]).toBe(false);
   });
 
+  it("treats earlier realtime-delivered bars as closed after a newer candle starts", () => {
+    const streamed = barsFromCloses([100, 100, 101, 99, 98]).map((bar, index) => (
+      index >= 2 ? { ...bar, realtime: true } : bar
+    ));
+    const result = evaluateEntryRules(emaCrossRules("below", 5), streamed, quote).long;
+    expect(result.status).toBe("allowed");
+    expect(result.reason).toContain("crossed below on the most recent closed candle");
+  });
+
   it("counts departure from equality only after the close finishes strictly across the EMA", () => {
     const equality = evaluateEntryRules(emaCrossRules("above", 1), barsFromCloses([100, 100, 100]), quote).long;
     const departure = evaluateEntryRules(emaCrossRules("above", 1), barsFromCloses([100, 100, 100, 101]), quote).long;

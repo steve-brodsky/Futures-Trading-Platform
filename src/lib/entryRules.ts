@@ -114,7 +114,11 @@ interface NodeEvaluation { status: EntryRuleResult["status"]; reason: string }
 function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], quote: Quote): EntryRuleResult {
   const nodeResults: Record<string, boolean | null> = {};
   const closes = bars.map((bar) => bar.close);
-  const closedCloses = bars.filter((bar) => bar.realtime !== true).map((bar) => bar.close);
+  // TradeStation's IsRealtime flag describes bars delivered by the live stream;
+  // it is not cleared on an older bar when the next candle starts. Only the
+  // newest streamed bar can still be forming, so keep earlier streamed candles
+  // in closed-candle lookbacks.
+  const closedCloses = bars.at(-1)?.realtime === true ? closes.slice(0, -1) : closes;
   const averages = new Map<string, number | null>();
   const closedEmaValues = new Map<number, Array<number | null>>();
 
