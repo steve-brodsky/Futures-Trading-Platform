@@ -38,8 +38,8 @@ export function sameEntryRuleAlerts(left: EntryRuleAlertConfig, right: EntryRule
     && left[side].durationSeconds === right[side].durationSeconds);
 }
 
-export function entryRuleAlertEpoch(environment: string, rules: EntryRules, alerts: EntryRuleAlertConfig): string {
-  return `${environment}\u0000${alerts.long.enabled}\u0000${alerts.short.enabled}\u0000${JSON.stringify(rules)}`;
+export function entryRuleAlertEpoch(scope: string, rules: EntryRules, alerts: EntryRuleAlertConfig): string {
+  return `${scope}\u0000${alerts.long.enabled}\u0000${alerts.short.enabled}\u0000${JSON.stringify(rules)}`;
 }
 
 export interface EntryRuleAlertMarketInput {
@@ -48,6 +48,7 @@ export interface EntryRuleAlertMarketInput {
   timeframe: Timeframe;
   bars: Bar[];
   quote: Quote;
+  hasOpenPosition: boolean;
 }
 
 export interface EntryRuleAlertTrackerState {
@@ -77,6 +78,7 @@ export function trackEntryRuleAlertTransitions(
     const existing = markets.get(key);
     if (existing) {
       if (!existing.tabIds.includes(input.tabId)) existing.tabIds.push(input.tabId);
+      existing.hasOpenPosition ||= input.hasOpenPosition;
       return;
     }
     markets.set(key, { ...input, tabIds: [input.tabId] });
@@ -91,9 +93,10 @@ export function trackEntryRuleAlertTransitions(
       if (!alerts[side].enabled || rules[side].children.length === 0) return;
       const key = `${marketKey}\u0000${side}`;
       const result = evaluation[side];
-      statuses[key] = result.status;
+      const status = market.hasOpenPosition ? "blocked" : result.status;
+      statuses[key] = status;
       if (canTrigger && previous?.statuses[key] != null
-        && previous.statuses[key] !== "allowed" && result.status === "allowed") {
+        && previous.statuses[key] !== "allowed" && status === "allowed") {
         transitions.push({ key, symbol: market.symbol, timeframe: market.timeframe, side, reason: result.reason, tabIds: market.tabIds });
       }
     });

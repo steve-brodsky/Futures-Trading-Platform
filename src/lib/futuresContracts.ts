@@ -1,4 +1,4 @@
-import type { ChartTabState, SymbolMeta, WorkspaceState } from "../types";
+import type { ChartTabState, Position, SymbolMeta, WorkspaceState } from "../types";
 import { MAX_STREAMED_QUOTE_SYMBOLS } from "./watchlist";
 
 export function isContinuousFuture(symbol: SymbolMeta): boolean {
@@ -8,6 +8,33 @@ export function isContinuousFuture(symbol: SymbolMeta): boolean {
 function concreteSymbol(value?: string): string | undefined {
   const symbol = value?.trim().toUpperCase();
   return symbol && !symbol.startsWith("@") ? symbol : undefined;
+}
+
+function normalizedSymbol(value?: string): string | undefined {
+  const symbol = value?.trim().toUpperCase();
+  return symbol || undefined;
+}
+
+function contractRoot(value?: string): string | undefined {
+  const symbol = normalizedSymbol(value);
+  if (!symbol) return undefined;
+  if (symbol.startsWith("@")) return symbol.slice(1) || undefined;
+  return /^(.+)[FGHJKMNQUVXZ]\d{1,2}$/.exec(symbol)?.[1];
+}
+
+function symbolRoot(meta: SymbolMeta): string | undefined {
+  return normalizedSymbol(meta.root)?.replace(/^@/, "") || contractRoot(meta.symbol);
+}
+
+export function hasOpenFuturesPosition(meta: SymbolMeta, positions: Position[]): boolean {
+  const marketSymbol = normalizedSymbol(meta.symbol);
+  const marketRoot = symbolRoot(meta);
+  return positions.some((position) => {
+    if (!Number.isFinite(position.quantity) || Math.abs(position.quantity) === 0) return false;
+    const positionSymbol = normalizedSymbol(position.symbol);
+    if (!positionSymbol) return false;
+    return positionSymbol === marketSymbol || Boolean(marketRoot && contractRoot(positionSymbol) === marketRoot);
+  });
 }
 
 export function resolveTradeSymbol(tab: ChartTabState): string | undefined {

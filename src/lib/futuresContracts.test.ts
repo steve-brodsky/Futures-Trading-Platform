@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { ChartTabState, SymbolMeta } from "../types";
+import type { ChartTabState, Position, SymbolMeta } from "../types";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
-import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol } from "./futuresContracts";
+import { canAddWatchlistSymbol, formatContractExpiration, hasOpenFuturesPosition, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol } from "./futuresContracts";
 
 const continuous: SymbolMeta = { symbol: "@MES", root: "MES", underlying: "MESU26", description: "Continuous MES", exchange: "CME", assetType: "FUTURE", minMove: .25, pointValue: 5 };
 const tab = (symbol: SymbolMeta, tradeContract?: string): ChartTabState => ({ id: symbol.symbol, symbol, tradeContract, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false });
+const position = (symbol: string, quantity = 1): Position => ({ id: symbol, symbol, side: "Long", quantity, averagePrice: 100, last: 101, unrealizedPnl: 1 });
 
 describe("futures trade-contract resolution", () => {
   it("uses concrete chart symbols directly", () => {
@@ -23,6 +24,18 @@ describe("futures trade-contract resolution", () => {
 
   it("does not guess when TradeStation omits the underlying", () => {
     expect(resolveTradeSymbol(tab({ ...continuous, underlying: undefined }))).toBeUndefined();
+  });
+
+  it("matches open positions across every contract in a continuous futures family", () => {
+    expect(hasOpenFuturesPosition(continuous, [position(" mesz26 ")])).toBe(true);
+    expect(hasOpenFuturesPosition(continuous, [position("MESU26")])).toBe(true);
+  });
+
+  it("derives concrete roots and ignores other families and flat positions", () => {
+    const concrete = { ...continuous, symbol: "MESU26", root: undefined, underlying: undefined };
+    expect(hasOpenFuturesPosition(concrete, [position("MESZ26")])).toBe(true);
+    expect(hasOpenFuturesPosition(concrete, [position("MNQU26")])).toBe(false);
+    expect(hasOpenFuturesPosition(concrete, [position("MESZ26", 0)])).toBe(false);
   });
 
   it("deduplicates chart, watchlist, and resolved trade quote subscriptions", () => {

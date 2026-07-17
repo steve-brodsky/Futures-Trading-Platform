@@ -22,7 +22,7 @@ const enabled = (): EntryRuleAlertConfig => ({
   long: { enabled: true, sound: "chime", durationSeconds: 3 },
 });
 const input = (price: number, tabId = "chart-1"): EntryRuleAlertMarketInput => ({
-  tabId, symbol: "MES", timeframe: "1m", bars, quote: quote(price),
+  tabId, symbol: "MES", timeframe: "1m", bars, quote: quote(price), hasOpenPosition: false,
 });
 
 describe("entry rule alerts", () => {
@@ -69,6 +69,35 @@ describe("entry rule alerts", () => {
     const primed = trackEntryRuleAlertTransitions(undefined, epoch, bothRules, bothAlerts, [{ ...input(99), quote: quote(99, 101) }]);
     const triggered = trackEntryRuleAlertTransitions(primed.state, epoch, bothRules, bothAlerts, [{ ...input(101), quote: quote(101, 99) }]);
     expect(triggered.transitions.map((item) => item.side)).toEqual(["long", "short"]);
+  });
+
+  it("blocks both sides for an open position and alerts once after it closes", () => {
+    const bothRules = rules();
+    bothRules.short.children = [{
+      id: "short-price", kind: "condition", left: { kind: "marketPrice" }, operator: "below",
+      right: { kind: "movingAverage", average: "SMA", period: 1 },
+    }];
+    const bothAlerts: EntryRuleAlertConfig = {
+      long: { enabled: true, sound: "chime", durationSeconds: 3 },
+      short: { enabled: true, sound: "bell", durationSeconds: 1 },
+    };
+    const epoch = entryRuleAlertEpoch("sim\u0000account-1", bothRules, bothAlerts);
+    const open = trackEntryRuleAlertTransitions(undefined, epoch, bothRules, bothAlerts, [{
+      ...input(101), quote: quote(101, 99), hasOpenPosition: true,
+    }]);
+    expect(open.transitions).toEqual([]);
+    expect(open.state.statuses).toEqual({
+      "MES\u00001m\u0000long": "blocked",
+      "MES\u00001m\u0000short": "blocked",
+    });
+
+    const closed = trackEntryRuleAlertTransitions(open.state, epoch, bothRules, bothAlerts, [{
+      ...input(101), quote: quote(101, 99), hasOpenPosition: false,
+    }]);
+    expect(closed.transitions.map((item) => item.side)).toEqual(["long", "short"]);
+    expect(trackEntryRuleAlertTransitions(closed.state, epoch, bothRules, bothAlerts, [{
+      ...input(101), quote: quote(101, 99), hasOpenPosition: false,
+    }]).transitions).toEqual([]);
   });
 
   it("suppresses disabled and empty sides", () => {

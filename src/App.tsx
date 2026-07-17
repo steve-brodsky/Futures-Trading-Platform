@@ -26,7 +26,7 @@ import {
   defaultEntryRuleAlerts, entryRuleAlertEpoch, trackEntryRuleAlertTransitions,
   type EntryRuleAlertTrackerState, type EntryRuleAlertTransition,
 } from "./lib/entryRuleAlerts";
-import { canAddWatchlistSymbol, formatContractExpiration, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
+import { canAddWatchlistSymbol, formatContractExpiration, hasOpenFuturesPosition, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { quoteDayChangePercent } from "./lib/quotes";
 import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
 import { calculateSwingStop } from "./lib/swingStop";
@@ -190,6 +190,10 @@ function blockedEntryResult(reason: string): EntryRuleResult {
   return { allowed: false, status: "waiting", reason, nodeResults: {} };
 }
 
+function positionSnapshotScope(environment: TradingEnvironment, accountId: string): string {
+  return `${environment}\u0000${accountId}`;
+}
+
 function IconButton({ label, active, children, onClick }: { label: string; active?: boolean; children: React.ReactNode; onClick?: () => void }) {
   return <button className={`icon-button ${active ? "active" : ""}`} aria-label={label} aria-pressed={active == null ? undefined : active} title={label} onClick={onClick}>{children}</button>;
 }
@@ -236,6 +240,7 @@ function TradingApp() {
   const vwapMarketsRef = useRef(vwapMarkets);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [positions, setPositions] = useState<Position[]>(api.isNative ? [] : demoPositions);
+  const [positionsReadyScope, setPositionsReadyScope] = useState<string>();
   const [orders, setOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoOrders);
   const [balances, setBalances] = useState<AccountBalance[]>([]);
   const [bodBalances, setBodBalances] = useState<AccountBalance[]>([]);
@@ -667,6 +672,7 @@ function TradingApp() {
         if (payload.accountId !== selectedAccountIdRef.current) return;
         const protectedIds = activeProtectionIds(recentPositionIdsRef.current);
         setPositions((current) => reconcilePositionSnapshot(current, payload.positions, protectedIds));
+        setPositionsReadyScope(positionSnapshotScope(environmentRef.current, payload.accountId));
         setBrokerageError(undefined);
         brokerageBalanceRefreshRef.current();
       }).then((unlisten) => cleanups.push(unlisten));
@@ -797,7 +803,17 @@ function TradingApp() {
 
   const selectedAccount = accounts.find((account) => account.id === workspace.selectedAccountId) ?? accounts[0];
   selectedAccountIdRef.current = selectedAccount?.id;
+  const entryRuleAccountId = selectedAccount?.id ?? (api.isNative ? undefined : "demo");
+  const entryRulePositionScope = entryRuleAccountId ? positionSnapshotScope(environment, entryRuleAccountId) : undefined;
+  const entryRulePositionsReady = !api.isNative || positionsReadyScope === entryRulePositionScope;
   const brokerageStreamsHealthy = areBrokerageStreamsHealthy(brokerageStreamStates);
+
+  useEffect(() => {
+    if (currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
+    setPositions([]);
+    setPositionsReadyScope(undefined);
+    recentPositionIdsRef.current.clear();
+  }, [selectedAccount?.id, environment]);
 
   useEffect(() => {
     if (currentWindowId !== MAIN_WINDOW_ID || !selectedAccount) return;
@@ -832,6 +848,7 @@ function TradingApp() {
               if (nextPositions) {
                 const protectedIds = activeProtectionIds(recentPositionIdsRef.current);
                 setPositions((current) => reconcilePositionSnapshot(current, nextPositions, protectedIds));
+                setPositionsReadyScope(positionSnapshotScope(environment, selectedAccount.id));
               }
               if (nextOrders) {
                 const protectedIds = activeProtectionIds(recentOrderIdsRef.current);
@@ -1050,7 +1067,7 @@ function TradingApp() {
   }, [alertMarketsKey, alertOwnershipKey, tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
 
   useEffect(() => {
-    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !entryRulePositionScope || !entryRulePositionsReady) return;
     const inputs = workspace.tabs.flatMap((tab) => {
       const tabMarket = tabMarkets[tab.id];
       const quote = quotes[tab.symbol.symbol];
@@ -1068,9 +1085,10 @@ function TradingApp() {
         timeframe: tab.timeframe,
         bars: tabMarket.bars,
         quote,
+        hasOpenPosition: hasOpenFuturesPosition(tab.symbol, positions),
       }];
     });
-    const epoch = entryRuleAlertEpoch(environment, workspace.entryRules, workspace.entryRuleAlerts);
+    const epoch = entryRuleAlertEpoch(entryRulePositionScope, workspace.entryRules, workspace.entryRuleAlerts);
     const tracked = trackEntryRuleAlertTransitions(
       entryRuleAlertTrackerRef.current,
       epoch,
@@ -1117,7 +1135,7 @@ function TradingApp() {
     showToast(tracked.transitions.map((transition) => (
       `${transition.symbol} ${transition.timeframe} ${transition.side === "long" ? "Long" : "Short"} entry allowed: ${transition.reason}`
     )).join(" · "));
-  }, [workspaceLoaded, environment, tabStreamKey, workspace.entryRules, workspace.entryRuleAlerts, tabMarkets, quotes]);
+  }, [workspaceLoaded, entryRulePositionScope, entryRulePositionsReady, tabStreamKey, workspace.entryRules, workspace.entryRuleAlerts, tabMarkets, quotes, positions]);
 
   useEffect(() => {
     setEntryRuleTabSignals((current) => {
