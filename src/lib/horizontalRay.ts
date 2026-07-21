@@ -1,5 +1,5 @@
 import type { IChartApi, IPrimitivePaneRenderer, IPrimitivePaneView, ISeriesApi, ISeriesPrimitive, SeriesAttachedParameter, Time } from "lightweight-charts";
-import type { Drawing } from "../types";
+import type { LineDrawing } from "../types";
 
 export function nearestChartTime(anchor: number, times: number[]): number {
   if (!times.length) return anchor;
@@ -14,7 +14,7 @@ export class HorizontalRayPrimitive implements ISeriesPrimitive<Time> {
   private chart: IChartApi | null = null;
   private series: ISeriesApi<any> | null = null;
   private requestUpdate?: () => void;
-  private drawings: Drawing[] = [];
+  private drawings: LineDrawing[] = [];
   private times: Array<{ plotTime: number; sourceTime: number }> = [];
   private readonly renderer: IPrimitivePaneRenderer = { draw: (target) => {
     if (!this.chart || !this.series) return;
@@ -35,7 +35,7 @@ export class HorizontalRayPrimitive implements ISeriesPrimitive<Time> {
   attached({ chart, series, requestUpdate }: SeriesAttachedParameter<Time>) { this.chart = chart as IChartApi; this.series = series as ISeriesApi<any>; this.requestUpdate = requestUpdate; }
   detached() { this.chart = null; this.series = null; this.requestUpdate = undefined; }
   paneViews() { return [this.view]; }
-  setDrawings(drawings: Drawing[]) { this.drawings = drawings; this.requestUpdate?.(); }
+  setDrawings(drawings: LineDrawing[]) { this.drawings = drawings; this.requestUpdate?.(); }
   setTimes(times: number[]) { this.setTimePoints(times.map((time) => ({ plotTime: time, sourceTime: time }))); }
   setTimePoints(times: Array<{ plotTime: number; sourceTime: number }>) { this.times = times; this.requestUpdate?.(); }
 }

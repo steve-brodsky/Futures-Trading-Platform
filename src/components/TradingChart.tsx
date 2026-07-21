@@ -2,9 +2,9 @@ import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, 
 import { ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, X } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
-  type IChartApi, type IPriceLine, type ISeriesApi, type LogicalRange, type Time,
+  type IChartApi, type IPriceLine, type ISeriesApi, type Logical, type LogicalRange, type Time,
 } from "lightweight-charts";
-import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, Drawing, IndicatorConfig, OrderUpdate, PointAndFigureSettings, Position, RenkoSettings, Timeframe } from "../types";
+import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, ChartTool, Drawing, DrawingPatch, IndicatorConfig, LineDrawing, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme } from "../lib/crosshair";
@@ -16,6 +16,7 @@ import { NySessionVwapPrimitive } from "../lib/nySessionVwapPrimitive";
 import { buildPointAndFigure, buildRenko, type PointAndFigureColumn, type RenkoBrick } from "../lib/priceBasedCharts";
 import { PointAndFigureSeries, type PointAndFigureSeriesData } from "../lib/pointAndFigureSeries";
 import { approximateDataUrlBytes, ENTRY_SCREENSHOT_MAX_BYTES } from "../lib/entryScreenshot";
+import { createPositionDrawing, logicalToSourceTime, movePositionDrawing, normalizePositionQuantity, positionMetrics, sourceTimeToLogical, updatePositionPrice } from "../lib/positionDrawing";
 
 interface Props {
   bars: Bar[];
@@ -46,11 +47,11 @@ interface Props {
   onClosePosition: (position: Position) => void;
   onReplaceOrder: (order: OrderUpdate, newPrice: number) => void | Promise<void>;
   loadingOlder: boolean;
-  activeTool: string;
+  activeTool: ChartTool;
   drawings: Drawing[];
   onToolComplete: () => void;
   onCreateDrawing: (drawing: Drawing) => void;
-  onUpdateDrawing: (id: string, patch: Partial<Drawing>) => void;
+  onUpdateDrawing: (id: string, patch: DrawingPatch) => void;
   onDeleteDrawing: (id: string) => void;
   initialVisibleRange?: { from: number; to: number };
   onVisibleRangeChange?: (range: { from: number; to: number }) => void;
@@ -77,6 +78,18 @@ const pricePrecision = (minMove: number) => {
 };
 
 type DisplayItem = Bar | RenkoBrick | PointAndFigureColumn;
+
+interface PositionCoordinates {
+  startX: number;
+  endX: number;
+  entryY: number;
+  stopY: number;
+  targetY: number;
+}
+
+type PositionDragKind = "body" | "entry" | "stop" | "target" | "start" | "end";
+
+const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const host = useRef<HTMLDivElement>(null);
@@ -107,6 +120,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const [chartGeneration, setChartGeneration] = useState(0);
   const [drawingMenu, setDrawingMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [movingDrawingId, setMovingDrawingId] = useState<string | null>(null);
+  const [selectedPositionId, setSelectedPositionId] = useState<string | null>(null);
+  const [positionCoordinates, setPositionCoordinates] = useState<Record<string, PositionCoordinates>>({});
   const [tradeLineTops, setTradeLineTops] = useState<Record<string, number>>({});
   const [candleCountdown, setCandleCountdown] = useState("");
   const [candleCountdownTop, setCandleCountdownTop] = useState<number | null>(null);
@@ -116,6 +131,16 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const draggingProjectionRef = useRef<typeof draggingProjection>(null);
   const syncTradeLabelsRef = useRef<() => void>(() => undefined);
   const movingDrawingIdRef = useRef<string | null>(null);
+  const positionDragRef = useRef<{
+    id: string;
+    kind: PositionDragKind;
+    pointerId: number;
+    originX: number;
+    originY: number;
+    originLogical: number;
+    originPrice: number;
+    drawing: PositionDrawing;
+  } | null>(null);
   const isSynthetic = kind === "renko" || kind === "point-and-figure";
   const renkoBricks = useMemo(() => kind === "renko" ? buildRenko(bars, minMove, renkoSettings) : [], [bars, kind, minMove, renkoSettings]);
   const pointAndFigureColumns = useMemo(() => kind === "point-and-figure" ? buildPointAndFigure(bars, minMove, pointAndFigureSettings) : [], [bars, kind, minMove, pointAndFigureSettings]);
@@ -227,16 +252,49 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       if (keys.length === Object.keys(current).length && keys.every((key) => current[key] === next[key])) return current;
       return next;
     });
+    const chart = chartRef.current;
+    if (!chart) return;
+    const positionNext: Record<string, PositionCoordinates> = {};
+    drawingsRef.current.forEach((drawing) => {
+      if (drawing.kind !== "position") return;
+      const startX = chart.timeScale().logicalToCoordinate(sourceTimeToLogical(drawing.startTime, plotPointsRef.current) as Logical);
+      const endX = chart.timeScale().logicalToCoordinate(sourceTimeToLogical(drawing.endTime, plotPointsRef.current) as Logical);
+      const entryY = price.priceToCoordinate(drawing.entryPrice);
+      const stopY = price.priceToCoordinate(drawing.stopPrice);
+      const targetY = price.priceToCoordinate(drawing.targetPrice);
+      if ([startX, endX, entryY, stopY, targetY].some((value) => value == null)) return;
+      positionNext[drawing.id] = { startX: Number(startX), endX: Number(endX), entryY: Number(entryY), stopY: Number(stopY), targetY: Number(targetY) };
+    });
+    setPositionCoordinates((current) => {
+      const ids = Object.keys(positionNext);
+      if (ids.length === Object.keys(current).length && ids.every((id) => {
+        const left = current[id]; const right = positionNext[id];
+        return left && left.startX === right.startX && left.endX === right.endX && left.entryY === right.entryY && left.stopY === right.stopY && left.targetY === right.targetY;
+      })) return current;
+      return positionNext;
+    });
   };
 
   useEffect(() => {
     setDrawingMenu(null);
-    if (activeTool !== "cursor") { movingDrawingIdRef.current = null; setMovingDrawingId(null); }
+    if (activeTool !== "cursor") { movingDrawingIdRef.current = null; setMovingDrawingId(null); setSelectedPositionId(null); }
   }, [activeTool, symbol]);
+
+  useEffect(() => { setSelectedPositionId(null); }, [symbol]);
 
   useEffect(() => {
     const close = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      const drag = positionDragRef.current;
+      if (drag) {
+        const original = drag.drawing;
+        drawingCallbacksRef.current.onUpdateDrawing(original.id, {
+          startTime: original.startTime, endTime: original.endTime, entryPrice: original.entryPrice,
+          stopPrice: original.stopPrice, targetPrice: original.targetPrice,
+        });
+        positionDragRef.current = null;
+        chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
+      }
       setDrawingMenu(null); movingDrawingIdRef.current = null; setMovingDrawingId(null);
     };
     window.addEventListener("keydown", close);
@@ -321,10 +379,11 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       settingCrosshair = false;
     });
     chart.subscribeClick((param) => {
-      if (!param.point) { setDrawingMenu(null); return; }
+      if (!param.point) { setDrawingMenu(null); setSelectedPositionId(null); return; }
       const tool = activeToolRef.current;
-      if (!movingDrawingIdRef.current && tool !== "horizontal" && tool !== "horizontal-ray") {
+      if (!movingDrawingIdRef.current && tool === "cursor") {
         const hits = drawingsRef.current.filter((drawing) => {
+          if (drawing.kind === "position") return false;
           const y = priceSeries.priceToCoordinate(drawing.points[0].price);
           if (y == null || Math.abs(y - param.point!.y) > 6) return false;
           if (drawing.kind !== "horizontal-ray") return drawing.kind === "horizontal";
@@ -334,6 +393,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         });
         const selected = hits.at(-1);
         if (selected) {
+          setSelectedPositionId(null);
           setDrawingMenu({ id: selected.id, x: Math.min(param.point.x + 10, Math.max(8, (host.current?.clientWidth ?? 240) - 190)), y: Math.min(param.point.y + 10, Math.max(8, (host.current?.clientHeight ?? 180) - 170)) });
           return;
         }
@@ -368,8 +428,18 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         drawingCallbacksRef.current.onCreateDrawing({ id: crypto.randomUUID(), kind: tool, points: [{ time, price: clickedPrice }], color: "#ffffff", locked: false, lineWidth: 1 });
         drawingCallbacksRef.current.onToolComplete(); setDrawingMenu(null); return;
       }
+      if (tool === "long-position" || tool === "short-position") {
+        const startLogical = chart.timeScale().coordinateToLogical(param.point.x) ?? 0 as Logical;
+        const drawing = createPositionDrawing({
+          id: crypto.randomUUID(), side: tool === "long-position" ? "long" : "short", entryPrice: clickedPrice,
+          startTime: time, endTime: logicalToSourceTime(Number(startLogical) + 20, plotPointsRef.current), minMove,
+        });
+        drawingCallbacksRef.current.onCreateDrawing(drawing);
+        drawingCallbacksRef.current.onToolComplete(); setDrawingMenu(null); return;
+      }
 
       setDrawingMenu(null);
+      if (tool === "cursor") setSelectedPositionId(null);
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange((range: LogicalRange | null) => {
       syncTradeLabelsRef.current();
@@ -499,7 +569,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     if (!price) return;
     drawingLineRefs.current.forEach((line) => price.removePriceLine(line));
     drawingLineRefs.current = drawings
-      .filter((drawing) => drawing.kind === "horizontal" || drawing.kind === "horizontal-ray")
+      .filter((drawing): drawing is LineDrawing => drawing.kind === "horizontal" || drawing.kind === "horizontal-ray")
       .map((drawing) => price.createPriceLine({
         price: drawing.points[0].price,
         color: drawing.color,
@@ -510,8 +580,10 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         axisLabelColor: drawing.color,
         title: "",
       }));
-    rayPrimitiveRef.current?.setDrawings(drawings.filter((drawing) => drawing.kind === "horizontal-ray"));
+    rayPrimitiveRef.current?.setDrawings(drawings.filter((drawing): drawing is LineDrawing => drawing.kind === "horizontal-ray"));
     if (drawingMenu && !drawings.some((drawing) => drawing.id === drawingMenu.id)) setDrawingMenu(null);
+    if (selectedPositionId && !drawings.some((drawing) => drawing.id === selectedPositionId && drawing.kind === "position")) setSelectedPositionId(null);
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
   }, [drawings, chartGeneration]);
 
   useEffect(() => {
@@ -683,6 +755,79 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   };
 
+  const startPositionDrag = (event: ReactPointerEvent<HTMLElement>, drawing: PositionDrawing, kind: PositionDragKind) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedPositionId(drawing.id);
+    setDrawingMenu(null);
+    if (drawing.locked) return;
+    const chart = chartRef.current;
+    const price = priceRef.current;
+    const bounds = host.current?.getBoundingClientRect();
+    if (!chart || !price || !bounds) return;
+    const originX = event.clientX - bounds.left;
+    const originY = event.clientY - bounds.top;
+    const originLogical = Number(chart.timeScale().coordinateToLogical(originX) ?? 0);
+    const originPrice = price.coordinateToPrice(originY) ?? drawing.entryPrice;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    positionDragRef.current = { id: drawing.id, kind, pointerId: event.pointerId, originX, originY, originLogical, originPrice, drawing: { ...drawing } };
+    chart.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: false, horzTouchDrag: false, vertTouchDrag: false } });
+  };
+
+  const movePositionDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = positionDragRef.current;
+    const chart = chartRef.current;
+    const price = priceRef.current;
+    const bounds = host.current?.getBoundingClientRect();
+    if (!drag || drag.pointerId !== event.pointerId || !chart || !price || !bounds) return;
+    event.preventDefault();
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    const logical = Number(chart.timeScale().coordinateToLogical(x) ?? drag.originLogical);
+    const rawPrice = price.coordinateToPrice(y) ?? drag.originPrice;
+    let next = drag.drawing;
+    if (drag.kind === "body") {
+      const startLogical = sourceTimeToLogical(drag.drawing.startTime, plotPointsRef.current);
+      const shiftedStartTime = logicalToSourceTime(startLogical + logical - drag.originLogical, plotPointsRef.current);
+      next = movePositionDrawing(drag.drawing, shiftedStartTime - drag.drawing.startTime, rawPrice - drag.originPrice, minMove);
+    } else if (drag.kind === "entry" || drag.kind === "stop" || drag.kind === "target") {
+      const field = `${drag.kind}Price` as "entryPrice" | "stopPrice" | "targetPrice";
+      next = updatePositionPrice(drag.drawing, field, drag.drawing[field] + rawPrice - drag.originPrice, minMove);
+    } else {
+      const otherLogical = sourceTimeToLogical(drag.kind === "start" ? drag.drawing.endTime : drag.drawing.startTime, plotPointsRef.current);
+      const constrained = drag.kind === "start" ? Math.min(logical, otherLogical - 1) : Math.max(logical, otherLogical + 1);
+      const changedTime = logicalToSourceTime(constrained, plotPointsRef.current);
+      next = { ...drag.drawing, [drag.kind === "start" ? "startTime" : "endTime"]: changedTime };
+    }
+    drawingCallbacksRef.current.onUpdateDrawing(next.id, {
+      startTime: next.startTime, endTime: next.endTime, entryPrice: next.entryPrice,
+      stopPrice: next.stopPrice, targetPrice: next.targetPrice,
+    });
+  };
+
+  const finishPositionDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = positionDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    positionDragRef.current = null;
+    chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
+    requestAnimationFrame(() => syncTradeLabelsRef.current());
+  };
+
+  const cancelPositionDrag = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = positionDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    drawingCallbacksRef.current.onUpdateDrawing(drag.id, {
+      startTime: drag.drawing.startTime, endTime: drag.drawing.endTime, entryPrice: drag.drawing.entryPrice,
+      stopPrice: drag.drawing.stopPrice, targetPrice: drag.drawing.targetPrice,
+    });
+    positionDragRef.current = null;
+    chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
+  };
+
   const promoteTradeLine = (lineId: string) => {
     const price = priceRef.current;
     const line = tradeLineRefs.current.get(lineId);
@@ -693,6 +838,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   };
 
   const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
+  const selectedPosition = selectedDrawing?.kind === "position" ? selectedDrawing : undefined;
+  const selectedLineDrawing = selectedDrawing && selectedDrawing.kind !== "position" ? selectedDrawing : undefined;
 
   return (
     <section className="chart-stage" aria-label={`${symbol} chart`}>
@@ -705,6 +852,53 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       </div>
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />
+      <div className={`position-drawing-layer ${activeTool === "cursor" ? "interactive" : "placing"}`}>
+        {drawings.filter((drawing): drawing is PositionDrawing => drawing.kind === "position").map((drawing) => {
+          const coordinates = positionCoordinates[drawing.id];
+          if (!coordinates) return null;
+          const left = Math.min(coordinates.startX, coordinates.endX);
+          const right = Math.max(coordinates.startX, coordinates.endX);
+          const width = Math.max(2, right - left);
+          const profitTop = Math.min(coordinates.targetY, coordinates.entryY);
+          const profitHeight = Math.max(1, Math.abs(coordinates.entryY - coordinates.targetY));
+          const riskTop = Math.min(coordinates.stopY, coordinates.entryY);
+          const riskHeight = Math.max(1, Math.abs(coordinates.stopY - coordinates.entryY));
+          const insetHandleY = (levelY: number, towardY: number) => levelY + Math.sign(towardY - levelY) * Math.min(18, Math.abs(towardY - levelY) / 2);
+          const targetHandleY = insetHandleY(coordinates.targetY, coordinates.entryY);
+          const stopHandleY = insetHandleY(coordinates.stopY, coordinates.entryY);
+          const timeHandleY = insetHandleY(coordinates.entryY, coordinates.targetY);
+          const values = positionMetrics(drawing, minMove, pointValue, currentPrice > 0 ? currentPrice : liveBar?.close ?? drawing.entryPrice);
+          const selected = selectedPositionId === drawing.id;
+          const dragHandlers = {
+            onPointerMove: movePositionDrag,
+            onPointerUp: finishPositionDrag,
+            onPointerCancel: cancelPositionDrag,
+          };
+          return <div key={drawing.id} className={`position-drawing ${drawing.side} ${selected ? "selected" : ""} ${drawing.locked ? "locked" : ""}`}>
+            <div className="position-zone profit" style={{ left, top: profitTop, width, height: profitHeight }} onPointerDown={(event) => startPositionDrag(event, drawing, "body")} {...dragHandlers} />
+            <div className="position-zone risk" style={{ left, top: riskTop, width, height: riskHeight }} onPointerDown={(event) => startPositionDrag(event, drawing, "body")} {...dragHandlers} />
+            <div className="position-level target" style={{ left, top: coordinates.targetY, width }} />
+            <div className="position-level entry" style={{ left, top: coordinates.entryY, width }} onPointerDown={(event) => startPositionDrag(event, drawing, "entry")} {...dragHandlers} />
+            <div className="position-level stop" style={{ left, top: coordinates.stopY, width }} />
+            <div className="position-label target" style={{ left: left + width / 2, top: coordinates.targetY }}>
+              Target: {values.targetDistance.toFixed(pricePrecision(minMove))} ({values.targetPercent.toFixed(3)}%) {values.targetTicks} ticks · Profit {currency.format(values.targetAmount)}
+            </div>
+            <div className={`position-label entry ${values.openPnl > 0 ? "pnl-positive" : values.openPnl < 0 ? "pnl-negative" : ""}`} style={{ left: left + width / 2, top: coordinates.entryY }} onPointerDown={(event) => startPositionDrag(event, drawing, "entry")} {...dragHandlers}>
+              <span>{drawing.side.toUpperCase()} · Open P&amp;L {values.openPnl >= 0 ? "+" : ""}{currency.format(values.openPnl)} · Qty {drawing.quantity} · R/R {values.riskReward.toFixed(2)}</span>
+              <button type="button" aria-label={`Edit ${drawing.side} position drawing`} title="Edit position drawing" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); setSelectedPositionId(drawing.id); setDrawingMenu({ id: drawing.id, x: Math.min(left + width / 2 + 12, Math.max(8, (host.current?.clientWidth ?? 240) - 232)), y: Math.min(coordinates.entryY + 12, Math.max(8, (host.current?.clientHeight ?? 180) - 276)) }); }}>•••</button>
+            </div>
+            <div className="position-label stop" style={{ left: left + width / 2, top: coordinates.stopY }}>
+              Stop: {values.riskDistance.toFixed(pricePrecision(minMove))} ({values.riskPercent.toFixed(3)}%) {values.riskTicks} ticks · Risk {currency.format(values.riskAmount)}
+            </div>
+            {selected && !drawing.locked && <>
+              <button type="button" className="position-handle target" style={{ left: coordinates.startX, top: targetHandleY }} aria-label="Adjust target price" onPointerDown={(event) => startPositionDrag(event, drawing, "target")} {...dragHandlers} />
+              <button type="button" className="position-handle stop" style={{ left: coordinates.startX, top: stopHandleY }} aria-label="Adjust stop price" onPointerDown={(event) => startPositionDrag(event, drawing, "stop")} {...dragHandlers} />
+              <button type="button" className="position-handle start" style={{ left: coordinates.startX, top: timeHandleY }} aria-label="Adjust position start time" onPointerDown={(event) => startPositionDrag(event, drawing, "start")} {...dragHandlers} />
+              <button type="button" className="position-handle end" style={{ left: coordinates.endX, top: timeHandleY }} aria-label="Adjust position end time" onPointerDown={(event) => startPositionDrag(event, drawing, "end")} {...dragHandlers} />
+            </>}
+          </div>;
+        })}
+      </div>
       {isSynthetic && bars.length > 0 && displayItems.length === 0 && <div className="synthetic-empty"><strong>Not enough price movement</strong><span>Reduce the {kind === "renko" ? "brick" : "box"} size or load more history.</span></div>}
       {candleCountdownTop != null && liveBar && (candleCountdown || isSynthetic) && <div
         className={`current-price-label ${candleCountdownTone} ${isSynthetic ? "price-only" : ""}`}
@@ -747,14 +941,28 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       })}
       <div className="chart-watermark">{symbol}</div>
       {movingDrawingId && <div className="drawing-move-hint">Click a new chart position to move the drawing · Esc to cancel</div>}
-      {selectedDrawing && drawingMenu && <>
+      {selectedLineDrawing && drawingMenu && <>
         <button className="drawing-menu-backdrop" aria-label="Close drawing menu" onClick={() => setDrawingMenu(null)} />
-        <div className="drawing-menu" role="menu" aria-label={`${selectedDrawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"} options`} style={{ left: drawingMenu.x, top: drawingMenu.y }}>
-          <label className="drawing-menu-color"><input type="color" value={selectedDrawing.color} aria-label="Drawing color" onChange={(event) => onUpdateDrawing(selectedDrawing.id, { color: event.target.value })} /><span style={{ background: selectedDrawing.color }} />Color</label>
-          <label className="drawing-menu-width"><span>Line width</span><select aria-label="Line width" value={selectedDrawing.lineWidth ?? 1} onChange={(event) => onUpdateDrawing(selectedDrawing.id, { lineWidth: Number(event.target.value) as 1 | 2 | 3 | 4 })}>{[1, 2, 3, 4].map((width) => <option key={width} value={width}>{width}px</option>)}</select></label>
-          <button role="menuitem" disabled={selectedDrawing.locked} onClick={() => { movingDrawingIdRef.current = selectedDrawing.id; setMovingDrawingId(selectedDrawing.id); setDrawingMenu(null); }}><MoveVertical size={15} />Move</button>
-          <button role="menuitem" onClick={() => onUpdateDrawing(selectedDrawing.id, { locked: !selectedDrawing.locked })}>{selectedDrawing.locked ? <LockOpen size={15} /> : <Lock size={15} />}{selectedDrawing.locked ? "Unlock" : "Lock"}</button>
-          <button role="menuitem" className="danger" onClick={() => { onDeleteDrawing(selectedDrawing.id); setDrawingMenu(null); }}><Trash2 size={15} />Delete</button>
+        <div className="drawing-menu" role="menu" aria-label={`${selectedLineDrawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"} options`} style={{ left: drawingMenu.x, top: drawingMenu.y }}>
+          <label className="drawing-menu-color"><input type="color" value={selectedLineDrawing.color} aria-label="Drawing color" onChange={(event) => onUpdateDrawing(selectedLineDrawing.id, { color: event.target.value })} /><span style={{ background: selectedLineDrawing.color }} />Color</label>
+          <label className="drawing-menu-width"><span>Line width</span><select aria-label="Line width" value={selectedLineDrawing.lineWidth ?? 1} onChange={(event) => onUpdateDrawing(selectedLineDrawing.id, { lineWidth: Number(event.target.value) as 1 | 2 | 3 | 4 })}>{[1, 2, 3, 4].map((width) => <option key={width} value={width}>{width}px</option>)}</select></label>
+          <button role="menuitem" disabled={selectedLineDrawing.locked} onClick={() => { movingDrawingIdRef.current = selectedLineDrawing.id; setMovingDrawingId(selectedLineDrawing.id); setDrawingMenu(null); }}><MoveVertical size={15} />Move</button>
+          <button role="menuitem" onClick={() => onUpdateDrawing(selectedLineDrawing.id, { locked: !selectedLineDrawing.locked })}>{selectedLineDrawing.locked ? <LockOpen size={15} /> : <Lock size={15} />}{selectedLineDrawing.locked ? "Unlock" : "Lock"}</button>
+          <button role="menuitem" className="danger" onClick={() => { onDeleteDrawing(selectedLineDrawing.id); setDrawingMenu(null); }}><Trash2 size={15} />Delete</button>
+        </div>
+      </>}
+      {selectedPosition && drawingMenu && <>
+        <button className="drawing-menu-backdrop" aria-label="Close position properties" onClick={() => setDrawingMenu(null)} />
+        <div className="drawing-menu position-properties" role="dialog" aria-label={`${selectedPosition.side} position properties`} style={{ left: drawingMenu.x, top: drawingMenu.y }}>
+          <header><strong>{selectedPosition.side === "long" ? "Long" : "Short"} Position</strong><span>Analysis only</span></header>
+          {(["entryPrice", "targetPrice", "stopPrice"] as const).map((field) => <label className="position-menu-field" key={field}><span>{field === "entryPrice" ? "Entry" : field === "targetPrice" ? "Target" : "Stop"}</span><input type="number" step={minMove} disabled={selectedPosition.locked} value={selectedPosition[field]} aria-label={`${field} price`} onChange={(event) => {
+            const value = Number(event.target.value); if (!Number.isFinite(value)) return;
+            const next = updatePositionPrice(selectedPosition, field, value, minMove);
+            onUpdateDrawing(selectedPosition.id, { [field]: next[field] });
+          }} /></label>)}
+          <label className="position-menu-field"><span>Quantity</span><input type="number" min="1" step="1" value={selectedPosition.quantity} aria-label="Position quantity" onChange={(event) => onUpdateDrawing(selectedPosition.id, { quantity: normalizePositionQuantity(Number(event.target.value)) })} /></label>
+          <button type="button" onClick={() => onUpdateDrawing(selectedPosition.id, { locked: !selectedPosition.locked })}>{selectedPosition.locked ? <LockOpen size={15} /> : <Lock size={15} />}{selectedPosition.locked ? "Unlock" : "Lock"}</button>
+          <button type="button" className="danger" onClick={() => { onDeleteDrawing(selectedPosition.id); setSelectedPositionId(null); setDrawingMenu(null); }}><Trash2 size={15} />Delete</button>
         </div>
       </>}
       {showScrollToLatest && <button className="scroll-to-latest" type="button" aria-label="Scroll to latest price" title="Scroll to latest price" onClick={() => chartRef.current?.timeScale().scrollToRealTime()}><ChevronsRight size={18} /></button>}

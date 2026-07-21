@@ -214,7 +214,9 @@ export interface EntryRuleResult {
   nodeResults: Record<string, boolean | null>;
 }
 
-export interface Drawing {
+export type ChartTool = "cursor" | "horizontal" | "horizontal-ray" | "long-position" | "short-position";
+
+export interface LineDrawing {
   id: string;
   kind: "trend" | "horizontal" | "horizontal-ray" | "ray" | "rectangle" | "fibonacci" | "text";
   points: Array<{ time: number; price: number }>;
@@ -222,6 +224,36 @@ export interface Drawing {
   color: string;
   locked?: boolean;
   lineWidth?: 1 | 2 | 3 | 4;
+}
+
+export interface PositionDrawing {
+  id: string;
+  kind: "position";
+  side: "long" | "short";
+  startTime: number;
+  endTime: number;
+  entryPrice: number;
+  stopPrice: number;
+  targetPrice: number;
+  quantity: number;
+  locked?: boolean;
+}
+
+export type Drawing = LineDrawing | PositionDrawing;
+
+export interface DrawingPatch {
+  points?: Array<{ time: number; price: number }>;
+  text?: string;
+  color?: string;
+  locked?: boolean;
+  lineWidth?: 1 | 2 | 3 | 4;
+  side?: "long" | "short";
+  startTime?: number;
+  endTime?: number;
+  entryPrice?: number;
+  stopPrice?: number;
+  targetPrice?: number;
+  quantity?: number;
 }
 
 export interface ChartTabState {

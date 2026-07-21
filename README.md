@@ -236,7 +236,7 @@ The main window owns shared streams and persisted workspace state. Detached wind
 
 - The order ticket exposes market entries only, even though the native model and validation layer already understand limit, stop-market, and stop-limit orders.
 - Both a valid take-profit and stop-loss are required for a new entry.
-- Drawing UI currently exposes horizontal lines and horizontal rays only.
+- Drawing UI supports horizontal lines, horizontal rays, and analysis-only long/short position tools.
 - The watchlist is persisted but does not yet have add, remove, reorder, or remote-symbol management controls.
 - Chart tabs are capped at twelve.
 - Browser demo data is illustrative and is not a broker simulator or execution test.

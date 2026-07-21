@@ -114,6 +114,17 @@ describe("cloud preferences", () => {
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "chime", durationSeconds: 3 });
   });
 
+  it("round-trips position drawings through cloud preferences", () => {
+    const local = workspace();
+    const position = {
+      id: "position-1", kind: "position" as const, side: "long" as const, startTime: 100, endTime: 200,
+      entryPrice: 6200, stopPrice: 6197.5, targetPrice: 6205, quantity: 2, locked: false,
+    };
+    const profile = cloudPreferenceProfile({ ...local, drawings: { "@MES": [...local.drawings["@MES"], position] } });
+    const merged = applyCloudPreferenceProfile({ ...local, drawings: {} }, profile);
+    expect(merged.drawings["@MES"]).toContainEqual(position);
+  });
+
   it("reads rule alerts from the legacy alerts category", () => {
     const local = workspace();
     const profile = cloudPreferenceProfile(local);

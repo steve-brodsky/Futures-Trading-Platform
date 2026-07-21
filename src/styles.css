@@ -202,6 +202,37 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .drawing-menu-color input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .drawing-menu-color span { width: 15px; height: 15px; border: 1px solid #647184; border-radius: 3px; }
 .drawing-move-hint { position: absolute; z-index: 7; top: 42px; left: 50%; transform: translateX(-50%); padding: 6px 9px; border: 1px solid #334155; border-radius: 5px; color: #c7d0dc; background: rgba(18,24,33,.94); font-size: 8px; pointer-events: none; }
+.position-drawing-layer { position: absolute; z-index: 6; inset: 0; overflow: hidden; pointer-events: none; }
+.position-drawing { position: absolute; inset: 0; pointer-events: none; }
+.position-zone { position: absolute; border-width: 1px; border-style: solid; pointer-events: none; touch-action: none; }
+.position-zone.profit { border-color: rgba(22,199,154,.54); background: rgba(22,199,154,.18); }
+.position-zone.risk { border-color: rgba(239,70,111,.58); background: rgba(239,70,111,.2); }
+.position-drawing.selected .position-zone { filter: brightness(1.14); }
+.position-drawing-layer.interactive .position-zone,.position-drawing-layer.interactive .position-level.entry,.position-drawing-layer.interactive .position-label.entry { pointer-events: auto; }
+.position-drawing-layer.interactive .position-zone { cursor: move; }
+.position-drawing.locked .position-zone,.position-drawing.locked .position-level.entry,.position-drawing.locked .position-label.entry { cursor: pointer; }
+.position-level { position: absolute; height: 1px; transform: translateY(-.5px); pointer-events: none; }
+.position-level.target { background: #16c79a; }
+.position-level.entry { z-index: 1; height: 3px; transform: translateY(-1.5px); background: rgba(225,234,243,.82); cursor: ns-resize; touch-action: none; }
+.position-level.stop { background: #ef466f; }
+.position-label { position: absolute; z-index: 2; max-width: min(520px,calc(100% - 20px)); padding: 5px 8px; transform: translate(-50%,-50%); border-radius: 5px; color: #f3f7fa; box-shadow: 0 3px 12px rgba(0,0,0,.32); font: 500 10px/1.25 DM Mono,monospace; white-space: nowrap; pointer-events: none; }
+.position-label.target { background: #069d8e; }
+.position-label.stop { background: #f04440; }
+.position-label.entry { display: flex; align-items: center; gap: 6px; border: 1px solid rgba(235,241,247,.85); background: #ef466f; cursor: ns-resize; touch-action: none; }
+.position-label.entry.pnl-positive { color: #f3f7fa; background: #079f86; }
+.position-label.entry.pnl-negative { color: #f3f7fa; background: #ef466f; }
+.position-label.entry button { width: 22px; height: 20px; display: grid; place-items: center; margin: -4px -7px -4px 0; padding: 0; border: 0; border-left: 1px solid rgba(255,255,255,.35); color: inherit; background: rgba(0,0,0,.15); font: 700 10px/1 DM Mono,monospace; cursor: pointer; }
+.position-label.entry button:hover,.position-label.entry button:focus-visible { background: rgba(0,0,0,.32); outline: none; }
+.position-handle { position: absolute; z-index: 3; width: 13px; height: 13px; padding: 0; transform: translate(-50%,-50%); border: 2px solid #1769ff; border-radius: 5px; background: #111722; box-shadow: 0 1px 5px rgba(0,0,0,.5); pointer-events: auto; touch-action: none; }
+.position-handle.target,.position-handle.stop { cursor: ns-resize; }
+.position-handle.start,.position-handle.end { cursor: ew-resize; }
+.position-properties { width: 220px; padding: 6px; }
+.position-properties header { display: flex; align-items: center; justify-content: space-between; height: 31px; padding: 0 7px 5px; border-bottom: 1px solid #283342; }
+.position-properties header strong { color: #e1e7ee; font-size: 10px; }
+.position-properties header span { color: #6f7c8e; font-size: 8px; }
+.position-menu-field { height: 34px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 7px; color: #aeb9c7; font-size: 9px; }
+.position-menu-field input { width: 112px; height: 25px; padding: 0 6px; border: 1px solid #303b4a; border-radius: 4px; color: #e1e7ee; background: #1a222d; font: 500 9px DM Mono,monospace; text-align: right; }
+.position-menu-field input:disabled { color: #697689; background: #141a22; }
 .scroll-to-latest { position: absolute; z-index: 7; right: 12px; bottom: 34px; width: 32px; height: 32px; display: grid; place-items: center; padding: 0; border: 1px solid #334155; border-radius: 6px; color: #b9c4d2; background: rgba(20, 27, 37, .94); box-shadow: 0 3px 10px rgba(0, 0, 0, .3); cursor: pointer; }
 .scroll-to-latest:hover { color: #071116; border-color: var(--cyan); background: var(--cyan); }
 .scroll-to-latest:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }

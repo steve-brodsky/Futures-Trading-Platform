@@ -386,8 +386,13 @@ describe("chart workspace", () => {
   it("normalizes persistent symbol drawings and rejects malformed entries", () => {
     const result = normalizeChartWorkspace({ ...fallback, drawings: { MES: [
       { id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff" },
+      { id: "long", kind: "position", side: "long", startTime: 10, endTime: 20, entryPrice: 5000, stopPrice: 4997.5, targetPrice: 5005, quantity: 2 },
+      { id: "bad-position", kind: "position", side: "short", startTime: 10, endTime: 20, entryPrice: 5000, stopPrice: 4999, targetPrice: 5001, quantity: 1 },
       { id: "bad", kind: "horizontal", points: [], color: "#fff" },
     ] } }, fallback);
-    expect(result.drawings.MES).toEqual([{ id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", locked: false, lineWidth: 1 }]);
+    expect(result.drawings.MES).toEqual([
+      { id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", locked: false, lineWidth: 1 },
+      { id: "long", kind: "position", side: "long", startTime: 10, endTime: 20, entryPrice: 5000, stopPrice: 4997.5, targetPrice: 5005, quantity: 2, locked: false },
+    ]);
   });
 });

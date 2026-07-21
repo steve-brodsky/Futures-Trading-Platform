@@ -7,7 +7,7 @@ import {
   Activity, BarChart3, Bell, BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
   GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
   Magnet, MousePointer2, PanelsTopLeft, Plus,
-  Search, Settings2, SlidersHorizontal, SquareStack, TrendingUp,
+  Search, Settings2, SlidersHorizontal, SquareStack, TrendingDown, TrendingUp,
   Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
@@ -39,7 +39,7 @@ import { reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartTool, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -272,8 +272,9 @@ function TradingApp() {
   const [review, setReview] = useState<ReviewState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [envConfirm, setEnvConfirm] = useState<TradingEnvironment | null>(null);
-  const [activeTool, setActiveTool] = useState("cursor");
+  const [activeTool, setActiveTool] = useState<ChartTool>("cursor");
   const [horizontalToolsOpen, setHorizontalToolsOpen] = useState(false);
+  const [positionToolsOpen, setPositionToolsOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [bottomPanelMaximized, setBottomPanelMaximized] = useState(false);
   const [clientId, setClientId] = useState("");
@@ -2496,7 +2497,7 @@ function TradingApp() {
       drawings={workspace.drawings[tab.symbol.symbol] ?? []}
       onToolComplete={() => { if (focused) setActiveTool("cursor"); }}
       onCreateDrawing={(drawing) => updateSymbolDrawings(tab.symbol.symbol, (items) => [...items, drawing])}
-      onUpdateDrawing={(id, patch) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } : item))}
+      onUpdateDrawing={(id, patch) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } as Drawing : item))}
       onDeleteDrawing={(id) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.filter((item) => item.id !== id))}
       initialVisibleRange={viewRangesRef.current.get(tab.id)}
       onVisibleRangeChange={(range) => requestVisibleVwap(tab.id, range)}
@@ -2582,14 +2583,21 @@ function TradingApp() {
     </nav>
 
     <section className={`workspace ${hasWindowTabs ? "" : "empty-chart-workspace"} ${!isDetached ? `with-right ${workspace.rightPanelOpen ? "right-open" : "right-collapsed"}` : ""} ${!isDetached ? "with-bottom" : ""} ${!isDetached && !workspace.bottomPanelOpen ? "bottom-collapsed" : ""} ${!isDetached && workspace.bottomPanelOpen && bottomPanelMaximized ? "bottom-maximized" : ""}`} style={{ "--bottom-height": workspace.bottomPanelOpen && bottomPanelMaximized ? "100%" : `${workspace.bottomPanelOpen ? workspace.bottomPanelHeight ?? 360 : 42}px` } as React.CSSProperties}>
-      <aside className="drawing-rail" aria-label="Drawing tools" onKeyDown={(event) => { if (event.key === "Escape") setHorizontalToolsOpen(false); }}>
-        <IconButton label="Cursor" active={activeTool === "cursor"} onClick={() => setActiveTool("cursor")}><MousePointer2 size={18} /></IconButton>
+      <aside className="drawing-rail" aria-label="Drawing tools" onKeyDown={(event) => { if (event.key === "Escape") { setHorizontalToolsOpen(false); setPositionToolsOpen(false); } }}>
+        <IconButton label="Cursor" active={activeTool === "cursor"} onClick={() => { setActiveTool("cursor"); setHorizontalToolsOpen(false); setPositionToolsOpen(false); }}><MousePointer2 size={18} /></IconButton>
         <IconButton label={`Magnet: snap crosshair to ${activeTab.chartKind === "point-and-figure" ? "box levels" : activeTab.chartKind === "renko" ? "brick extremes" : "candle high or low"}`} active={activeTab.magnetEnabled} onClick={() => updateActiveTab({ magnetEnabled: !activeTab.magnetEnabled })}><Magnet size={18} /></IconButton>
         <div className="drawing-tool-anchor">
-          <IconButton label="Horizontal drawing tools" active={activeTool === "horizontal" || activeTool === "horizontal-ray"} onClick={() => setHorizontalToolsOpen((value) => !value)}><Minus size={18} /></IconButton>
+          <IconButton label="Horizontal drawing tools" active={activeTool === "horizontal" || activeTool === "horizontal-ray"} onClick={() => { setPositionToolsOpen(false); setHorizontalToolsOpen((value) => !value); }}><Minus size={18} /></IconButton>
           {horizontalToolsOpen && <><button className="drawing-flyout-backdrop" aria-label="Close horizontal drawing selector" onClick={() => setHorizontalToolsOpen(false)} /><div className="drawing-flyout" role="menu" aria-label="Horizontal drawing selector">
             <button role="menuitem" onClick={() => { setActiveTool("horizontal"); setHorizontalToolsOpen(false); }}><Minus size={17} /><span><strong>Horizontal Line</strong><small>Extends both directions</small></span></button>
             <button role="menuitem" onClick={() => { setActiveTool("horizontal-ray"); setHorizontalToolsOpen(false); }}><Minus size={17} /><span><strong>Horizontal Ray</strong><small>Extends to the right</small></span></button>
+          </div></>}
+        </div>
+        <div className="drawing-tool-anchor">
+          <IconButton label="Long and short position tools" active={activeTool === "long-position" || activeTool === "short-position"} onClick={() => { setHorizontalToolsOpen(false); setPositionToolsOpen((value) => !value); }}><TrendingUp size={18} /></IconButton>
+          {positionToolsOpen && <><button className="drawing-flyout-backdrop" aria-label="Close position drawing selector" onClick={() => setPositionToolsOpen(false)} /><div className="drawing-flyout" role="menu" aria-label="Position drawing selector">
+            <button role="menuitem" onClick={() => { setActiveTool("long-position"); setPositionToolsOpen(false); }}><TrendingUp size={17} /><span><strong>Long Position</strong><small>Target above entry</small></span></button>
+            <button role="menuitem" onClick={() => { setActiveTool("short-position"); setPositionToolsOpen(false); }}><TrendingDown size={17} /><span><strong>Short Position</strong><small>Target below entry</small></span></button>
           </div></>}
         </div>
       </aside>
