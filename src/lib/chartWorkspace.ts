@@ -3,7 +3,7 @@ import { normalizeEntryRules } from "./entryRules";
 import { normalizeEntryRuleAlerts, sameEntryRuleAlerts } from "./entryRuleAlerts";
 import { cloneEma200Alert, normalizeEma200Alert, sameEma200Alert } from "./emaAlerts";
 import { quoteSubscriptionInstruments } from "./futuresContracts";
-import { normalizeSymbolMeta, normalizeWatchlist } from "./watchlist";
+import { normalizeRecentSymbols, normalizeSymbolMeta, normalizeWatchlist } from "./watchlist";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./priceBasedCharts";
 import { isValidPositionDrawing } from "./positionDrawing";
@@ -316,12 +316,23 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     Array.isArray(value.watchlist) ? value.watchlist : fallback.watchlist,
     quoteSubscriptionInstruments({ tabs, watchlist: [] }),
   );
+  const activeTabSymbols = normalizedWindows.flatMap((window) => {
+    const active = tabs.find((tab) => tab.id === window.activeTabId);
+    return active ? [active.symbol] : [];
+  });
+  const recentSymbols = normalizeRecentSymbols(value.recentSymbols, [
+    ...activeTabSymbols,
+    ...tabs.map((tab) => tab.symbol),
+    ...watchlist,
+    ...fallback.recentSymbols,
+  ]);
   return {
     revision: typeof value.revision === "number" ? value.revision : 0,
     environment: value.environment === "live" || value.environment === "sim" ? value.environment : fallback.environment,
     tabs,
     windows: normalizedWindows,
     watchlist,
+    recentSymbols,
     drawings,
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
     bottomTab: (legacyBottomTab ?? fallback.bottomTab) as WorkspaceState["bottomTab"],
@@ -480,6 +491,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     tabs: sameArray(current.tabs, tabs, (a, b) => a === b) ? current.tabs : tabs,
     windows: sameArray(current.windows, windows, (a, b) => a === b) ? current.windows : windows,
     watchlist: sameArray(current.watchlist, incoming.watchlist, (a, b) => a === b) ? current.watchlist : incoming.watchlist,
+    recentSymbols: sameArray(current.recentSymbols, incoming.recentSymbols, (a, b) => a === b) ? current.recentSymbols : incoming.recentSymbols,
     drawings: Object.keys(current.drawings).length === Object.keys(drawings).length
       && Object.entries(drawings).every(([symbol, items]) => current.drawings[symbol] === items)
       ? current.drawings

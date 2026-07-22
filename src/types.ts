@@ -339,6 +339,7 @@ export interface WorkspaceState {
   tabs: ChartTabState[];
   windows: ChartWindowState[];
   watchlist: SymbolMeta[];
+  recentSymbols: SymbolMeta[];
   drawings: Record<string, Drawing[]>;
   rightPanelOpen: boolean;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";

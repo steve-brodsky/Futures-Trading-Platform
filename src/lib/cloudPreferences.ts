@@ -57,6 +57,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       chart_workspace: {
         tabs: workspace.tabs.map(cloudTab),
         windows: workspace.windows.map(cloudWindow),
+        recentSymbols: workspace.recentSymbols.map((instrument) => ({ ...instrument })),
       },
       alerts: {
         byTabId: Object.fromEntries(workspace.tabs.map((tab) => [tab.id, tab.ema200Alert])),
@@ -146,6 +147,9 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     ...current,
     tabs: tabs as unknown as ChartTabState[],
     windows: remoteWindows as unknown as ChartWindowState[],
+    recentSymbols: Array.isArray(chartWorkspace?.recentSymbols)
+      ? chartWorkspace.recentSymbols as unknown as WorkspaceState["recentSymbols"]
+      : current.recentSymbols,
     drawings: object(drawings?.bySymbol) as unknown as WorkspaceState["drawings"] ?? current.drawings,
     watchlist: Array.isArray(watchlist?.instruments)
       ? watchlist.instruments as unknown as WorkspaceState["watchlist"]

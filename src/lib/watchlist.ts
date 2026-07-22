@@ -1,6 +1,7 @@
 import type { MarketDataProvider, SymbolMeta } from "../types";
 
 export const MAX_STREAMED_QUOTE_SYMBOLS = 100;
+export const MAX_RECENT_SYMBOLS = 10;
 
 function normalizedSymbol(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -30,7 +31,7 @@ export function normalizeSymbolMeta(value: unknown): SymbolMeta | undefined {
   if (!symbol) return undefined;
   if (!record) return legacyWatchlistInstrument(symbol);
   const assetType = typeof record.assetType === "string" && record.assetType.trim() ? record.assetType.trim().toUpperCase() : "FUTURE";
-  const provider: MarketDataProvider = record.provider === "schwab" || (!record.provider && assetType === "EQUITY") ? "schwab" : "tradestation";
+  const provider: MarketDataProvider = record.provider === "schwab" || (!record.provider && (assetType === "EQUITY" || assetType === "ETF")) ? "schwab" : "tradestation";
   return {
     provider,
     symbol,
@@ -43,6 +44,26 @@ export function normalizeSymbolMeta(value: unknown): SymbolMeta | undefined {
     root: typeof record.root === "string" ? record.root : undefined,
     underlying: typeof record.underlying === "string" ? record.underlying : undefined,
   };
+}
+
+export function normalizeRecentSymbols(value: unknown, fallback: Iterable<SymbolMeta> = []): SymbolMeta[] {
+  const source = Array.isArray(value) && value.length ? value : [...fallback];
+  const seen = new Set<string>();
+  const normalized: SymbolMeta[] = [];
+  for (const item of source) {
+    const instrument = normalizeSymbolMeta(item);
+    if (!instrument) continue;
+    const key = instrumentKey(instrument);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(instrument);
+    if (normalized.length >= MAX_RECENT_SYMBOLS) break;
+  }
+  return normalized;
+}
+
+export function rememberRecentSymbol(recent: SymbolMeta[], instrument: SymbolMeta): SymbolMeta[] {
+  return normalizeRecentSymbols([instrument, ...recent]);
 }
 
 export function normalizeWatchlist(value: unknown, subscribedInstruments: Iterable<SymbolMeta> = []): SymbolMeta[] {

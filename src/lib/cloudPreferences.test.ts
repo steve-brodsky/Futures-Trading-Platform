@@ -25,6 +25,7 @@ function workspace(): WorkspaceState {
     }],
     windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", splitRatios: { "two-columns": [0.42] }, detached: false, x: 120, y: 90, width: 1400, height: 900, maximized: true }],
     watchlist: [{ provider: "tradestation", symbol: "MESU26", description: "MESU26", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5 }],
+    recentSymbols: [{ provider: "schwab", symbol: "SPY", description: "SPDR S&P 500 ETF", exchange: "NYSE ARCA", assetType: "ETF", minMove: 0.01, pointValue: 1 }],
     drawings: { "@MES": [{ id: "line-1", kind: "horizontal", points: [{ time: 1, price: 6200 }], color: "#fff" }] },
     rightPanelOpen: true,
     bottomTab: "orders",
@@ -48,6 +49,7 @@ describe("cloud preferences", () => {
     const profile = cloudPreferenceProfile(original);
     const serialized = JSON.stringify(profile);
     expect(serialized).toContain("MESU26");
+    expect(profile.categories.chart_workspace.recentSymbols).toEqual(original.recentSymbols);
     expect(serialized).toContain("commissionPerContractSide");
     expect(profile.categories.order_entry.entryRuleAlerts).toEqual(original.entryRuleAlerts);
     expect(profile.categories.alerts.entryRules).toBeUndefined();
@@ -77,6 +79,7 @@ describe("cloud preferences", () => {
       selectedAccountId: "other-account",
       confirmOrders: true,
       watchlist: [{ provider: "tradestation", symbol: "MNQU26", description: "MNQU26", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 2 }],
+      recentSymbols: [{ provider: "schwab", symbol: "AAPL", description: "Apple Inc", exchange: "NASDAQ", assetType: "EQUITY", minMove: 0.01, pointValue: 1 }],
       entryRules: {
         ...local.entryRules,
         long: { ...local.entryRules.long, children: [{ id: "price", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } }] },
@@ -87,6 +90,7 @@ describe("cloud preferences", () => {
     });
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.watchlist.map((item) => item.symbol)).toEqual(["MNQU26"]);
+    expect(merged.recentSymbols.map((item) => item.symbol)).toEqual(["AAPL"]);
     expect(merged.settings.journal.commissionPerContractSide).toBe(1.25);
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "bell", durationSeconds: 5 });
     expect(merged.environment).toBe("live");

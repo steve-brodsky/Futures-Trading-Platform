@@ -12,7 +12,7 @@ const fallback: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: { provider: "tradestation", symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
-  watchlist: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
+  watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
   settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
@@ -83,6 +83,15 @@ describe("chart workspace", () => {
   it("normalizes saved watchlist symbols without changing their order", () => {
     const result = normalizeChartWorkspace({ ...fallback, watchlist: [" mnqu26 ", "MESU26", "MNQU26", "", 42] }, fallback);
     expect(result.watchlist.map((item) => [item.provider, item.symbol])).toEqual([["tradestation", "MNQU26"], ["tradestation", "MESU26"]]);
+  });
+
+  it("seeds legacy recent symbols from active charts and preserves saved recency", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, recentSymbols: undefined }, fallback);
+    expect(legacy.recentSymbols.map((item) => item.symbol)).toEqual(["MES"]);
+
+    const spy = { provider: "schwab" as const, symbol: "SPY", description: "SPDR S&P 500 ETF", exchange: "NYSE ARCA", assetType: "ETF", minMove: 0.01, pointValue: 1 };
+    const saved = normalizeChartWorkspace({ ...fallback, recentSymbols: [spy, fallback.tabs[0].symbol, spy] }, fallback);
+    expect(saved.recentSymbols.map((item) => [item.provider, item.symbol])).toEqual([["schwab", "SPY"], ["tradestation", "MES"]]);
   });
 
   it("defaults, preserves, and clamps swing-stop settings", () => {

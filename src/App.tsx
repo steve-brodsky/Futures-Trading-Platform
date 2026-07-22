@@ -35,7 +35,7 @@ import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculate
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
 import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndFigureSettings, normalizeRenkoSettings } from "./lib/priceBasedCharts";
-import { instrumentKey, reorderWatchlist } from "./lib/watchlist";
+import { instrumentKey, rememberRecentSymbol, reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
@@ -73,7 +73,7 @@ const defaultWorkspace: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {},
-  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
+  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
   settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
@@ -1565,6 +1565,10 @@ function TradingApp() {
 
   useEffect(() => {
     if (!searchOpen) return;
+    if (!search.trim()) {
+      setSearchResults([]);
+      return;
+    }
     let active = true;
     const timer = window.setTimeout(() => api.symbolSearch(search)
       .then((results) => { if (active) setSearchResults(results); })
@@ -1927,7 +1931,16 @@ function TradingApp() {
   }
 
   async function selectWatchlistSymbol(instrument: SymbolMeta) {
-    updateActiveTab({ symbol: instrument, tradeContract: undefined });
+    selectSymbol(instrument);
+  }
+
+  function selectSymbol(instrument: SymbolMeta) {
+    const tabId = activeTab.id;
+    commitWorkspace((current) => ({
+      ...current,
+      tabs: current.tabs.map((tab) => tab.id === tabId ? { ...tab, symbol: instrument, tradeContract: undefined } : tab),
+      recentSymbols: rememberRecentSymbol(current.recentSymbols, instrument),
+    }));
   }
 
   function updateSymbolDrawings(symbol: string, update: (drawings: Drawing[]) => Drawing[]) {
@@ -2534,6 +2547,7 @@ function TradingApp() {
   const activeProviderConnected = activeTab.symbol.provider === "schwab" ? schwabAuthenticated : authenticated;
   const providerLabel = activeTab.symbol.provider === "schwab" ? "SCHWAB" : "TRADESTATION";
   const connectionLabel = api.isNative ? (activeProviderConnected ? `${providerLabel} ${market.streamState === "rate-limited" ? "PAUSED" : market.streamState.toUpperCase()}` : `${providerLabel} OFFLINE`) : `${providerLabel} DEMO`;
+  const symbolPickerResults = search.trim() ? searchResults : workspace.recentSymbols;
   const brokerageConnectionState = brokerageDisplayState(brokerageStreamStates);
   const marketTime = newYorkClock.format(new Date(currentTime));
   const reviewEntryEligibility = review?.kind === "entry"
@@ -2631,7 +2645,7 @@ function TradingApp() {
     <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} visibleTabIds={visibleTabIds} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} entryRuleSignals={entryRuleTabSignals} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); if (api.isNative) emit("chart-strip-bounds", bounds); }} />
 
     <nav className={`toolbar ${hasWindowTabs ? "" : "empty"}`} aria-label="Chart toolbar">
-      <button className="symbol-control" onClick={() => setSearchOpen(true)}><Search size={16} /><strong>{activeTab.symbol.symbol}</strong><span>{activeTab.symbol.exchange}</span><ChevronDown size={14} /></button>
+      <button className="symbol-control" onClick={() => { setSearch(""); setSearchOpen(true); }}><Search size={16} /><strong>{activeTab.symbol.symbol}</strong><span>{activeTab.symbol.exchange}</span><ChevronDown size={14} /></button>
       <div className="divider" />
       <div className="timeframe-group">{timeframes.map((tf) => <button key={tf} className={activeTab.timeframe === tf ? "active" : ""} onClick={() => updateActiveTab({ timeframe: tf })}>{tf}</button>)}</div>
       <div className="divider" />
@@ -2734,7 +2748,14 @@ function TradingApp() {
       {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
     </section>
 
-    {searchOpen && <Modal title="Select symbol" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search equity, ETF, or futures contract" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={instrumentKey(result)} onClick={() => { updateActiveTab({ symbol: result, tradeContract: undefined }); setSearchOpen(false); setSearch(""); }}><span className={`instrument-icon ${result.provider}`}>{result.provider === "schwab" ? "E" : "F"}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? "Schwab" : `TradeStation${result.expiration ? ` · ${result.expiration}` : ""}`}</small></span></button>)}{!searchResults.length && <div className="empty-state">No supported symbols matched “{search}”.</div>}</div></Modal>}
+    {searchOpen && <Modal title="Select symbol" onClose={() => { setSearchOpen(false); setSearch(""); }} width={620}>
+      <div className="search-box"><Search size={17} /><input autoFocus placeholder="Search equity, ETF, or futures contract" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
+      <div className="symbol-results">
+        {!search.trim() && symbolPickerResults.length > 0 && <div className="symbol-results-label">Recent symbols</div>}
+        {symbolPickerResults.map((result) => <button key={instrumentKey(result)} onClick={() => { selectSymbol(result); setSearchOpen(false); setSearch(""); }}><span className={`instrument-icon ${result.provider}`}>{result.provider === "schwab" ? "E" : "F"}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? "Schwab" : `TradeStation${result.expiration ? ` · ${result.expiration}` : ""}`}</small></span></button>)}
+        {!symbolPickerResults.length && <div className="empty-state">{search.trim() ? <>No supported symbols matched “{search}”.</> : "No recent symbols yet."}</div>}
+      </div>
+    </Modal>}
 
     {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></Modal>}
 
