@@ -36,7 +36,7 @@ function tab(id: string, symbol: string, timeframe: Timeframe, enabled: Timefram
     ema200Alert,
     chartTimezone: "exchange",
     magnetEnabled: false,
-    gex: { enabled: false, view: "net" },
+    gex: { enabled: false, view: "net", expirationDisplay: "aggregate" },
   };
 }
 

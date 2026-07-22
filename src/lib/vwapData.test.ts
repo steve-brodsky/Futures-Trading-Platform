@@ -15,7 +15,7 @@ const tab = (id: string, symbol: string, timeframe: ChartTabState["timeframe"], 
   ema200Alert: defaultEma200Alert(),
   chartTimezone: "exchange",
   magnetEnabled: false,
-  gex: { enabled: false, view: "net" },
+  gex: { enabled: false, view: "net", expirationDisplay: "aggregate" },
 });
 
 describe("VWAP data orchestration", () => {

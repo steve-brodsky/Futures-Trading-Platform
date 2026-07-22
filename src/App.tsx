@@ -34,7 +34,7 @@ import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryD
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
-import { allocateGexStreamBudgets, calculateGexLevels, defaultGexSelection, formatGex, normalizeGexSelection, prioritizeOptionContracts, resolveGexExpirations, type GexLevel } from "./lib/gex";
+import { allocateGexStreamBudgets, calculateGexLevels, defaultGexSelection, gexExpirationDisplayGroups, normalizeGexSelection, prioritizeOptionContracts, resolveGexExpirations } from "./lib/gex";
 import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndFigureSettings, normalizeRenkoSettings } from "./lib/priceBasedCharts";
 import { instrumentKey, rememberRecentSymbol, reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
@@ -71,7 +71,7 @@ const newYorkClock = new Intl.DateTimeFormat("en-US", {
 const defaultWorkspace: WorkspaceState = {
   revision: 0,
   environment: "sim",
-  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net" } }],
+  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net", expirationDisplay: "aggregate" } }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
@@ -2776,6 +2776,8 @@ function TradingApp() {
   const activeGexMarket = activeGexSupported ? gexMarkets[activeTab.symbol.symbol] : undefined;
   const activeGexSelection = normalizeGexSelection(workspace.gexSelections[activeTab.symbol.symbol] ?? defaultGexSelection());
   const activeGexSelectedDates = activeGexMarket?.selectedDates ?? resolveGexExpirations(activeGexMarket?.expirations ?? [], activeGexSelection);
+  const activeGexExpirationColors = Object.fromEntries(gexExpirationDisplayGroups(activeGexSelectedDates)
+    .flatMap((group) => group.dates.map((date) => [date, group.color])));
   const activeGexContractCount = activeGexMarket ? Object.keys(activeGexMarket.contracts).length : 0;
   const activeGexCoverage = gexCoverage[activeTab.symbol.symbol] ?? 0;
   const activeGexStatus = activeGexMarket ? gexStatusLabel(activeGexMarket.status) : activeTab.gex.enabled ? "Loading" : "Off";
@@ -2841,6 +2843,8 @@ function TradingApp() {
       indicators={tab.indicators}
       gexLevels={gexCalculation?.levels ?? []}
       gexView={tab.gex.view}
+      gexExpirationDisplay={tab.gex.expirationDisplay}
+      gexExpirationDates={gexMarket?.selectedDates ?? []}
       gexStatus={gexDisplayStatus}
       gexExpirationCount={gexMarket?.selectedDates.length ?? 0}
       orders={orders}
@@ -2923,9 +2927,10 @@ function TradingApp() {
         })}{activeGexSupported && <section className={`gex-settings ${activeTab.gex.enabled ? "enabled" : ""}`} aria-label="Gamma exposure settings">
           <button className="gex-toggle-button" type="button" aria-pressed={activeTab.gex.enabled} onClick={() => updateGexTab({ enabled: !activeTab.gex.enabled })}><span className="gex-swatch"><i /><i /></span><span><strong>Gamma Exposure</strong><small>{activeTab.gex.enabled ? `${activeGexStatus}${activeGexContractCount ? ` · ${activeGexCoverage}/${activeGexContractCount} live` : ""}` : "Schwab option chain"}</small></span><span className={`toggle ${activeTab.gex.enabled ? "on" : ""}`} /></button>
           {activeTab.gex.enabled && <div className="gex-controls">
-            <div className="gex-segmented" role="group" aria-label="GEX display mode"><button type="button" className={activeTab.gex.view === "net" ? "active" : ""} aria-pressed={activeTab.gex.view === "net"} onClick={() => updateGexTab({ view: "net" })}>Net</button><button type="button" className={activeTab.gex.view === "calls-puts" ? "active" : ""} aria-pressed={activeTab.gex.view === "calls-puts"} onClick={() => updateGexTab({ view: "calls-puts" })}>Calls / Puts</button></div>
+            <div className="gex-segmented" role="group" aria-label="Options level display mode"><button type="button" className={activeTab.gex.view === "net" ? "active" : ""} aria-pressed={activeTab.gex.view === "net"} onClick={() => updateGexTab({ view: "net" })}>Net GEX</button><button type="button" className={activeTab.gex.view === "calls-puts" ? "active" : ""} aria-pressed={activeTab.gex.view === "calls-puts"} onClick={() => updateGexTab({ view: "calls-puts" })}>Call / Put</button><button type="button" className={activeTab.gex.view === "open-interest" ? "active" : ""} aria-pressed={activeTab.gex.view === "open-interest"} onClick={() => updateGexTab({ view: "open-interest" })}>Open Interest</button></div>
+            <div className="gex-detail-segmented" role="group" aria-label="Expiration detail"><button type="button" className={activeTab.gex.expirationDisplay === "aggregate" ? "active" : ""} aria-pressed={activeTab.gex.expirationDisplay === "aggregate"} onClick={() => updateGexTab({ expirationDisplay: "aggregate" })}>Aggregate</button><button type="button" className={activeTab.gex.expirationDisplay === "aggregate-strip" ? "active" : ""} aria-pressed={activeTab.gex.expirationDisplay === "aggregate-strip"} onClick={() => updateGexTab({ expirationDisplay: "aggregate-strip" })}>+ Expirations</button></div>
             <div className="gex-presets" role="group" aria-label="GEX expiration preset">{([ ["front", "Front"], ["next-four", "Next 4"], ["all", "All"] ] as Array<[GexExpirationMode, string]>).map(([mode, label]) => <button key={mode} type="button" className={activeGexSelection.mode === mode ? "active" : ""} aria-pressed={activeGexSelection.mode === mode} onClick={() => updateGexExpirationMode(mode)}>{label}</button>)}</div>
-            {activeGexMarket?.expirations.length ? <div className="gex-expiration-list" aria-label="Option expirations">{activeGexMarket.expirations.map((expiration) => <label key={expiration.expirationDate}><input type="checkbox" checked={activeGexSelectedDates.includes(expiration.expirationDate)} onChange={() => toggleGexExpiration(expiration.expirationDate)} /><span><strong>{new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(new Date(`${expiration.expirationDate}T12:00:00Z`))}</strong><small>{expiration.daysToExpiration === 0 ? "0DTE" : `${expiration.daysToExpiration} DTE`} · {expiration.expirationType}</small></span></label>)}</div>
+            {activeGexMarket?.expirations.length ? <div className="gex-expiration-list" aria-label="Option expirations">{activeGexMarket.expirations.map((expiration) => <label key={expiration.expirationDate}><input type="checkbox" checked={activeGexSelectedDates.includes(expiration.expirationDate)} onChange={() => toggleGexExpiration(expiration.expirationDate)} />{activeTab.gex.expirationDisplay === "aggregate-strip" && activeGexSelectedDates.length > 1 && activeGexExpirationColors[expiration.expirationDate] && <i className="gex-expiration-color" style={{ background: activeGexExpirationColors[expiration.expirationDate] }} aria-hidden="true" />}<span className="gex-expiration-copy"><strong>{new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(new Date(`${expiration.expirationDate}T12:00:00Z`))}</strong><small>{expiration.daysToExpiration === 0 ? "0DTE" : `${expiration.daysToExpiration} DTE`} · {expiration.expirationType}</small></span></label>)}</div>
               : <div className="gex-loading-line">{activeGexMarket?.message ?? "Loading expirations…"}</div>}
             <footer><span>{activeGexSelectedDates.length} expiration{activeGexSelectedDates.length === 1 ? "" : "s"}</span><span>{activeGexMarket?.fetchedAt ? `Updated ${new Date(activeGexMarket.fetchedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : activeGexStatus}</span></footer>
           </div>}

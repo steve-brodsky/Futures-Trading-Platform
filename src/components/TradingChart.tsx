@@ -4,7 +4,7 @@ import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type Logical, type LogicalRange, type Time,
 } from "lightweight-charts";
-import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, ChartTool, Drawing, DrawingPatch, GexView, IndicatorConfig, LineDrawing, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
+import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, ChartTool, Drawing, DrawingPatch, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme } from "../lib/crosshair";
@@ -17,7 +17,7 @@ import { buildPointAndFigure, buildRenko, type PointAndFigureColumn, type RenkoB
 import { PointAndFigureSeries, type PointAndFigureSeriesData } from "../lib/pointAndFigureSeries";
 import { approximateDataUrlBytes, ENTRY_SCREENSHOT_MAX_BYTES } from "../lib/entryScreenshot";
 import { createPositionDrawing, logicalToSourceTime, movePositionDrawing, normalizePositionQuantity, positionMetrics, sourceTimeToLogical, updatePositionPrice } from "../lib/positionDrawing";
-import { formatGex, type GexLevel } from "../lib/gex";
+import { formatGex, formatOpenInterest, type GexLevel } from "../lib/gex";
 import { GexHeatmapPrimitive } from "../lib/gexHeatmapPrimitive";
 
 interface Props {
@@ -41,6 +41,8 @@ interface Props {
   indicators: IndicatorConfig[];
   gexLevels: GexLevel[];
   gexView: GexView;
+  gexExpirationDisplay: GexExpirationDisplay;
+  gexExpirationDates: string[];
   gexStatus?: string;
   gexExpirationCount: number;
   orders: OrderUpdate[];
@@ -97,7 +99,7 @@ type PositionDragKind = "body" | "entry" | "stop" | "target" | "start" | "end";
 
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, gexLevels, gexView, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -539,9 +541,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   }, [bars, vwapBars, indicators, chartGeneration, isSynthetic]);
 
   useEffect(() => {
-    gexPrimitiveRef.current?.setData(gexLevels, gexView);
+    gexPrimitiveRef.current?.setData(gexLevels, gexView, gexExpirationDisplay, gexExpirationDates);
     if (!gexLevels.length) setHoveredGex(null);
-  }, [gexLevels, gexView, chartGeneration]);
+  }, [gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, chartGeneration]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -876,7 +878,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
           ? <div className="ohlc synthetic-metrics"><span className={latest.direction === "x" ? "positive" : "negative"}>{latest.direction.toUpperCase()} COLUMN</span><span>H <b>{latest.high.toFixed(pricePrecision(minMove))}</b></span><span>L <b>{latest.low.toFixed(pricePrecision(minMove))}</b></span><span>{pointAndFigureSettings.boxSizeTicks}T × {pointAndFigureSettings.reversalBoxes}</span></div>
           : latest && <div className="ohlc"><span>O <b>{latestOpen.toFixed(pricePrecision(minMove))}</b></span><span>H <b>{latest.high.toFixed(pricePrecision(minMove))}</b></span><span>L <b>{latest.low.toFixed(pricePrecision(minMove))}</b></span><span>C <b className={change >= 0 ? "positive" : "negative"}>{latest.close.toFixed(pricePrecision(minMove))}</b></span></div>}
         {syntheticLive && <span className="synthetic-live">LIVE</span>}
-        {gexStatus && <div className="gex-heading"><span>GEX</span><strong>{gexStatus}</strong><em>{gexExpirationCount} exp</em>{hoveredGex && <b>{hoveredGex.strike.toFixed(pricePrecision(minMove))} · C {formatGex(hoveredGex.callGex)} · P {formatGex(-hoveredGex.putGex)} · N {formatGex(hoveredGex.netGex)}</b>}</div>}
+        {gexStatus && <div className="gex-heading"><span>{gexView === "open-interest" ? "OI" : "GEX"}</span><strong>{gexStatus}</strong><em>{gexExpirationCount} exp</em>{hoveredGex && (gexView === "open-interest"
+          ? <b>{hoveredGex.strike.toFixed(pricePrecision(minMove))} · C {formatOpenInterest(hoveredGex.callOpenInterest)} · P {formatOpenInterest(hoveredGex.putOpenInterest)} · T {formatOpenInterest(hoveredGex.callOpenInterest + hoveredGex.putOpenInterest)}</b>
+          : <b>{hoveredGex.strike.toFixed(pricePrecision(minMove))} · C {formatGex(hoveredGex.callGex)} · P {formatGex(-hoveredGex.putGex)} · N {formatGex(hoveredGex.netGex)}</b>)}</div>}
       </div>
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />

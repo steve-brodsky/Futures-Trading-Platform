@@ -490,17 +490,19 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .gex-swatch i:first-child { width: 22px; background: var(--green); }
 .gex-swatch i:last-child { width: 15px; margin-left: 7px; background: var(--red); }
 .gex-controls { padding: 0 11px 10px 45px; animation: pop-in .14s ease-out; }
-.gex-segmented, .gex-presets { display: grid; padding: 2px; border: 1px solid #293541; border-radius: 4px; background: #0b1118; }
-.gex-segmented { grid-template-columns: 1fr 1fr; }
+.gex-segmented, .gex-detail-segmented, .gex-presets { display: grid; padding: 2px; border: 1px solid #293541; border-radius: 4px; background: #0b1118; }
+.gex-segmented { grid-template-columns: repeat(3, 1fr); }
+.gex-detail-segmented { grid-template-columns: 1fr 1fr; margin-top: 7px; }
 .gex-presets { grid-template-columns: repeat(3, 1fr); margin-top: 7px; }
-.gex-segmented button, .gex-presets button { height: 25px; padding: 0 6px; border: 0; border-radius: 3px; color: #778597; background: transparent; font: 600 8px DM Mono, monospace; cursor: pointer; }
-.gex-segmented button.active, .gex-presets button.active { color: #071116; background: var(--cyan); }
+.gex-segmented button, .gex-detail-segmented button, .gex-presets button { height: 25px; padding: 0 5px; border: 0; border-radius: 3px; color: #778597; background: transparent; font: 600 8px DM Mono, monospace; cursor: pointer; }
+.gex-segmented button.active, .gex-detail-segmented button.active, .gex-presets button.active { color: #071116; background: var(--cyan); }
 .gex-expiration-list { max-height: 188px; margin-top: 7px; overflow-y: auto; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
 .gex-expiration-list label { height: 38px; display: flex; align-items: center; gap: 8px; color: #cbd4df; cursor: pointer; }
 .gex-expiration-list label:hover { background: rgba(255,255,255,.025); }
 .gex-expiration-list input { appearance: none; width: 13px; height: 13px; flex: 0 0 auto; border: 1px solid #425064; border-radius: 3px; background: #0b1017; }
 .gex-expiration-list input:checked { border-color: var(--cyan); background: var(--cyan); box-shadow: inset 0 0 0 3px #0b1017; }
-.gex-expiration-list label > span { display: flex; align-items: baseline; gap: 7px; }
+.gex-expiration-color { width: 5px; height: 18px; flex: 0 0 auto; border-radius: 3px; box-shadow: 0 0 0 1px rgba(255,255,255,.12); }
+.gex-expiration-copy { display: flex; align-items: baseline; gap: 7px; }
 .gex-expiration-list strong { min-width: 45px; font: 600 9px DM Mono, monospace; }
 .gex-expiration-list small { color: #697688; font: 500 8px DM Mono, monospace; }
 .gex-loading-line { min-height: 42px; display: flex; align-items: center; margin-top: 7px; color: #718094; font: 500 8px/1.4 DM Mono, monospace; }

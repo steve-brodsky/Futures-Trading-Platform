@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OptionContract, OptionExpiration } from "../types";
-import { allocateGexStreamBudgets, calculateGexLevels, gexMagnitudeScale, normalizeGexSelection, normalizeGexTabSettings, prioritizeOptionContracts, resolveGexExpirations } from "./gex";
+import { allocateGexStreamBudgets, calculateGexLevels, gexExpirationDisplayGroups, gexMagnitudeScale, normalizeGexSelection, normalizeGexTabSettings, prioritizeOptionContracts, resolveGexExpirations } from "./gex";
 
 const contract = (symbol: string, putCall: "CALL" | "PUT", strikePrice: number, patch: Partial<OptionContract> = {}): OptionContract => ({
   symbol, underlying: "SPY", putCall, expirationDate: "2026-07-24", strikePrice,
@@ -21,6 +21,43 @@ describe("GEX calculations", () => {
     expect(result.levels[0].callGex).toBe(5_000_000);
     expect(result.levels[0].putGex).toBe(2_000_000);
     expect(result.levels[0].netGex).toBe(3_000_000);
+    expect(result.levels[0].callOpenInterest).toBe(1_000);
+    expect(result.levels[0].putOpenInterest).toBe(400);
+    expect(result.levels[0].expirations).toEqual([{
+      expirationDate: "2026-07-24",
+      callGex: 5_000_000,
+      putGex: 2_000_000,
+      netGex: 3_000_000,
+      callOpenInterest: 1_000,
+      putOpenInterest: 400,
+    }]);
+  });
+
+  it("aggregates open interest independently from gamma across expirations", () => {
+    const result = calculateGexLevels([
+      contract("C1", "CALL", 500, { gamma: Number.NaN, openInterest: 1_200 }),
+      contract("P1", "PUT", 500, { openInterest: 800 }),
+      contract("C2", "CALL", 500, { expirationDate: "2026-07-31", openInterest: 500 }),
+      contract("ADJUSTED", "PUT", 500, { expirationDate: "2026-07-31", openInterest: 99_999, isNonStandard: true }),
+    ], 500, ["2026-07-24", "2026-07-31"], "2026-07-22");
+    expect(result.levels).toHaveLength(1);
+    expect(result.levels[0].callOpenInterest).toBe(1_700);
+    expect(result.levels[0].putOpenInterest).toBe(800);
+    expect(result.levels[0].callGex).toBe(2_500_000);
+    expect(result.levels[0].expirations.map((item) => item.expirationDate)).toEqual(["2026-07-24", "2026-07-31"]);
+    expect(result.excludedCount).toBe(2);
+  });
+
+  it("preserves opposing expiration contributions when aggregate net GEX cancels", () => {
+    const result = calculateGexLevels([
+      contract("FRONT-C", "CALL", 500, { expirationDate: "2026-07-24", openInterest: 1_000 }),
+      contract("NEXT-P", "PUT", 500, { expirationDate: "2026-07-31", openInterest: 1_000 }),
+    ], 500, ["2026-07-24", "2026-07-31"], "2026-07-22");
+    expect(result.levels[0].netGex).toBe(0);
+    expect(result.levels[0].expirations).toMatchObject([
+      { expirationDate: "2026-07-24", netGex: 5_000_000 },
+      { expirationDate: "2026-07-31", netGex: -5_000_000 },
+    ]);
   });
 
   it("recalculates with spot squared and excludes adjusted or incomplete contracts", () => {
@@ -56,15 +93,26 @@ describe("GEX calculations", () => {
   });
 
   it("normalizes per-tab visibility and display mode preferences", () => {
-    expect(normalizeGexTabSettings(undefined)).toEqual({ enabled: false, view: "net" });
-    expect(normalizeGexTabSettings({ enabled: true, view: "calls-puts" })).toEqual({ enabled: true, view: "calls-puts" });
-    expect(normalizeGexTabSettings({ enabled: "yes", view: "other" })).toEqual({ enabled: false, view: "net" });
+    expect(normalizeGexTabSettings(undefined)).toEqual({ enabled: false, view: "net", expirationDisplay: "aggregate" });
+    expect(normalizeGexTabSettings({ enabled: true, view: "calls-puts", expirationDisplay: "aggregate-strip" })).toEqual({ enabled: true, view: "calls-puts", expirationDisplay: "aggregate-strip" });
+    expect(normalizeGexTabSettings({ enabled: true, view: "open-interest" })).toEqual({ enabled: true, view: "open-interest", expirationDisplay: "aggregate" });
+    expect(normalizeGexTabSettings({ enabled: "yes", view: "other", expirationDisplay: "other" })).toEqual({ enabled: false, view: "net", expirationDisplay: "aggregate" });
   });
 
-  it("uses a capped logarithmic magnitude scale", () => {
+  it("uses adaptive square-root scaling capped at the 95th percentile", () => {
     const values = [1, 10, 100, 1_000, 1_000_000];
     expect(gexMagnitudeScale(0, values)).toBe(0);
-    expect(gexMagnitudeScale(100, values)).toBeGreaterThan(gexMagnitudeScale(10, values));
+    expect(gexMagnitudeScale(10, values)).toBeCloseTo(0.1);
+    expect(gexMagnitudeScale(100, values)).toBeCloseTo(Math.sqrt(0.1));
     expect(gexMagnitudeScale(1_000_000, values)).toBe(1);
+  });
+
+  it("keeps the nearest seven expiration colors and groups later dates", () => {
+    const dates = Array.from({ length: 10 }, (_, index) => `2026-${String(index + 1).padStart(2, "0")}-16`);
+    const groups = gexExpirationDisplayGroups(dates);
+    expect(groups).toHaveLength(8);
+    expect(groups.slice(0, 7).flatMap((group) => group.dates)).toEqual(dates.slice(0, 7));
+    expect(groups[7]).toMatchObject({ key: "later", label: "Later (3)", dates: dates.slice(7) });
+    expect(new Set(groups.map((group) => group.color)).size).toBe(8);
   });
 });

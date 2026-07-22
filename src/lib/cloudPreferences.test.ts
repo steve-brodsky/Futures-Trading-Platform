@@ -21,7 +21,7 @@ function workspace(): WorkspaceState {
       ema200Alert: defaultEma200Alert(),
       chartTimezone: "exchange",
       magnetEnabled: true,
-      gex: { enabled: false, view: "net" },
+      gex: { enabled: false, view: "net", expirationDisplay: "aggregate" },
       tradeContract: "MESU26",
     }],
     windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", splitRatios: { "two-columns": [0.42] }, detached: false, x: 120, y: 90, width: 1400, height: 900, maximized: true }],

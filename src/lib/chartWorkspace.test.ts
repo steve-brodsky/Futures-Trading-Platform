@@ -9,7 +9,7 @@ import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, 
 const fallback: WorkspaceState = {
   revision: 0,
   environment: "sim",
-  tabs: [{ id: "chart-1", symbol: { provider: "tradestation", symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net" } }],
+  tabs: [{ id: "chart-1", symbol: { provider: "tradestation", symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net", expirationDisplay: "aggregate" } }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   gexSelections: {},
@@ -61,20 +61,20 @@ describe("chart workspace", () => {
   it("normalizes GEX chart and per-symbol expiration preferences", () => {
     const result = normalizeChartWorkspace({
       ...fallback,
-      tabs: [{ ...fallback.tabs[0], gex: { enabled: true, view: "calls-puts" } }],
+      tabs: [{ ...fallback.tabs[0], gex: { enabled: true, view: "calls-puts", expirationDisplay: "aggregate-strip" } }],
       gexSelections: {
         " spy ": { mode: "custom", expirationDates: ["2026-08-21", "bad", "2026-08-21"] },
         AAPL: { mode: "next-four", expirationDates: [] },
       },
     }, fallback);
-    expect(result.tabs[0].gex).toEqual({ enabled: true, view: "calls-puts" });
+    expect(result.tabs[0].gex).toEqual({ enabled: true, view: "calls-puts", expirationDisplay: "aggregate-strip" });
     expect(result.gexSelections).toEqual({
       SPY: { mode: "custom", expirationDates: ["2026-08-21"] },
       AAPL: { mode: "next-four", expirationDates: [] },
     });
 
     const legacy = normalizeChartWorkspace({ ...fallback, tabs: [{ ...fallback.tabs[0], gex: undefined }], gexSelections: undefined }, fallback);
-    expect(legacy.tabs[0].gex).toEqual({ enabled: false, view: "net" });
+    expect(legacy.tabs[0].gex).toEqual({ enabled: false, view: "net", expirationDisplay: "aggregate" });
     expect(legacy.gexSelections).toEqual({});
   });
 

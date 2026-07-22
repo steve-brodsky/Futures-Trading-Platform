@@ -74,12 +74,14 @@ export interface OptionChainSnapshot {
   contracts: OptionContract[];
 }
 
-export type GexView = "net" | "calls-puts";
+export type GexView = "net" | "calls-puts" | "open-interest";
+export type GexExpirationDisplay = "aggregate" | "aggregate-strip";
 export type GexExpirationMode = "front" | "next-four" | "all" | "custom";
 
 export interface GexTabSettings {
   enabled: boolean;
   view: GexView;
+  expirationDisplay: GexExpirationDisplay;
 }
 
 export interface GexExpirationSelection {
