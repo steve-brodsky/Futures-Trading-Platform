@@ -27,7 +27,7 @@ function tab(id: string, symbol: string, timeframe: Timeframe, enabled: Timefram
   enabled.forEach((item) => { ema200Alert[item].enabled = true; });
   return {
     id,
-    symbol: { symbol, description: symbol, exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 },
+    symbol: { provider: "tradestation", symbol, description: symbol, exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 },
     timeframe,
     chartKind: "candles",
     renkoSettings: defaultRenkoSettings(),

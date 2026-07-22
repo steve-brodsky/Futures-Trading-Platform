@@ -4,12 +4,13 @@ import type { ChartTabState, StreamStateEvent } from "../types";
 
 const tab = {
   id: "chart-1",
-  symbol: { symbol: "MESU26" },
+  symbol: { provider: "tradestation", symbol: "MESU26" },
   timeframe: "5m",
 } as ChartTabState;
 
 const event = {
   subscriptionId: "chart-1",
+  provider: "tradestation",
   environment: "sim",
   symbol: "MESU26",
   timeframe: "5m",
@@ -29,10 +30,18 @@ describe("bar stream event acceptance", () => {
     expect(acceptsBarEvent(tab, "sim", event)).toBe(true);
   });
 
+  it("isolates providers while Schwab remains independent of the TradeStation environment", () => {
+    const equityTab = { ...tab, symbol: { ...tab.symbol, provider: "schwab" as const, symbol: "AAPL" } };
+    const schwabEvent = { ...event, provider: "schwab" as const, symbol: "AAPL" };
+    expect(acceptsBarEvent(equityTab, "sim", schwabEvent, 42)).toBe(true);
+    expect(acceptsBarEvent(equityTab, "live", schwabEvent, 42)).toBe(true);
+    expect(acceptsBarEvent(equityTab, "sim", { ...schwabEvent, provider: "tradestation" }, 42)).toBe(false);
+  });
+
   it("identifies when a tab market buffer belongs to another symbol or timeframe", () => {
-    expect(isSameBarMarket({ symbol: "MESU26", timeframe: "5m" }, "MESU26", "5m")).toBe(true);
-    expect(isSameBarMarket({ symbol: "MESU26", timeframe: "5m" }, "MESU26", "15m")).toBe(false);
-    expect(isSameBarMarket(undefined, "MESU26", "5m")).toBe(false);
+    expect(isSameBarMarket({ provider: "tradestation", symbol: "MESU26", timeframe: "5m" }, "tradestation", "MESU26", "5m")).toBe(true);
+    expect(isSameBarMarket({ provider: "tradestation", symbol: "MESU26", timeframe: "5m" }, "tradestation", "MESU26", "15m")).toBe(false);
+    expect(isSameBarMarket(undefined, "tradestation", "MESU26", "5m")).toBe(false);
   });
 
   it("requires a newer generation while a detached market replacement is pending", () => {
@@ -45,6 +54,6 @@ describe("bar stream event acceptance", () => {
 
   it("distinguishes complete bar state payloads from quote states", () => {
     expect(isBarStateEvent({ ...event, channel: "bars", state: "streaming" })).toBe(true);
-    expect(isBarStateEvent({ subscriptionId: "quotes", environment: "sim", channel: "quotes", state: "streaming" } as StreamStateEvent)).toBe(false);
+    expect(isBarStateEvent({ subscriptionId: "quotes", provider: "tradestation", environment: "sim", channel: "quotes", state: "streaming" } as StreamStateEvent)).toBe(false);
   });
 });

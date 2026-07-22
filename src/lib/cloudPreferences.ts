@@ -62,7 +62,10 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
         byTabId: Object.fromEntries(workspace.tabs.map((tab) => [tab.id, tab.ema200Alert])),
       },
       drawings: { bySymbol: workspace.drawings },
-      watchlist: { symbols: [...workspace.watchlist] },
+      watchlist: {
+        instruments: workspace.watchlist.map((instrument) => ({ ...instrument })),
+        symbols: workspace.watchlist.map((instrument) => instrument.symbol),
+      },
       chart_display: { ...workspace.settings.chartLabels },
       order_entry: {
         orderTicket: { ...workspace.settings.orderTicket },
@@ -144,7 +147,11 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     tabs: tabs as unknown as ChartTabState[],
     windows: remoteWindows as unknown as ChartWindowState[],
     drawings: object(drawings?.bySymbol) as unknown as WorkspaceState["drawings"] ?? current.drawings,
-    watchlist: Array.isArray(watchlist?.symbols) ? watchlist.symbols.filter((item): item is string => typeof item === "string") : current.watchlist,
+    watchlist: Array.isArray(watchlist?.instruments)
+      ? watchlist.instruments as unknown as WorkspaceState["watchlist"]
+      : Array.isArray(watchlist?.symbols)
+        ? watchlist.symbols.filter((item): item is string => typeof item === "string") as unknown as WorkspaceState["watchlist"]
+        : current.watchlist,
     entryRules: object(orderEntry?.entryRules) as unknown as WorkspaceState["entryRules"] ?? current.entryRules,
     // Rule alert settings travel atomically with their rule definitions. The
     // alerts.entryRules fallback preserves profiles written by older clients.

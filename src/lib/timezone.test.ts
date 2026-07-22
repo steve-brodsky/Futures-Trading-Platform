@@ -3,6 +3,7 @@ import { formatChartTime, resolveTimezone } from "./timezone";
 
 describe("chart timezone", () => {
   it("maps US futures exchanges to Chicago", () => expect(resolveTimezone("exchange", "CME")).toBe("America/Chicago"));
+  it("maps US equity exchanges to New York", () => expect(resolveTimezone("exchange", "NASDAQ")).toBe("America/New_York"));
   it("formats the same epoch differently by zone", () => {
     const epoch = Date.parse("2026-07-11T20:00:00Z") / 1000;
     expect(formatChartTime(epoch, "UTC")).toContain("20:00");

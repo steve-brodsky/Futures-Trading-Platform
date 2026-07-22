@@ -1809,6 +1809,11 @@ impl TradeStation {
         let meta = self
             .symbol_details_with_priority(&draft.symbol, RequestPriority::Trading)
             .await?;
+        if !meta.asset_type.trim().eq_ignore_ascii_case("FUTURE") {
+            return Err(AppError::Validation(
+                "TradeStation order entry is restricted to futures contracts".into(),
+            ));
+        }
         for price in [
             draft.limit_price,
             draft.stop_price,
@@ -2373,6 +2378,7 @@ fn quote_from_value_with_previous(item: &Value, previous: Option<&Quote>) -> Opt
     }
     let flags = item.get("MarketFlags").unwrap_or(&Value::Null);
     Some(Quote {
+        provider: MarketDataProvider::Tradestation,
         symbol,
         last: optional_number(item, "Last")
             .or_else(|| previous.map(|quote| quote.last))
@@ -2408,6 +2414,7 @@ fn quote_from_value_with_previous(item: &Value, previous: Option<&Quote>) -> Opt
 fn symbol_from_value(item: &Value) -> SymbolMeta {
     let price_format = item.get("PriceFormat").unwrap_or(&Value::Null);
     SymbolMeta {
+        provider: MarketDataProvider::Tradestation,
         symbol: string(item, "Name").or_else_empty(|| string(item, "Symbol")),
         description: string(item, "Description"),
         exchange: string(item, "Exchange"),

@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalSyncStatus, JournalTrade, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalSyncStatus, JournalTrade, MarketDataProvider, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, monthSummary } from "./journal";
-import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, futures, makeDemoBars, quoteFor } from "./demo";
+import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -27,6 +27,18 @@ export const api = {
     if (!isTauri) return;
     await native("logout");
   },
+  async schwabAuthStatus(): Promise<{ configured: boolean; authenticated: boolean }> {
+    return isTauri ? native("schwab_auth_status") : { configured: true, authenticated: true };
+  },
+  async saveSchwabCredentials(clientId: string, clientSecret: string): Promise<void> {
+    if (isTauri) await native("save_schwab_credentials", { clientId, clientSecret });
+  },
+  async beginSchwabLogin(): Promise<void> {
+    if (isTauri) await native("begin_schwab_login");
+  },
+  async logoutSchwab(): Promise<void> {
+    if (isTauri) await native("logout_schwab");
+  },
   async setEnvironment(environment: TradingEnvironment): Promise<void> {
     if (isTauri) await native("set_environment", { environment });
   },
@@ -36,11 +48,11 @@ export const api = {
   async symbolSearch(query: string): Promise<SymbolMeta[]> {
     if (isTauri) return native("search_symbols", { query });
     const q = query.toLowerCase();
-    return futures.filter((item) => `${item.symbol} ${item.description}`.toLowerCase().includes(q));
+    return demoSymbols.filter((item) => `${item.symbol} ${item.description}`.toLowerCase().includes(q));
   },
-  async symbolDetails(symbol: string): Promise<SymbolMeta> {
-    if (isTauri) return native("get_symbol_details", { symbol });
-    const match = futures.find((item) => item.symbol === symbol);
+  async symbolDetails(provider: MarketDataProvider, symbol: string): Promise<SymbolMeta> {
+    if (isTauri) return native("get_symbol_details", { provider, symbol });
+    const match = demoSymbols.find((item) => item.provider === provider && item.symbol === symbol);
     if (!match) throw new Error(`Symbol details unavailable for ${symbol}`);
     return match;
   },
@@ -50,34 +62,34 @@ export const api = {
       .filter((item) => item.root === root.toUpperCase() && !item.symbol.startsWith("@") && item.expiration)
       .sort((left, right) => (left.expiration ?? "").localeCompare(right.expiration ?? ""));
   },
-  async bars(symbol: string, timeframe: Timeframe): Promise<Bar[]> {
-    if (isTauri) return native("get_bars", { symbol, timeframe });
-    const base = symbol.startsWith("MNQ") ? 23010 : symbol.startsWith("MCL") ? 67 : symbol.startsWith("MGC") ? 3450 : symbol.startsWith("MYM") ? 44920 : 6218;
-    return makeDemoBars(360, base, symbol.startsWith("MCL") ? 0.04 : symbol.startsWith("MGC") ? 0.7 : 1);
+  async bars(provider: MarketDataProvider, symbol: string, timeframe: Timeframe): Promise<Bar[]> {
+    if (isTauri) return native("get_bars", { provider, symbol, timeframe });
+    const base = provider === "schwab" ? (symbol === "SPY" ? 632 : 215) : symbol.startsWith("MNQ") ? 23010 : symbol.startsWith("MCL") ? 67 : symbol.startsWith("MGC") ? 3450 : symbol.startsWith("MYM") ? 44920 : 6218;
+    return makeDemoBars(360, base, provider === "schwab" ? 0.12 : symbol.startsWith("MCL") ? 0.04 : symbol.startsWith("MGC") ? 0.7 : 1);
   },
-  async cachedBars(symbol: string, timeframe: Timeframe): Promise<Bar[]> {
-    return isTauri ? native("load_cached_bars", { symbol, timeframe }) : this.bars(symbol, timeframe);
+  async cachedBars(provider: MarketDataProvider, symbol: string, timeframe: Timeframe): Promise<Bar[]> {
+    return isTauri ? native("load_cached_bars", { provider, symbol, timeframe }) : this.bars(provider, symbol, timeframe);
   },
-  async olderBars(symbol: string, timeframe: Timeframe, before: number): Promise<Bar[]> {
-    if (isTauri) return native("get_older_bars", { symbol, timeframe, before });
+  async olderBars(provider: MarketDataProvider, symbol: string, timeframe: Timeframe, before: number): Promise<Bar[]> {
+    if (isTauri) return native("get_older_bars", { provider, symbol, timeframe, before });
     return [];
   },
-  async cachedBarRange(symbol: string, timeframe: Timeframe, first: number, last: number): Promise<Bar[]> {
-    if (isTauri) return native("load_cached_bar_range", { symbol, timeframe, first, last });
-    return (await this.bars(symbol, timeframe)).filter((bar) => bar.time >= first && bar.time < last);
+  async cachedBarRange(provider: MarketDataProvider, symbol: string, timeframe: Timeframe, first: number, last: number): Promise<Bar[]> {
+    if (isTauri) return native("load_cached_bar_range", { provider, symbol, timeframe, first, last });
+    return (await this.bars(provider, symbol, timeframe)).filter((bar) => bar.time >= first && bar.time < last);
   },
-  async barRange(symbol: string, timeframe: Timeframe, first: number, last: number): Promise<Bar[]> {
-    if (isTauri) return native("get_bar_range", { symbol, timeframe, first, last });
-    return (await this.bars(symbol, timeframe)).filter((bar) => bar.time >= first && bar.time < last);
+  async barRange(provider: MarketDataProvider, symbol: string, timeframe: Timeframe, first: number, last: number): Promise<Bar[]> {
+    if (isTauri) return native("get_bar_range", { provider, symbol, timeframe, first, last });
+    return (await this.bars(provider, symbol, timeframe)).filter((bar) => bar.time >= first && bar.time < last);
   },
-  async startBarStream(subscriptionId: string, symbol: string, timeframe: Timeframe, consumer: BarStreamConsumer, generation: number): Promise<void> {
-    if (isTauri) await native("start_bar_stream", { subscriptionId, symbol, timeframe, consumer, generation });
+  async startBarStream(subscriptionId: string, provider: MarketDataProvider, symbol: string, timeframe: Timeframe, consumer: BarStreamConsumer, generation: number): Promise<void> {
+    if (isTauri) await native("start_bar_stream", { subscriptionId, provider, symbol, timeframe, consumer, generation });
   },
   async stopBarStream(subscriptionId: string, generation: number): Promise<void> {
     if (isTauri) await native("stop_bar_stream", { subscriptionId, generation });
   },
-  async startQuoteStream(subscriptionId: string, symbols: string[]): Promise<void> {
-    if (isTauri) await native("start_quote_stream", { subscriptionId, symbols });
+  async startQuoteStream(subscriptionId: string, provider: MarketDataProvider, symbols: string[]): Promise<void> {
+    if (isTauri) await native("start_quote_stream", { subscriptionId, provider, symbols });
   },
   async stopQuoteStream(subscriptionId: string): Promise<void> {
     if (isTauri) await native("stop_quote_stream", { subscriptionId });
@@ -88,9 +100,9 @@ export const api = {
   async stopBrokerageStream(): Promise<void> {
     if (isTauri) await native("stop_brokerage_stream");
   },
-  async quotes(symbols: string[]): Promise<Quote[]> {
-    if (isTauri) return native("get_quotes", { symbols });
-    return symbols.map((symbol, index) => quoteFor(symbol, index * 0.25));
+  async quotes(provider: MarketDataProvider, symbols: string[]): Promise<Quote[]> {
+    if (isTauri) return native("get_quotes", { provider, symbols });
+    return symbols.map((symbol, index) => quoteFor(symbol, index * 0.25, provider));
   },
   async positions(accountId: string): Promise<Position[]> {
     return isTauri ? native("get_positions", { accountId }) : demoPositions;

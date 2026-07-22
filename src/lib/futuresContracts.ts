@@ -1,8 +1,8 @@
 import type { ChartTabState, Position, SymbolMeta, WorkspaceState } from "../types";
-import { MAX_STREAMED_QUOTE_SYMBOLS } from "./watchlist";
+import { instrumentKey, MAX_STREAMED_QUOTE_SYMBOLS } from "./watchlist";
 
 export function isContinuousFuture(symbol: SymbolMeta): boolean {
-  return symbol.symbol.startsWith("@") && symbol.assetType.toUpperCase().includes("FUTURE");
+  return symbol.provider === "tradestation" && symbol.symbol.startsWith("@") && symbol.assetType.toUpperCase().includes("FUTURE");
 }
 
 function concreteSymbol(value?: string): string | undefined {
@@ -27,6 +27,7 @@ function symbolRoot(meta: SymbolMeta): string | undefined {
 }
 
 export function hasOpenFuturesPosition(meta: SymbolMeta, positions: Position[]): boolean {
+  if (meta.provider !== "tradestation" || !meta.assetType.toUpperCase().includes("FUTURE")) return false;
   const marketSymbol = normalizedSymbol(meta.symbol);
   const marketRoot = symbolRoot(meta);
   return positions.some((position) => {
@@ -38,28 +39,31 @@ export function hasOpenFuturesPosition(meta: SymbolMeta, positions: Position[]):
 }
 
 export function resolveTradeSymbol(tab: ChartTabState): string | undefined {
+  if (tab.symbol.provider !== "tradestation" || !tab.symbol.assetType.toUpperCase().includes("FUTURE")) return undefined;
   if (!isContinuousFuture(tab.symbol)) return concreteSymbol(tab.symbol.symbol);
   return concreteSymbol(tab.tradeContract) ?? concreteSymbol(tab.symbol.underlying);
 }
 
-export function quoteSubscriptionSymbols(workspace: Pick<WorkspaceState, "tabs" | "watchlist">): string[] {
-  const symbols = new Set(workspace.watchlist.map((symbol) => symbol.trim().toUpperCase()).filter(Boolean));
+export function quoteSubscriptionInstruments(workspace: Pick<WorkspaceState, "tabs" | "watchlist">): SymbolMeta[] {
+  const instruments = new Map(workspace.watchlist.map((instrument) => [instrumentKey(instrument), instrument]));
   workspace.tabs.forEach((tab) => {
-    symbols.add(tab.symbol.symbol);
+    instruments.set(instrumentKey(tab.symbol), tab.symbol);
     const tradeSymbol = resolveTradeSymbol(tab);
-    if (tradeSymbol) symbols.add(tradeSymbol);
+    if (tradeSymbol && tradeSymbol !== tab.symbol.symbol) {
+      instruments.set(`tradestation:${tradeSymbol}`, { ...tab.symbol, symbol: tradeSymbol, underlying: undefined });
+    }
   });
-  return [...symbols].sort();
+  return [...instruments.values()].sort((left, right) => instrumentKey(left).localeCompare(instrumentKey(right)));
 }
 
-export function canAddWatchlistSymbol(workspace: Pick<WorkspaceState, "tabs" | "watchlist">, value: string): boolean {
-  const symbol = value.trim().toUpperCase();
-  if (!symbol || workspace.watchlist.includes(symbol)) return true;
-  return quoteSubscriptionSymbols({ ...workspace, watchlist: [...workspace.watchlist, symbol] }).length <= MAX_STREAMED_QUOTE_SYMBOLS;
+export function canAddWatchlistSymbol(workspace: Pick<WorkspaceState, "tabs" | "watchlist">, value: SymbolMeta): boolean {
+  if (workspace.watchlist.some((item) => instrumentKey(item) === instrumentKey(value))) return true;
+  return quoteSubscriptionInstruments({ ...workspace, watchlist: [...workspace.watchlist, value] }).length <= MAX_STREAMED_QUOTE_SYMBOLS;
 }
 
 export function sameSymbolMeta(left: SymbolMeta, right: SymbolMeta): boolean {
-  return left.symbol === right.symbol
+  return left.provider === right.provider
+    && left.symbol === right.symbol
     && left.description === right.description
     && left.exchange === right.exchange
     && left.assetType === right.assetType

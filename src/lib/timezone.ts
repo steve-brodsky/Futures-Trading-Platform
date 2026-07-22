@@ -5,6 +5,12 @@ const exchangeZones: Record<string, string> = {
   CBOT: "America/Chicago",
   NYMEX: "America/Chicago",
   COMEX: "America/Chicago",
+  NYSE: "America/New_York",
+  NASDAQ: "America/New_York",
+  AMEX: "America/New_York",
+  ARCA: "America/New_York",
+  "NYSE ARCA": "America/New_York",
+  BATS: "America/New_York",
 };
 
 export function resolveTimezone(mode: ChartTimezone, exchange: string): string {

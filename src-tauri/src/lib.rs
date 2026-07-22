@@ -1,14 +1,19 @@
 mod journal;
 mod models;
+mod schwab;
+mod schwab_oauth;
+mod schwab_streamer;
 mod storage;
 mod tradestation;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use models::*;
+use schwab::Schwab;
+use schwab_streamer::{SchwabStreamEvent, SchwabStreamer};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::PathBuf,
     sync::{Arc, RwLock},
 };
@@ -58,9 +63,11 @@ impl serde::Serialize for AppError {
 
 pub struct NativeState {
     api: TradeStation,
+    schwab: Schwab,
+    schwab_streamer: SchwabStreamer,
     db_path: PathBuf,
     bar_streams: Arc<tokio::sync::Mutex<BarStreamRegistry>>,
-    quote_stream: tokio::sync::Mutex<Option<(String, tauri::async_runtime::JoinHandle<()>)>>,
+    quote_streams: tokio::sync::Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     brokerage_streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
     preference_realtime: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
@@ -85,6 +92,8 @@ struct SharedBarStreamStatus {
 }
 
 struct SharedBarStream {
+    provider: MarketDataProvider,
+    symbol: String,
     subscribers: Arc<RwLock<HashMap<String, BarSubscriber>>>,
     status: Arc<RwLock<SharedBarStreamStatus>>,
     latest_bars: Arc<RwLock<Vec<Bar>>>,
@@ -107,8 +116,27 @@ impl BarStreamRegistry {
     }
 }
 
-fn bar_stream_key(environment: &TradingEnvironment, symbol: &str, timeframe: &str) -> String {
-    format!("{}\0{symbol}\0{timeframe}", environment.key())
+fn bar_stream_key(
+    provider: &MarketDataProvider,
+    environment: &TradingEnvironment,
+    symbol: &str,
+    timeframe: &str,
+) -> String {
+    let namespace = match provider {
+        MarketDataProvider::Tradestation => environment.key(),
+        MarketDataProvider::Schwab => "schwab",
+    };
+    format!("{}\0{namespace}\0{symbol}\0{timeframe}", provider.key())
+}
+
+fn cache_namespace(
+    provider: &MarketDataProvider,
+    environment: &TradingEnvironment,
+) -> &'static str {
+    match provider {
+        MarketDataProvider::Tradestation => environment.key(),
+        MarketDataProvider::Schwab => "schwab",
+    }
 }
 
 #[tauri::command]
@@ -120,6 +148,55 @@ async fn auth_status(state: State<'_, NativeState>) -> Result<AuthStatus, AppErr
         configured,
         authenticated,
     })
+}
+
+#[tauri::command]
+async fn schwab_auth_status(state: State<'_, NativeState>) -> Result<AuthStatus, AppError> {
+    Ok(AuthStatus {
+        configured: storage::schwab_client()?.is_some(),
+        authenticated: state.schwab.authenticated().await,
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn save_schwab_credentials(
+    client_id: String,
+    client_secret: String,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    if storage::save_schwab_client(&client_id, &client_secret)? {
+        state.schwab.clear_access_token().await;
+        state.schwab_streamer.stop().await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn begin_schwab_login(
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    let result = schwab_oauth::begin(app.clone(), state.schwab.clone()).await;
+    match &result {
+        Ok(()) => {
+            let _ = app.emit(
+                "schwab-auth-changed",
+                serde_json::json!({"authenticated":true}),
+            );
+        }
+        Err(error) => {
+            let _ = app.emit("schwab-auth-error", error.to_string());
+        }
+    }
+    result
+}
+
+#[tauri::command]
+async fn logout_schwab(state: State<'_, NativeState>) -> Result<(), AppError> {
+    state.schwab_streamer.stop().await;
+    state.schwab.clear_access_token().await;
+    storage::clear_schwab_refresh_token()?;
+    Ok(())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -212,15 +289,47 @@ async fn search_symbols(
     if query.trim().is_empty() {
         return Ok(vec![]);
     }
-    state.api.search_symbols(query.trim()).await
+    let tradestation = state.api.search_symbols(query.trim());
+    let schwab = state.schwab.search_symbols(query.trim());
+    let (tradestation, schwab) = tokio::join!(tradestation, schwab);
+    Ok(merge_symbol_search_results(
+        tradestation.unwrap_or_default(),
+        schwab.unwrap_or_default(),
+        query.trim(),
+    ))
+}
+
+fn merge_symbol_search_results(
+    mut tradestation: Vec<SymbolMeta>,
+    schwab: Vec<SymbolMeta>,
+    query: &str,
+) -> Vec<SymbolMeta> {
+    // The TradeStation request is already server-filtered to Category=Future.
+    // Its v2 suggestion payload is inconsistent about category spelling and
+    // sometimes omits it, so a second exact client-side filter can hide valid
+    // futures returned by that endpoint.
+    tradestation.extend(schwab);
+    let mut results = tradestation;
+    results.sort_by(|left, right| {
+        let left_exact = !left.symbol.eq_ignore_ascii_case(query);
+        let right_exact = !right.symbol.eq_ignore_ascii_case(query);
+        left_exact
+            .cmp(&right_exact)
+            .then_with(|| left.symbol.cmp(&right.symbol))
+    });
+    results
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn get_symbol_details(
+    provider: MarketDataProvider,
     symbol: String,
     state: State<'_, NativeState>,
 ) -> Result<SymbolMeta, AppError> {
-    state.api.symbol_details(symbol.trim()).await
+    match provider {
+        MarketDataProvider::Tradestation => state.api.symbol_details(symbol.trim()).await,
+        MarketDataProvider::Schwab => state.schwab.symbol_details(symbol.trim()).await,
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -233,49 +342,68 @@ async fn get_future_contracts(
 
 #[tauri::command]
 async fn get_bars(
+    provider: MarketDataProvider,
     symbol: String,
     timeframe: String,
     state: State<'_, NativeState>,
 ) -> Result<Vec<Bar>, AppError> {
-    state.api.bars(&symbol, &timeframe).await
+    match provider {
+        MarketDataProvider::Tradestation => state.api.bars(&symbol, &timeframe).await,
+        MarketDataProvider::Schwab => state.schwab.bars(&symbol, &timeframe).await,
+    }
 }
 
 #[tauri::command]
 async fn get_quotes(
+    provider: MarketDataProvider,
     symbols: Vec<String>,
     state: State<'_, NativeState>,
 ) -> Result<Vec<Quote>, AppError> {
-    state.api.quotes(&symbols).await
+    match provider {
+        MarketDataProvider::Tradestation => state.api.quotes(&symbols).await,
+        MarketDataProvider::Schwab => state.schwab.quotes(&symbols).await,
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn load_cached_bars(
+    provider: MarketDataProvider,
     symbol: String,
     timeframe: String,
     state: State<'_, NativeState>,
 ) -> Result<Vec<Bar>, AppError> {
     let environment = state.api.environment().await;
-    storage::load_bars(
+    let mut bars = storage::load_bars(
         &state.db_path,
-        environment.key(),
+        cache_namespace(&provider, &environment),
         &symbol,
         &timeframe,
         10_000,
-    )
+    )?;
+    if provider == MarketDataProvider::Schwab {
+        bars.retain(schwab::valid_equity_bar);
+    }
+    Ok(bars)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn get_older_bars(
+    provider: MarketDataProvider,
     symbol: String,
     timeframe: String,
     before: i64,
     state: State<'_, NativeState>,
 ) -> Result<Vec<Bar>, AppError> {
     let environment = state.api.environment().await;
-    let bars = state.api.older_bars(&symbol, &timeframe, before).await?;
+    let bars = match provider {
+        MarketDataProvider::Tradestation => {
+            state.api.older_bars(&symbol, &timeframe, before).await?
+        }
+        MarketDataProvider::Schwab => state.schwab.older_bars(&symbol, &timeframe, before).await?,
+    };
     storage::save_bars(
         &state.db_path,
-        environment.key(),
+        cache_namespace(&provider, &environment),
         &symbol,
         &timeframe,
         &bars,
@@ -285,6 +413,7 @@ async fn get_older_bars(
 
 #[tauri::command(rename_all = "camelCase")]
 async fn load_cached_bar_range(
+    provider: MarketDataProvider,
     symbol: String,
     timeframe: String,
     first: i64,
@@ -297,18 +426,23 @@ async fn load_cached_bar_range(
         ));
     }
     let environment = state.api.environment().await;
-    storage::load_bars_range(
+    let mut bars = storage::load_bars_range(
         &state.db_path,
-        environment.key(),
+        cache_namespace(&provider, &environment),
         &symbol,
         &timeframe,
         first,
         last,
-    )
+    )?;
+    if provider == MarketDataProvider::Schwab {
+        bars.retain(schwab::valid_equity_bar);
+    }
+    Ok(bars)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn get_bar_range(
+    provider: MarketDataProvider,
     symbol: String,
     timeframe: String,
     first: i64,
@@ -321,13 +455,18 @@ async fn get_bar_range(
         ));
     }
     let environment = state.api.environment().await;
-    let bars = state
-        .api
-        .bars_range(&symbol, &timeframe, first, last)
-        .await?;
+    let bars = match provider {
+        MarketDataProvider::Tradestation => {
+            state
+                .api
+                .bars_range(&symbol, &timeframe, first, last)
+                .await?
+        }
+        MarketDataProvider::Schwab => state.schwab.bars_range(&symbol, first, last).await?,
+    };
     storage::save_bars(
         &state.db_path,
-        environment.key(),
+        cache_namespace(&provider, &environment),
         &symbol,
         &timeframe,
         &bars,
@@ -339,29 +478,56 @@ async fn get_bar_range(
 async fn start_bar_stream(
     app: tauri::AppHandle,
     subscription_id: String,
+    provider: MarketDataProvider,
     symbol: String,
     timeframe: String,
     consumer: String,
     generation: u64,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
-    TradeStation::bar_stream_path(&symbol, &timeframe)?;
+    match provider {
+        MarketDataProvider::Tradestation => {
+            TradeStation::bar_stream_path(&symbol, &timeframe)?;
+        }
+        MarketDataProvider::Schwab => {
+            schwab::bucket_start(Utc::now().timestamp(), &timeframe)
+                .ok_or_else(|| AppError::Validation("Unsupported Schwab timeframe".into()))?;
+        }
+    }
     if !matches!(consumer.as_str(), "chart" | "ema-alert" | "vwap") {
         return Err(AppError::Validation("Invalid bar stream consumer".into()));
     }
     let environment = state.api.environment().await;
-    let key = bar_stream_key(&environment, &symbol, &timeframe);
-    let retained_limit = tradestation::history_spec(&timeframe)
-        .map(|(_, _, bars_back)| bars_back)
-        .unwrap_or(10_000);
-    let cached_bars = storage::load_bars(
+    let key = bar_stream_key(&provider, &environment, &symbol, &timeframe);
+    let retained_limit = if provider == MarketDataProvider::Tradestation {
+        tradestation::history_spec(&timeframe)
+            .map(|(_, _, bars_back)| bars_back)
+            .unwrap_or(10_000)
+    } else {
+        match timeframe.as_str() {
+            "1m" => 10_000,
+            "5m" => 4_000,
+            "15m" => 2_000,
+            "30m" => 1_000,
+            "1h" => 1_000,
+            "4h" => 500,
+            "D" => 5_000,
+            "W" => 2_500,
+            "M" => 1_000,
+            _ => 10_000,
+        }
+    };
+    let mut cached_bars = storage::load_bars(
         &state.db_path,
-        environment.key(),
+        cache_namespace(&provider, &environment),
         &symbol,
         &timeframe,
         retained_limit,
     )
     .unwrap_or_default();
+    if provider == MarketDataProvider::Schwab {
+        cached_bars.retain(schwab::valid_equity_bar);
+    }
     let registry_handle = state.bar_streams.clone();
     let mut cleanup_keys = Vec::new();
     let mut late_replay: Option<(Arc<RwLock<SharedBarStreamStatus>>, Arc<RwLock<Vec<Bar>>>)> = None;
@@ -409,21 +575,38 @@ async fn start_bar_stream(
                 message: None,
             }));
             let latest_bars = Arc::new(RwLock::new(cached_bars));
-            let task = tauri::async_runtime::spawn(run_bar_stream(
-                app.clone(),
-                state.api.clone(),
-                state.db_path.clone(),
-                subscribers.clone(),
-                status.clone(),
-                latest_bars.clone(),
-                retained_limit,
-                environment.clone(),
-                symbol.clone(),
-                timeframe.clone(),
-            ));
+            let task = match provider {
+                MarketDataProvider::Tradestation => tauri::async_runtime::spawn(run_bar_stream(
+                    app.clone(),
+                    state.api.clone(),
+                    state.db_path.clone(),
+                    subscribers.clone(),
+                    status.clone(),
+                    latest_bars.clone(),
+                    retained_limit,
+                    environment.clone(),
+                    symbol.clone(),
+                    timeframe.clone(),
+                )),
+                MarketDataProvider::Schwab => tauri::async_runtime::spawn(run_schwab_bar_stream(
+                    app.clone(),
+                    state.schwab.clone(),
+                    state.schwab_streamer.clone(),
+                    state.db_path.clone(),
+                    subscribers.clone(),
+                    status.clone(),
+                    latest_bars.clone(),
+                    retained_limit,
+                    environment.clone(),
+                    symbol.clone(),
+                    timeframe.clone(),
+                )),
+            };
             registry.streams.insert(
                 key,
                 SharedBarStream {
+                    provider: provider.clone(),
+                    symbol: symbol.clone(),
                     subscribers,
                     status,
                     latest_bars,
@@ -434,8 +617,14 @@ async fn start_bar_stream(
         }
     }
     for (cleanup_key, generation) in cleanup_keys {
-        schedule_bar_stream_cleanup(registry_handle.clone(), cleanup_key, generation);
+        schedule_bar_stream_cleanup(
+            registry_handle.clone(),
+            state.schwab_streamer.clone(),
+            cleanup_key,
+            generation,
+        );
     }
+    sync_schwab_chart_symbols(&registry_handle, &state.schwab_streamer).await;
     if let Some((status, bars)) = late_replay {
         if let Ok(bars) = bars.read() {
             // Live updates take the write lock before emitting, so holding
@@ -444,6 +633,7 @@ async fn start_bar_stream(
                 emit_bar_snapshot_to(
                     &app,
                     &subscription_id,
+                    &provider,
                     &environment,
                     &symbol,
                     &timeframe,
@@ -458,6 +648,7 @@ async fn start_bar_stream(
             emit_stream_state(
                 &app,
                 &subscription_id,
+                &provider,
                 &environment,
                 "bars",
                 &status.state,
@@ -495,13 +686,19 @@ async fn stop_bar_stream(
         })
     };
     if let Some((key, generation)) = cleanup {
-        schedule_bar_stream_cleanup(registry_handle, key, generation);
+        schedule_bar_stream_cleanup(
+            registry_handle,
+            state.schwab_streamer.clone(),
+            key,
+            generation,
+        );
     }
     Ok(())
 }
 
 fn schedule_bar_stream_cleanup(
     registry: Arc<tokio::sync::Mutex<BarStreamRegistry>>,
+    schwab_streamer: SchwabStreamer,
     key: String,
     generation: u64,
 ) {
@@ -521,13 +718,37 @@ fn schedule_bar_stream_cleanup(
                 shared.task.abort();
             }
         }
+        let symbols = registry
+            .streams
+            .values()
+            .filter(|shared| shared.provider == MarketDataProvider::Schwab)
+            .map(|shared| shared.symbol.clone())
+            .collect::<Vec<_>>();
+        drop(registry);
+        schwab_streamer.set_chart_symbols(symbols).await;
     });
+}
+
+async fn sync_schwab_chart_symbols(
+    registry: &Arc<tokio::sync::Mutex<BarStreamRegistry>>,
+    streamer: &SchwabStreamer,
+) {
+    let symbols = registry
+        .lock()
+        .await
+        .streams
+        .values()
+        .filter(|shared| shared.provider == MarketDataProvider::Schwab)
+        .map(|shared| shared.symbol.clone())
+        .collect::<Vec<_>>();
+    streamer.set_chart_symbols(symbols).await;
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn start_quote_stream(
     app: tauri::AppHandle,
     subscription_id: String,
+    provider: MarketDataProvider,
     mut symbols: Vec<String>,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
@@ -539,15 +760,31 @@ async fn start_quote_stream(
         ));
     }
     let environment = state.api.environment().await;
-    let task = tauri::async_runtime::spawn(run_quote_stream(
-        app,
-        state.api.clone(),
-        subscription_id.clone(),
-        environment,
-        symbols,
-    ));
-    let mut current = state.quote_stream.lock().await;
-    if let Some((_, previous)) = current.replace((subscription_id, task)) {
+    let task = match provider {
+        MarketDataProvider::Tradestation => tauri::async_runtime::spawn(run_quote_stream(
+            app,
+            state.api.clone(),
+            subscription_id.clone(),
+            environment,
+            symbols,
+        )),
+        MarketDataProvider::Schwab => {
+            state
+                .schwab_streamer
+                .set_quote_symbols(symbols.clone())
+                .await;
+            tauri::async_runtime::spawn(run_schwab_quote_stream(
+                app,
+                state.schwab.clone(),
+                state.schwab_streamer.clone(),
+                subscription_id.clone(),
+                environment,
+                symbols,
+            ))
+        }
+    };
+    let mut current = state.quote_streams.lock().await;
+    if let Some(previous) = current.insert(subscription_id, task) {
         previous.abort();
     }
     Ok(())
@@ -558,14 +795,14 @@ async fn stop_quote_stream(
     subscription_id: String,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
-    let mut current = state.quote_stream.lock().await;
-    if current
-        .as_ref()
-        .is_some_and(|(id, _)| id == &subscription_id)
-    {
-        if let Some((_, task)) = current.take() {
-            task.abort();
-        }
+    if let Some(task) = state.quote_streams.lock().await.remove(&subscription_id) {
+        task.abort();
+    }
+    if subscription_id.contains("schwab") {
+        state
+            .schwab_streamer
+            .set_quote_symbols(std::iter::empty())
+            .await;
     }
     Ok(())
 }
@@ -1893,6 +2130,7 @@ fn decode_stream_values(buffer: &mut Vec<u8>, chunk: &[u8]) -> Result<Vec<Value>
 fn emit_stream_state(
     app: &tauri::AppHandle,
     subscription_id: &str,
+    provider: &MarketDataProvider,
     environment: &TradingEnvironment,
     channel: &str,
     state: &str,
@@ -1905,6 +2143,7 @@ fn emit_stream_state(
         "stream-state",
         StreamStateEvent {
             subscription_id: subscription_id.into(),
+            provider: provider.clone(),
             environment: environment.clone(),
             channel: channel.into(),
             state: state.into(),
@@ -1952,6 +2191,7 @@ fn emit_shared_stream_state(
     app: &tauri::AppHandle,
     subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
     status: &Arc<RwLock<SharedBarStreamStatus>>,
+    provider: &MarketDataProvider,
     environment: &TradingEnvironment,
     symbol: &str,
     timeframe: &str,
@@ -1966,6 +2206,7 @@ fn emit_shared_stream_state(
         emit_stream_state(
             app,
             &subscription_id,
+            provider,
             environment,
             "bars",
             state,
@@ -1980,6 +2221,7 @@ fn emit_shared_stream_state(
 fn emit_bar_snapshot(
     app: &tauri::AppHandle,
     subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
+    provider: &MarketDataProvider,
     environment: &TradingEnvironment,
     symbol: &str,
     timeframe: &str,
@@ -1989,6 +2231,7 @@ fn emit_bar_snapshot(
         emit_bar_snapshot_to(
             app,
             &subscription_id,
+            provider,
             environment,
             symbol,
             timeframe,
@@ -2001,6 +2244,7 @@ fn emit_bar_snapshot(
 fn emit_bar_snapshot_to(
     app: &tauri::AppHandle,
     subscription_id: &str,
+    provider: &MarketDataProvider,
     environment: &TradingEnvironment,
     symbol: &str,
     timeframe: &str,
@@ -2011,6 +2255,7 @@ fn emit_bar_snapshot_to(
         "bar-snapshot",
         BarSnapshotEvent {
             subscription_id: subscription_id.into(),
+            provider: provider.clone(),
             environment: environment.clone(),
             symbol: symbol.into(),
             timeframe: timeframe.into(),
@@ -2049,6 +2294,7 @@ fn retain_bar_snapshot(
 fn emit_bar_update(
     app: &tauri::AppHandle,
     subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
+    provider: &MarketDataProvider,
     environment: &TradingEnvironment,
     symbol: &str,
     timeframe: &str,
@@ -2059,6 +2305,7 @@ fn emit_bar_update(
             "bar-update",
             BarUpdateEvent {
                 subscription_id,
+                provider: provider.clone(),
                 environment: environment.clone(),
                 symbol: symbol.into(),
                 timeframe: timeframe.into(),
@@ -2139,6 +2386,198 @@ fn stream_provider_error(value: &Value) -> Option<String> {
     }
 }
 
+async fn run_schwab_bar_stream(
+    app: tauri::AppHandle,
+    api: Schwab,
+    streamer: SchwabStreamer,
+    db_path: PathBuf,
+    subscribers: Arc<RwLock<HashMap<String, BarSubscriber>>>,
+    status: Arc<RwLock<SharedBarStreamStatus>>,
+    latest_bars: Arc<RwLock<Vec<Bar>>>,
+    retained_limit: usize,
+    environment: TradingEnvironment,
+    symbol: String,
+    timeframe: String,
+) {
+    let mut receiver = streamer.subscribe();
+    emit_shared_stream_state(
+        &app,
+        &subscribers,
+        &status,
+        &MarketDataProvider::Schwab,
+        &environment,
+        &symbol,
+        &timeframe,
+        "connecting",
+        None,
+    );
+    match api.bars(&symbol, &timeframe).await {
+        Ok(history) => {
+            let _ = storage::save_bars(&db_path, "schwab", &symbol, &timeframe, &history);
+            let retained = retain_bar_snapshot(&latest_bars, &history, retained_limit);
+            emit_bar_snapshot(
+                &app,
+                &subscribers,
+                &MarketDataProvider::Schwab,
+                &environment,
+                &symbol,
+                &timeframe,
+                &retained,
+            );
+        }
+        Err(error) => emit_shared_stream_state(
+            &app,
+            &subscribers,
+            &status,
+            &MarketDataProvider::Schwab,
+            &environment,
+            &symbol,
+            &timeframe,
+            "reconnecting",
+            Some(error.to_string()),
+        ),
+    }
+
+    let source_minutes = api.bars(&symbol, "1m").await.unwrap_or_default();
+    let _ = storage::save_bars(&db_path, "schwab", &symbol, "1m", &source_minutes);
+    let mut live_minutes: BTreeMap<i64, Bar> = source_minutes
+        .into_iter()
+        .map(|bar| (bar.time, bar))
+        .collect();
+    loop {
+        match receiver.recv().await {
+            Ok(SchwabStreamEvent::State { state, message }) => emit_shared_stream_state(
+                &app,
+                &subscribers,
+                &status,
+                &MarketDataProvider::Schwab,
+                &environment,
+                &symbol,
+                &timeframe,
+                &state,
+                message,
+            ),
+            Ok(SchwabStreamEvent::Chart {
+                symbol: event_symbol,
+                bar,
+            }) if event_symbol.eq_ignore_ascii_case(&symbol) => {
+                let previous = live_minutes.insert(bar.time, bar.clone());
+                let Some(bucket_time) = schwab::bucket_start(bar.time, &timeframe) else {
+                    continue;
+                };
+                live_minutes
+                    .retain(|time, _| schwab::bucket_start(*time, &timeframe) == Some(bucket_time));
+                let live_bucket = schwab::aggregate_bars(
+                    &live_minutes.values().cloned().collect::<Vec<_>>(),
+                    &timeframe,
+                )
+                .into_iter()
+                .find(|item| item.time == bucket_time);
+                let Some(mut update) = live_bucket else {
+                    continue;
+                };
+                if timeframe == "M" {
+                    if let Ok(retained) = latest_bars.read() {
+                        if let Some(existing) =
+                            retained.iter().find(|item| item.time == bucket_time)
+                        {
+                            update.open = existing.open;
+                            update.high = existing.high.max(update.high);
+                            update.low = existing.low.min(update.low);
+                            let previous_volume = previous.map(|item| item.volume).unwrap_or(0.0);
+                            update.volume =
+                                (existing.volume + bar.volume - previous_volume).max(0.0);
+                        }
+                    }
+                }
+                update.realtime = true;
+                let _ = storage::save_bars(
+                    &db_path,
+                    "schwab",
+                    &symbol,
+                    &timeframe,
+                    std::slice::from_ref(&update),
+                );
+                let _ = retain_bar_snapshot(
+                    &latest_bars,
+                    std::slice::from_ref(&update),
+                    retained_limit,
+                );
+                emit_bar_update(
+                    &app,
+                    &subscribers,
+                    &MarketDataProvider::Schwab,
+                    &environment,
+                    &symbol,
+                    &timeframe,
+                    &update,
+                );
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
+async fn run_schwab_quote_stream(
+    app: tauri::AppHandle,
+    api: Schwab,
+    streamer: SchwabStreamer,
+    subscription_id: String,
+    environment: TradingEnvironment,
+    symbols: Vec<String>,
+) {
+    let desired = symbols
+        .iter()
+        .map(|symbol| symbol.to_uppercase())
+        .collect::<std::collections::HashSet<_>>();
+    if let Ok(quotes) = api.quotes(&symbols).await {
+        for quote in quotes {
+            let _ = app.emit(
+                "quote-update",
+                QuoteUpdateEvent {
+                    subscription_id: subscription_id.clone(),
+                    provider: MarketDataProvider::Schwab,
+                    environment: environment.clone(),
+                    quote,
+                },
+            );
+        }
+    }
+    let mut receiver = streamer.subscribe();
+    loop {
+        match receiver.recv().await {
+            Ok(SchwabStreamEvent::State { state, message }) => emit_stream_state(
+                &app,
+                &subscription_id,
+                &MarketDataProvider::Schwab,
+                &environment,
+                "quotes",
+                &state,
+                message,
+                None,
+                None,
+                None,
+            ),
+            Ok(SchwabStreamEvent::Quote(quote)) if desired.contains(&quote.symbol) => {
+                let _ = app.emit(
+                    "quote-update",
+                    QuoteUpdateEvent {
+                        subscription_id: subscription_id.clone(),
+                        provider: MarketDataProvider::Schwab,
+                        environment: environment.clone(),
+                        quote,
+                    },
+                );
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 async fn run_bar_stream(
     app: tauri::AppHandle,
     api: TradeStation,
@@ -2157,6 +2596,7 @@ async fn run_bar_stream(
             &app,
             &subscribers,
             &status,
+            &MarketDataProvider::Tradestation,
             &environment,
             &symbol,
             &timeframe,
@@ -2176,6 +2616,7 @@ async fn run_bar_stream(
                         &app,
                         &subscribers,
                         &status,
+                        &MarketDataProvider::Tradestation,
                         &environment,
                         &symbol,
                         &timeframe,
@@ -2196,6 +2637,7 @@ async fn run_bar_stream(
                     &app,
                     &subscribers,
                     &status,
+                    &MarketDataProvider::Tradestation,
                     &environment,
                     &symbol,
                     &timeframe,
@@ -2249,6 +2691,7 @@ async fn run_bar_stream(
                                 emit_bar_snapshot(
                                     &app,
                                     &subscribers,
+                                    &MarketDataProvider::Tradestation,
                                     &environment,
                                     &symbol,
                                     &timeframe,
@@ -2290,6 +2733,7 @@ async fn run_bar_stream(
                                         emit_bar_update(
                                             &app,
                                             &subscribers,
+                                            &MarketDataProvider::Tradestation,
                                             &environment,
                                             &symbol,
                                             &timeframe,
@@ -2319,6 +2763,7 @@ async fn run_bar_stream(
                                             emit_bar_snapshot(
                                                 &app,
                                                 &subscribers,
+                                                &MarketDataProvider::Tradestation,
                                                 &environment,
                                                 &symbol,
                                                 &timeframe,
@@ -2349,6 +2794,7 @@ async fn run_bar_stream(
                     emit_bar_snapshot(
                         &app,
                         &subscribers,
+                        &MarketDataProvider::Tradestation,
                         &environment,
                         &symbol,
                         &timeframe,
@@ -2359,6 +2805,7 @@ async fn run_bar_stream(
                     &app,
                     &subscribers,
                     &status,
+                    &MarketDataProvider::Tradestation,
                     &environment,
                     &symbol,
                     &timeframe,
@@ -2379,6 +2826,7 @@ async fn run_bar_stream(
                     &app,
                     &subscribers,
                     &status,
+                    &MarketDataProvider::Tradestation,
                     &environment,
                     &symbol,
                     &timeframe,
@@ -2420,6 +2868,7 @@ async fn run_quote_stream(
             "quote-update",
             QuoteUpdateEvent {
                 subscription_id: subscription_id.clone(),
+                provider: MarketDataProvider::Tradestation,
                 environment: environment.clone(),
                 quote: quote.clone(),
             },
@@ -2429,6 +2878,7 @@ async fn run_quote_stream(
         emit_stream_state(
             &app,
             &subscription_id,
+            &MarketDataProvider::Tradestation,
             &environment,
             "quotes",
             if attempt == 0 {
@@ -2451,6 +2901,7 @@ async fn run_quote_stream(
                 emit_stream_state(
                     &app,
                     &subscription_id,
+                    &MarketDataProvider::Tradestation,
                     &environment,
                     "quotes",
                     "streaming",
@@ -2480,6 +2931,7 @@ async fn run_quote_stream(
                                 "quote-update",
                                 QuoteUpdateEvent {
                                     subscription_id: subscription_id.clone(),
+                                    provider: MarketDataProvider::Tradestation,
                                     environment: environment.clone(),
                                     quote,
                                 },
@@ -2493,6 +2945,7 @@ async fn run_quote_stream(
                 emit_stream_state(
                     &app,
                     &subscription_id,
+                    &MarketDataProvider::Tradestation,
                     &environment,
                     "quotes",
                     "reconnecting",
@@ -2513,6 +2966,7 @@ async fn run_quote_stream(
                 emit_stream_state(
                     &app,
                     &subscription_id,
+                    &MarketDataProvider::Tradestation,
                     &environment,
                     "quotes",
                     if rate_limited {
@@ -2542,12 +2996,16 @@ pub fn run() {
             let app_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_dir)?;
             let api = TradeStation::new()?;
+            let schwab = Schwab::new()?;
+            let schwab_streamer = SchwabStreamer::new(schwab.clone());
             journal::init(&app_dir.join("northstar.sqlite3"))?;
             app.manage(NativeState {
                 api,
+                schwab,
+                schwab_streamer,
                 db_path: app_dir.join("northstar.sqlite3"),
                 bar_streams: Arc::new(tokio::sync::Mutex::new(BarStreamRegistry::default())),
-                quote_stream: tokio::sync::Mutex::new(None),
+                quote_streams: tokio::sync::Mutex::new(HashMap::new()),
                 brokerage_streams: tokio::sync::Mutex::new(Vec::new()),
                 preference_realtime: tokio::sync::Mutex::new(None),
             });
@@ -2555,9 +3013,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             auth_status,
+            schwab_auth_status,
             save_credentials,
+            save_schwab_credentials,
             begin_login,
+            begin_schwab_login,
             logout,
+            logout_schwab,
             set_environment,
             get_accounts,
             search_symbols,
@@ -2613,6 +3075,32 @@ pub fn run() {
 #[cfg(test)]
 mod stream_tests {
     use super::*;
+
+    fn search_symbol(provider: MarketDataProvider, symbol: &str, asset_type: &str) -> SymbolMeta {
+        SymbolMeta {
+            provider,
+            symbol: symbol.into(),
+            description: symbol.into(),
+            exchange: String::new(),
+            asset_type: asset_type.into(),
+            min_move: 0.25,
+            point_value: 1.0,
+            expiration: None,
+            root: None,
+            underlying: None,
+        }
+    }
+
+    #[test]
+    fn combined_search_preserves_server_filtered_futures_with_missing_category() {
+        let future = search_symbol(MarketDataProvider::Tradestation, "@MES", "");
+        let equity = search_symbol(MarketDataProvider::Schwab, "META", "EQUITY");
+        let results = merge_symbol_search_results(vec![future], vec![equity], "MES");
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|item| {
+            item.provider == MarketDataProvider::Tradestation && item.symbol == "@MES"
+        }));
+    }
 
     #[test]
     fn preference_realtime_url_uses_websocket_protocol_without_changing_the_host() {
@@ -2726,12 +3214,49 @@ mod stream_tests {
     fn bar_stream_identity_deduplicates_consumers() {
         let environment = TradingEnvironment::Sim;
         assert_eq!(
-            bar_stream_key(&environment, "MESU26", "5m"),
-            bar_stream_key(&environment, "MESU26", "5m")
+            bar_stream_key(
+                &MarketDataProvider::Tradestation,
+                &environment,
+                "MESU26",
+                "5m"
+            ),
+            bar_stream_key(
+                &MarketDataProvider::Tradestation,
+                &environment,
+                "MESU26",
+                "5m"
+            )
         );
         assert_ne!(
-            bar_stream_key(&environment, "MESU26", "5m"),
-            bar_stream_key(&environment, "MESU26", "15m")
+            bar_stream_key(
+                &MarketDataProvider::Tradestation,
+                &environment,
+                "MESU26",
+                "5m"
+            ),
+            bar_stream_key(
+                &MarketDataProvider::Tradestation,
+                &environment,
+                "MESU26",
+                "15m"
+            )
+        );
+        assert_ne!(
+            bar_stream_key(
+                &MarketDataProvider::Tradestation,
+                &environment,
+                "AAPL",
+                "1m"
+            ),
+            bar_stream_key(&MarketDataProvider::Schwab, &environment, "AAPL", "1m")
+        );
+        assert_eq!(
+            cache_namespace(&MarketDataProvider::Schwab, &TradingEnvironment::Sim),
+            cache_namespace(&MarketDataProvider::Schwab, &TradingEnvironment::Live)
+        );
+        assert_ne!(
+            cache_namespace(&MarketDataProvider::Tradestation, &TradingEnvironment::Sim),
+            cache_namespace(&MarketDataProvider::Schwab, &TradingEnvironment::Sim)
         );
         let subscribers = Arc::new(RwLock::new(HashMap::from([(
             "alert".into(),

@@ -1,14 +1,21 @@
 import type { Account, AccountBalance, Bar, OrderUpdate, Position, Quote, SymbolMeta } from "../types";
 
 export const futures: SymbolMeta[] = [
-  { symbol: "@MES", root: "MES", underlying: "MESU26", description: "Micro E-mini S&P 500 Continuous", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5 },
-  { symbol: "MESU26", root: "MES", description: "Micro E-mini S&P 500 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5, expiration: "2026-09-18" },
-  { symbol: "MESZ26", root: "MES", description: "Micro E-mini S&P 500 Dec 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5, expiration: "2026-12-18" },
-  { symbol: "MNQU26", root: "MNQ", description: "Micro E-mini Nasdaq-100 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 2, expiration: "2026-09-18" },
-  { symbol: "MCLU26", root: "MCL", description: "Micro WTI Crude Oil Sep 2026", exchange: "NYMEX", assetType: "FUTURE", minMove: 0.01, pointValue: 100, expiration: "2026-08-20" },
-  { symbol: "MGCQ26", root: "MGC", description: "Micro Gold Aug 2026", exchange: "COMEX", assetType: "FUTURE", minMove: 0.1, pointValue: 10, expiration: "2026-07-29" },
-  { symbol: "MYMU26", root: "MYM", description: "Micro E-mini Dow Sep 2026", exchange: "CBOT", assetType: "FUTURE", minMove: 1, pointValue: 0.5, expiration: "2026-09-18" },
+  { provider: "tradestation", symbol: "@MES", root: "MES", underlying: "MESU26", description: "Micro E-mini S&P 500 Continuous", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5 },
+  { provider: "tradestation", symbol: "MESU26", root: "MES", description: "Micro E-mini S&P 500 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5, expiration: "2026-09-18" },
+  { provider: "tradestation", symbol: "MESZ26", root: "MES", description: "Micro E-mini S&P 500 Dec 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5, expiration: "2026-12-18" },
+  { provider: "tradestation", symbol: "MNQU26", root: "MNQ", description: "Micro E-mini Nasdaq-100 Sep 2026", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 2, expiration: "2026-09-18" },
+  { provider: "tradestation", symbol: "MCLU26", root: "MCL", description: "Micro WTI Crude Oil Sep 2026", exchange: "NYMEX", assetType: "FUTURE", minMove: 0.01, pointValue: 100, expiration: "2026-08-20" },
+  { provider: "tradestation", symbol: "MGCQ26", root: "MGC", description: "Micro Gold Aug 2026", exchange: "COMEX", assetType: "FUTURE", minMove: 0.1, pointValue: 10, expiration: "2026-07-29" },
+  { provider: "tradestation", symbol: "MYMU26", root: "MYM", description: "Micro E-mini Dow Sep 2026", exchange: "CBOT", assetType: "FUTURE", minMove: 1, pointValue: 0.5, expiration: "2026-09-18" },
 ];
+
+export const equities: SymbolMeta[] = [
+  { provider: "schwab", symbol: "AAPL", description: "Apple Inc", exchange: "NASDAQ", assetType: "EQUITY", minMove: 0.01, pointValue: 1 },
+  { provider: "schwab", symbol: "SPY", description: "SPDR S&P 500 ETF Trust", exchange: "NYSE ARCA", assetType: "EQUITY", minMove: 0.01, pointValue: 1 },
+];
+
+export const demoSymbols = [...futures, ...equities];
 
 function noise(index: number) {
   return Math.sin(index * 1.73) * 1.2 + Math.cos(index * 0.37) * 0.8 + Math.sin(index * 0.083) * 2.4;
@@ -39,8 +46,8 @@ export const demoOrders: OrderUpdate[] = [
 export const demoBalance: AccountBalance = { accountId: "SIM-849201", accountType: "Futures", currency: "USD", cashBalance: 4996.52, buyingPower: 4996.52, equity: 5064.02, marketValue: 62600, todaysProfitLoss: 67.5, realizedProfitLoss: 0, unrealizedProfitLoss: 67.5, unclearedDeposit: 0, commission: 2.48, initialMargin: 2460, maintenanceMargin: 2200, openOrderMargin: 0 };
 export const demoBodBalance: AccountBalance = { accountId: "SIM-849201", accountType: "Futures", currency: "USD", cashBalance: 4996.52, equity: 4996.52, marketValue: 0 };
 
-export function quoteFor(symbol: string, offset = 0): Quote {
-  const last = symbol.startsWith("MNQ") ? 23048.5 : symbol.startsWith("MCL") ? 68.42 : symbol.startsWith("MGC") ? 3478.2 : symbol.startsWith("MYM") ? 44982 : 6260 + offset;
+export function quoteFor(symbol: string, offset = 0, provider: Quote["provider"] = "tradestation"): Quote {
+  const last = symbol === "AAPL" ? 224.85 : symbol === "SPY" ? 632.14 : symbol.startsWith("MNQ") ? 23048.5 : symbol.startsWith("MCL") ? 68.42 : symbol.startsWith("MGC") ? 3478.2 : symbol.startsWith("MYM") ? 44982 : 6260 + offset;
   const move = symbol.charCodeAt(1) % 2 ? 0.42 : -0.18;
-  return { symbol, last, bid: last - 0.25, ask: last + 0.25, change: move * 10, changePct: move, delayed: false, halted: false, timestamp: new Date().toISOString() };
+  return { provider, symbol, last, bid: last - (provider === "schwab" ? 0.01 : 0.25), ask: last + (provider === "schwab" ? 0.01 : 0.25), change: move * 10, changePct: move, delayed: false, halted: false, timestamp: new Date().toISOString() };
 }

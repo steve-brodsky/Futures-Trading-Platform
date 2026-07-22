@@ -1,6 +1,6 @@
 # Northstar Trader
 
-Northstar Trader is a private futures charting and order-entry desktop client for TradeStation. It combines a React trading workspace with a Rust/Tauri native layer for OAuth, live market and brokerage data, order execution, secure credential storage, and local persistence.
+Northstar Trader is a private multi-provider trading workspace. TradeStation supplies futures charting and order entry, while Schwab supplies equity and ETF history, quotes, and live candles. It combines a React workspace with a Rust/Tauri native layer for OAuth, live market and brokerage data, order execution, secure credential storage, and local persistence.
 
 > [!CAUTION]
 > This project can submit real orders when it is connected to TradeStation LIVE. It is early-stage, private software—not financial advice or a finished commercial trading system. Develop and validate against SIM before using LIVE.
@@ -13,6 +13,8 @@ Northstar Trader is a private futures charting and order-entry desktop client fo
 - Per-tab Renko and Point & Figure construction settings, including close or deterministic high/low input and configurable reversal thresholds.
 - `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, daily, weekly, and monthly timeframes.
 - Shared streaming bars across matching charts, EMA alerts, and VWAP consumers, plus a deduplicated quote stream for charts, contracts, and the watchlist.
+- Provider-aware symbol search and mixed futures/equity watchlists, with TradeStation routing futures and Schwab routing equities and ETFs.
+- One shared Schwab Streamer connection for equity candles and quotes, including extended-hours history and local `1h`/`4h` aggregation on New York calendar boundaries.
 - SQLite-backed candle caching, initial history, and lazy backfill when the chart approaches its oldest loaded bar.
 - Quota-aware TradeStation request scheduling with response-header reconciliation, historical-credit pacing, trading reserves, and reset-aware reconnects.
 - New York regular-session shading, an exchange-aware chart timezone selector, current-price label, and candle countdown.
@@ -52,7 +54,7 @@ Northstar Trader is a private futures charting and order-entry desktop client fo
 
 ### Browser demo
 
-`npm run dev` starts a browser-safe UI demo with generated bars, quotes, positions, orders, and balances. Browser mode does not authenticate with TradeStation and cannot place, replace, cancel, or close real orders. Its workspace is saved in browser `localStorage`.
+`npm run dev` starts a browser-safe UI demo with futures plus AAPL/SPY equity fixtures, generated bars, quotes, positions, orders, and balances. Browser mode does not authenticate with either provider and cannot place, replace, cancel, or close real orders. Its workspace is saved in browser `localStorage`.
 
 ## Technology
 
@@ -73,6 +75,7 @@ The current native development targets are macOS and Windows.
 - Node.js 20 or newer and npm.
 - Rust 1.77 or newer with Cargo.
 - A TradeStation API application and futures-enabled TradeStation account for native connectivity.
+- A Schwab Trader API application with Market Data Production and Trader User Preference access for native equity connectivity.
 - macOS: Xcode Command Line Tools and the system webview.
 - Windows: WebView2 Runtime, Visual Studio Build Tools with Desktop development with C++, and a Windows 10/11 SDK.
 
@@ -155,6 +158,16 @@ The executable is written to `src-tauri\target\release\northstar-trader.exe`. Th
 
 The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes, so that port must be available while signing in.
 
+## Schwab configuration
+
+1. Register `https://127.0.0.1:8182/callback` exactly as the callback URL in the Schwab Developer Portal.
+2. Start the native app and open **Settings → Schwab API**.
+3. Enter the Schwab App Key and App Secret, then choose **Save**.
+4. Choose **Connect** and complete authorization in the dedicated in-app window.
+5. Select an equity or ETF from the combined symbol picker. Equity order entry remains disabled; Schwab is currently chart data only.
+
+Schwab and TradeStation connections are independent. Changing the TradeStation SIM/LIVE environment does not affect Schwab charts or streams.
+
 ## Supabase cloud configuration
 
 1. Create a Supabase project and an email/password user for the private Northstar owner.
@@ -171,11 +184,13 @@ Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EM
 ## Security and local data
 
 - The TradeStation client ID, client secret, and OAuth refresh token are stored together in a TradeStation-only operating-system vault record. They are not placed in frontend storage, SQLite, or Supabase.
+- The Schwab App Key, App Secret, and refresh token use a separate operating-system vault record. Schwab access tokens remain only in native process memory.
 - The Supabase refresh token is stored in a separate Supabase-only vault record. The Supabase password is never retained, and no Supabase connection fields or tokens are included in synchronized preference payloads.
 - The access token is kept in native process memory and refreshed shortly before expiration.
 - Chart workspace state and cached bars are stored in `northstar.sqlite3` under the operating system's Tauri application-data directory. The local workspace continues to work while Supabase is offline.
 - Entry-chart image bytes are cloud-only; SQLite caches only their private object path, dimensions, and capture time.
 - SIM and LIVE bar caches are separated by environment.
+- Schwab bars use a provider-specific cache namespace and never mix with TradeStation SIM or LIVE data.
 - TradeStation account IDs are masked before they are displayed by the app.
 - Native HTTP calls and order validation live in Rust; the frontend invokes a constrained set of Tauri commands.
 

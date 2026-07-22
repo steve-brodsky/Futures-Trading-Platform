@@ -3051,6 +3051,7 @@ pub async fn reset_now(path: &Path) -> Result<JournalAuthStatus, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::MarketDataProvider;
     fn temp() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("northstar-journal-{}.sqlite", uuid::Uuid::new_v4()))
     }
@@ -3733,6 +3734,7 @@ mod tests {
             stop_loss: Some(6245.0),
         };
         let meta = SymbolMeta {
+            provider: MarketDataProvider::Tradestation,
             symbol: "MESU26".into(),
             description: "Micro E-mini S&P".into(),
             exchange: "CME".into(),
@@ -3813,6 +3815,7 @@ mod tests {
             stop_loss: Some(6245.0),
         };
         let meta = SymbolMeta {
+            provider: MarketDataProvider::Tradestation,
             symbol: "MESU26".into(),
             description: "Micro E-mini S&P".into(),
             exchange: "CME".into(),

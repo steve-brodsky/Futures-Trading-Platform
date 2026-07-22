@@ -1,4 +1,5 @@
 export type TradingEnvironment = "sim" | "live";
+export type MarketDataProvider = "tradestation" | "schwab";
 export type ConnectionState = "demo" | "connecting" | "live" | "stale" | "disconnected" | "auth-required";
 export type Timeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "D" | "W" | "M";
 export type AlertSound = "chime" | "bell" | "pulse" | "siren";
@@ -23,6 +24,7 @@ export interface Bar {
 }
 
 export interface Quote {
+  provider: MarketDataProvider;
   symbol: string;
   last: number;
   bid: number;
@@ -44,6 +46,7 @@ export interface Account {
 }
 
 export interface SymbolMeta {
+  provider: MarketDataProvider;
   symbol: string;
   description: string;
   exchange: string;
@@ -335,7 +338,7 @@ export interface WorkspaceState {
   environment: TradingEnvironment;
   tabs: ChartTabState[];
   windows: ChartWindowState[];
-  watchlist: string[];
+  watchlist: SymbolMeta[];
   drawings: Record<string, Drawing[]>;
   rightPanelOpen: boolean;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
@@ -388,6 +391,7 @@ export interface PreferenceRealtimeStateEvent {
 
 export interface BarSnapshotEvent {
   subscriptionId: string;
+  provider: MarketDataProvider;
   environment: TradingEnvironment;
   symbol: string;
   timeframe: Timeframe;
@@ -396,9 +400,10 @@ export interface BarSnapshotEvent {
 }
 
 export interface BarUpdateEvent extends Omit<BarSnapshotEvent, "bars"> { bar: Bar; }
-export interface QuoteUpdateEvent { subscriptionId: string; environment: TradingEnvironment; quote: Quote; }
+export interface QuoteUpdateEvent { subscriptionId: string; provider: MarketDataProvider; environment: TradingEnvironment; quote: Quote; }
 export interface StreamStateEvent {
   subscriptionId: string;
+  provider: MarketDataProvider;
   environment: TradingEnvironment;
   channel: "bars" | "quotes";
   state: StreamConnectionState;

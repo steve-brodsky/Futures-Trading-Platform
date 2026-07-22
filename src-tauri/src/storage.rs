@@ -10,6 +10,7 @@ use std::{
 const SERVICE: &str = "com.northstar.trader";
 const LEGACY_CREDENTIALS_ACCOUNT: &str = "credentials";
 const TRADESTATION_CREDENTIALS_ACCOUNT: &str = "tradestation";
+const SCHWAB_CREDENTIALS_ACCOUNT: &str = "schwab";
 const SUPABASE_CREDENTIALS_ACCOUNT: &str = "supabase";
 const BAR_TIME_FORMAT_VERSION: &str = "2";
 
@@ -39,6 +40,13 @@ struct TradeStationCredentials {
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
+struct SchwabCredentials {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct SupabaseCredentials {
     refresh_token: Option<String>,
 }
@@ -58,11 +66,16 @@ pub struct PreferenceRecord {
 }
 
 static TRADESTATION_CREDENTIALS: OnceLock<Mutex<Option<TradeStationCredentials>>> = OnceLock::new();
+static SCHWAB_CREDENTIALS: OnceLock<Mutex<Option<SchwabCredentials>>> = OnceLock::new();
 static SUPABASE_CREDENTIALS: OnceLock<Mutex<Option<SupabaseCredentials>>> = OnceLock::new();
 static CREDENTIAL_MIGRATED: OnceLock<Mutex<bool>> = OnceLock::new();
 
 fn tradestation_credentials_cache() -> &'static Mutex<Option<TradeStationCredentials>> {
     TRADESTATION_CREDENTIALS.get_or_init(|| Mutex::new(None))
+}
+
+fn schwab_credentials_cache() -> &'static Mutex<Option<SchwabCredentials>> {
+    SCHWAB_CREDENTIALS.get_or_init(|| Mutex::new(None))
 }
 
 fn supabase_credentials_cache() -> &'static Mutex<Option<SupabaseCredentials>> {
@@ -153,6 +166,22 @@ fn read_supabase_credentials() -> Result<SupabaseCredentials, AppError> {
     Ok(credentials)
 }
 
+fn read_schwab_credentials() -> Result<SchwabCredentials, AppError> {
+    let mut cached = schwab_credentials_cache()
+        .lock()
+        .map_err(|_| AppError::Api("Credential cache is unavailable".into()))?;
+    if let Some(credentials) = cached.as_ref() {
+        return Ok(credentials.clone());
+    }
+    let credentials = match credentials_entry(SCHWAB_CREDENTIALS_ACCOUNT)?.get_password() {
+        Ok(value) => serde_json::from_str(&value)?,
+        Err(keyring::Error::NoEntry) => SchwabCredentials::default(),
+        Err(error) => return Err(error.into()),
+    };
+    *cached = Some(credentials.clone());
+    Ok(credentials)
+}
+
 fn write_tradestation_credentials(credentials: &TradeStationCredentials) -> Result<(), AppError> {
     credentials_entry(TRADESTATION_CREDENTIALS_ACCOUNT)?
         .set_password(&serde_json::to_string(credentials)?)?;
@@ -171,6 +200,58 @@ fn write_supabase_credentials(credentials: &SupabaseCredentials) -> Result<(), A
         .map_err(|_| AppError::Api("Credential cache is unavailable".into()))? =
         Some(credentials.clone());
     Ok(())
+}
+
+fn write_schwab_credentials(credentials: &SchwabCredentials) -> Result<(), AppError> {
+    credentials_entry(SCHWAB_CREDENTIALS_ACCOUNT)?
+        .set_password(&serde_json::to_string(credentials)?)?;
+    *schwab_credentials_cache()
+        .lock()
+        .map_err(|_| AppError::Api("Credential cache is unavailable".into()))? =
+        Some(credentials.clone());
+    Ok(())
+}
+
+pub fn schwab_client() -> Result<Option<(String, String)>, AppError> {
+    let credentials = read_schwab_credentials()?;
+    Ok(match (credentials.client_id, credentials.client_secret) {
+        (Some(client_id), Some(client_secret)) => Some((client_id, client_secret)),
+        _ => None,
+    })
+}
+
+pub fn save_schwab_client(client_id: &str, client_secret: &str) -> Result<bool, AppError> {
+    if client_id.trim().is_empty() || client_secret.is_empty() {
+        return Err(AppError::Validation(
+            "Schwab App Key and App Secret are required".into(),
+        ));
+    }
+    let mut credentials = read_schwab_credentials()?;
+    let changed = credentials.client_id.as_deref() != Some(client_id.trim())
+        || credentials.client_secret.as_deref() != Some(client_secret);
+    credentials.client_id = Some(client_id.trim().to_owned());
+    credentials.client_secret = Some(client_secret.to_owned());
+    if changed {
+        credentials.refresh_token = None;
+    }
+    write_schwab_credentials(&credentials)?;
+    Ok(changed)
+}
+
+pub fn schwab_refresh_token() -> Result<Option<String>, AppError> {
+    Ok(read_schwab_credentials()?.refresh_token)
+}
+
+pub fn save_schwab_refresh_token(value: &str) -> Result<(), AppError> {
+    let mut credentials = read_schwab_credentials()?;
+    credentials.refresh_token = Some(value.to_owned());
+    write_schwab_credentials(&credentials)
+}
+
+pub fn clear_schwab_refresh_token() -> Result<(), AppError> {
+    let mut credentials = read_schwab_credentials()?;
+    credentials.refresh_token = None;
+    write_schwab_credentials(&credentials)
 }
 
 pub fn get_secret(key: &str) -> Result<Option<String>, AppError> {

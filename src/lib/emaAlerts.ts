@@ -1,4 +1,4 @@
-import type { AlertDurationSeconds, AlertSound, Bar, ChartTabState, Ema200AlertConfig, Timeframe, TimeframeAlertConfig } from "../types";
+import type { AlertDurationSeconds, AlertSound, Bar, ChartTabState, Ema200AlertConfig, MarketDataProvider, Timeframe, TimeframeAlertConfig } from "../types";
 import { ema } from "./indicators";
 
 export const ALERT_TIMEFRAMES: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
@@ -47,6 +47,7 @@ export function alertMarketKey(symbol: string, timeframe: Timeframe): string {
 
 export interface AlertMarketRequirement {
   key: string;
+  provider: MarketDataProvider;
   symbol: string;
   timeframe: Timeframe;
 }
@@ -56,7 +57,7 @@ export function desiredAlertMarkets(tabs: ChartTabState[]): AlertMarketRequireme
   tabs.forEach((tab) => ALERT_TIMEFRAMES.forEach((timeframe) => {
     if (!tab.ema200Alert[timeframe].enabled) return;
     const key = alertMarketKey(tab.symbol.symbol, timeframe);
-    requirements.set(key, { key, symbol: tab.symbol.symbol, timeframe });
+    requirements.set(key, { key, provider: tab.symbol.provider, symbol: tab.symbol.symbol, timeframe });
   }));
   return [...requirements.values()];
 }

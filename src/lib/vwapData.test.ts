@@ -6,7 +6,7 @@ import { chunkVwapRange, expandedVwapRange, mergeEpochRanges, missingEpochRanges
 
 const tab = (id: string, symbol: string, timeframe: ChartTabState["timeframe"], visible = true): ChartTabState => ({
   id,
-  symbol: { symbol, description: symbol, exchange: "CME", assetType: "Future", minMove: 0.25, pointValue: 5 },
+  symbol: { provider: "tradestation", symbol, description: symbol, exchange: "CME", assetType: "Future", minMove: 0.25, pointValue: 5 },
   timeframe,
   chartKind: "candles",
   renkoSettings: defaultRenkoSettings(),

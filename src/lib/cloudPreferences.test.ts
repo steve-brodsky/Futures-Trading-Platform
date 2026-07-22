@@ -12,7 +12,7 @@ function workspace(): WorkspaceState {
     environment: "live",
     tabs: [{
       id: "chart-1",
-      symbol: { symbol: "@MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: 0.25, pointValue: 5 },
+      symbol: { provider: "tradestation", symbol: "@MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: 0.25, pointValue: 5 },
       timeframe: "5m",
       chartKind: "candles",
       renkoSettings: { brickSizeTicks: 4, priceSource: "close", reversalBricks: 1 },
@@ -24,7 +24,7 @@ function workspace(): WorkspaceState {
       tradeContract: "MESU26",
     }],
     windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", splitRatios: { "two-columns": [0.42] }, detached: false, x: 120, y: 90, width: 1400, height: 900, maximized: true }],
-    watchlist: ["MESU26"],
+    watchlist: [{ provider: "tradestation", symbol: "MESU26", description: "MESU26", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5 }],
     drawings: { "@MES": [{ id: "line-1", kind: "horizontal", points: [{ time: 1, price: 6200 }], color: "#fff" }] },
     rightPanelOpen: true,
     bottomTab: "orders",
@@ -76,7 +76,7 @@ describe("cloud preferences", () => {
       environment: "sim",
       selectedAccountId: "other-account",
       confirmOrders: true,
-      watchlist: ["MNQU26"],
+      watchlist: [{ provider: "tradestation", symbol: "MNQU26", description: "MNQU26", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 2 }],
       entryRules: {
         ...local.entryRules,
         long: { ...local.entryRules.long, children: [{ id: "price", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } }] },
@@ -86,7 +86,7 @@ describe("cloud preferences", () => {
       settings: { ...local.settings, journal: { commissionPerContractSide: 1.25 } },
     });
     const merged = applyCloudPreferenceProfile(local, profile);
-    expect(merged.watchlist).toEqual(["MNQU26"]);
+    expect(merged.watchlist.map((item) => item.symbol)).toEqual(["MNQU26"]);
     expect(merged.settings.journal.commissionPerContractSide).toBe(1.25);
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "bell", durationSeconds: 5 });
     expect(merged.environment).toBe("live");
@@ -110,7 +110,7 @@ describe("cloud preferences", () => {
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.settings.chartLabels.fontSize).toBe(16);
     expect(merged.settings.journal.commissionPerContractSide).toBe(0);
-    expect(merged.watchlist).toEqual(["MESU26"]);
+    expect(merged.watchlist.map((item) => [item.provider, item.symbol])).toEqual([["tradestation", "MESU26"]]);
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "chime", durationSeconds: 3 });
   });
 

@@ -26,7 +26,7 @@ import {
   defaultEntryRuleAlerts, entryRuleAlertEpoch, trackEntryRuleAlertTransitions,
   type EntryRuleAlertTrackerState, type EntryRuleAlertTransition,
 } from "./lib/entryRuleAlerts";
-import { canAddWatchlistSymbol, formatContractExpiration, hasOpenFuturesPosition, isContinuousFuture, quoteSubscriptionSymbols, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
+import { canAddWatchlistSymbol, formatContractExpiration, hasOpenFuturesPosition, isContinuousFuture, quoteSubscriptionInstruments, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { quoteDayChangePercent } from "./lib/quotes";
 import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
 import { calculateSwingStop } from "./lib/swingStop";
@@ -35,11 +35,11 @@ import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculate
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
 import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndFigureSettings, normalizeRenkoSettings } from "./lib/priceBasedCharts";
-import { reorderWatchlist } from "./lib/watchlist";
+import { instrumentKey, reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartTool, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartTool, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -73,13 +73,14 @@ const defaultWorkspace: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {},
-  watchlist: ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
+  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
   settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
 
 interface TabMarketState {
+  provider: MarketDataProvider;
   symbol: string;
   timeframe: Timeframe;
   bars: Bar[];
@@ -90,8 +91,9 @@ interface TabMarketState {
   generation?: number;
 }
 
-function emptyTabMarket(symbol: string, timeframe: Timeframe, generation?: number): TabMarketState {
+function emptyTabMarket(provider: MarketDataProvider, symbol: string, timeframe: Timeframe, generation?: number): TabMarketState {
   return {
+    provider,
     symbol,
     timeframe,
     bars: [],
@@ -112,6 +114,7 @@ interface WindowMarketSyncEvent {
 
 interface BarSubscription {
   subscriptionId: string;
+  provider: MarketDataProvider;
   symbol: string;
   timeframe: Timeframe;
   epoch: string;
@@ -224,6 +227,29 @@ function TradeStationCredentials({ clientId, secret, busy, configured, native, s
   </>;
 }
 
+function SchwabCredentials({ clientId, secret, busy, configured, connected, native, onClientIdChange, onSecretChange, onSave, onConnect, onDisconnect }: {
+  clientId: string;
+  secret: string;
+  busy: boolean;
+  configured: boolean;
+  connected: boolean;
+  native: boolean;
+  onClientIdChange: (value: string) => void;
+  onSecretChange: (value: string) => void;
+  onSave: () => void;
+  onConnect: () => void;
+  onDisconnect: () => void;
+}) {
+  return <>
+    <div className="api-status-line"><span className={connected ? "connected" : configured ? "configured" : ""} />{connected ? "Connected" : configured ? "Configured" : "Not configured"}</div>
+    <label className="field"><span>App Key</span><input value={clientId} onChange={(event) => onClientIdChange(event.target.value)} placeholder={configured ? "Enter a new key to replace credentials" : "Enter App Key"} autoComplete="off" /></label>
+    <label className="field"><span>App Secret</span><input value={secret} onChange={(event) => onSecretChange(event.target.value)} type="password" placeholder={configured ? "Stored securely — enter to replace" : "Enter App Secret"} autoComplete="new-password" /></label>
+    <div className="callback-note"><span>Callback URL</span><code>https://127.0.0.1:8182/callback</code></div>
+    {!native && <div className="demo-warning">Schwab browser fixtures are active. OAuth is available in the desktop app.</div>}
+    <div className="connection-actions"><button className="secondary-button" disabled={busy || !native || !clientId.trim() || !secret.trim()} onClick={onSave}>Save</button><button className="primary-button" disabled={busy || !native || !configured} onClick={onConnect}>{connected ? "Reconnect" : "Connect"}</button>{connected && <button className="secondary-button" disabled={busy || !native} onClick={onDisconnect}>Disconnect</button>}</div>
+  </>;
+}
+
 export default function App() {
   if (new URLSearchParams(window.location.search).get("view") === "journal") return <TradeJournalWindow />;
   return <TradingApp />;
@@ -282,6 +308,11 @@ function TradingApp() {
   const [credentialsConfigured, setCredentialsConfigured] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [authEpoch, setAuthEpoch] = useState(0);
+  const [schwabClientId, setSchwabClientId] = useState("");
+  const [schwabSecret, setSchwabSecret] = useState("");
+  const [schwabConfigured, setSchwabConfigured] = useState(false);
+  const [schwabAuthenticated, setSchwabAuthenticated] = useState(!api.isNative);
+  const [schwabAuthEpoch, setSchwabAuthEpoch] = useState(0);
   const [preferenceSync, setPreferenceSync] = useState<{ state: "idle" | "syncing" | PreferenceSyncResult["state"]; lastSyncedAt?: string; message?: string }>({ state: "idle" });
   const [preferenceRealtime, setPreferenceRealtime] = useState<PreferenceRealtimeStateEvent>({ state: "disabled" });
   const [preferenceSyncEpoch, setPreferenceSyncEpoch] = useState(0);
@@ -340,9 +371,9 @@ function TradingApp() {
   const visibleTabIds = (windowState.visibleTabIds ?? [activeTab.id]).filter((id) => windowState.tabIds.includes(id)).slice(0, chartLayoutCapacity(chartLayout));
   const visibleTabs = visibleTabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab));
   const activeMarket = tabMarkets[activeTab.id];
-  const market = isSameBarMarket(activeMarket, activeTab.symbol.symbol, activeTab.timeframe)
+  const market = isSameBarMarket(activeMarket, activeTab.symbol.provider, activeTab.symbol.symbol, activeTab.timeframe)
     ? activeMarket
-    : emptyTabMarket(activeTab.symbol.symbol, activeTab.timeframe);
+    : emptyTabMarket(activeTab.symbol.provider, activeTab.symbol.symbol, activeTab.timeframe);
   const bars = market.bars;
   const activeContinuous = isContinuousFuture(activeTab.symbol);
   const activeTradeSymbol = resolveTradeSymbol(activeTab);
@@ -370,21 +401,22 @@ function TradingApp() {
   quotesRef.current = quotes;
   entryRuleTabSignalsRef.current = entryRuleTabSignals;
 
-  const activeQuote = quotes[activeTab.symbol.symbol] ?? (api.isNative
-    ? { symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
-    : quoteFor(activeTab.symbol.symbol));
+  const activeQuote = quotes[instrumentKey(activeTab.symbol)] ?? (api.isNative
+    ? { provider: activeTab.symbol.provider, symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+    : quoteFor(activeTab.symbol.symbol, 0, activeTab.symbol.provider));
   const activeEntryEligibility = useMemo(
     () => evaluateEntryRules(workspace.entryRules, bars, activeQuote),
     [workspace.entryRules, bars, activeQuote],
   );
-  const tabStreamKey = workspace.tabs.map((tab) => `${tab.id}:${tab.symbol.symbol}:${tab.timeframe}`).join("|");
+  const tabStreamKey = workspace.tabs.map((tab) => `${tab.id}:${tab.symbol.provider}:${tab.symbol.symbol}:${tab.timeframe}`).join("|");
   const alertOwnershipKey = workspace.tabs.flatMap((tab) => ALERT_TIMEFRAMES.filter((timeframe) => tab.ema200Alert[timeframe].enabled).map((timeframe) => `${tab.id}:${tab.symbol.symbol}:${timeframe}`)).join("|");
   const alertMarkets = desiredAlertMarkets(workspace.tabs);
   const alertMarketsKey = alertMarkets.map((market) => market.key).sort().join("|");
   const activeAlertCount = ALERT_TIMEFRAMES.filter((timeframe) => activeTab.ema200Alert[timeframe].enabled).length;
-  const chartSymbolsKey = [...new Set(workspace.tabs.map((tab) => tab.symbol.symbol))].sort().join("|");
+  const chartSymbolsKey = [...new Set(workspace.tabs.map((tab) => instrumentKey(tab.symbol)))].sort().join("|");
   const tradeDetailSymbolsKey = [...new Set(workspace.tabs.filter((tab) => isContinuousFuture(tab.symbol)).map(resolveTradeSymbol).filter((symbol): symbol is string => Boolean(symbol)))].sort().join("|");
-  const quoteSymbolsKey = quoteSubscriptionSymbols(workspace).join("|");
+  const quoteInstruments = quoteSubscriptionInstruments(workspace);
+  const quoteSymbolsKey = quoteInstruments.map(instrumentKey).join("|");
   const vwapSymbolsKey = nySessionVwapSymbols(workspace.tabs).join("|");
   const ema200Positions = useMemo(() => deriveEma200TabPositions(
     workspace.tabs,
@@ -397,11 +429,11 @@ function TradingApp() {
   vwapDataEpochRef.current = `${environment}:${authEpoch}`;
   entryScreenshotCandidatesRef.current = entryScreenshotCandidates;
   environmentRef.current = environment;
-  const activeTradeQuote = activeTradeSymbol
-    ? quotes[activeTradeSymbol] ?? (api.isNative
-      ? { symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
-      : quoteFor(activeTradeSymbol))
-    : { symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
+  const activeTradeQuote: Quote = activeTradeSymbol
+    ? quotes[`tradestation:${activeTradeSymbol}`] ?? (api.isNative
+      ? { provider: "tradestation", symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+      : quoteFor(activeTradeSymbol, 0, "tradestation"))
+    : { provider: "tradestation", symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
   const activeOrderMinMove = activeTradeMeta?.minMove ?? activeTab.symbol.minMove;
   const cloudPreferenceKey = useMemo(
     () => JSON.stringify(cloudPreferenceProfile(workspace)),
@@ -580,19 +612,20 @@ function TradingApp() {
         tabId: tab.id,
         symbol: tab.symbol.symbol,
         timeframe: tab.timeframe,
-        market: isSameBarMarket(tabMarketsRef.current[tab.id], tab.symbol.symbol, tab.timeframe)
+        market: isSameBarMarket(tabMarketsRef.current[tab.id], tab.symbol.provider, tab.symbol.symbol, tab.timeframe)
           ? tabMarketsRef.current[tab.id]
-          : emptyTabMarket(tab.symbol.symbol, tab.timeframe, subscriptionsRef.current.get(tab.id)?.generation),
+          : emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe, subscriptionsRef.current.get(tab.id)?.generation),
       })),
       quotes: Object.fromEntries(tabs.flatMap((tab) => {
-        const quote = quotesRef.current[tab.symbol.symbol];
-        return quote ? [[tab.symbol.symbol, quote] as const] : [];
+        const key = instrumentKey(tab.symbol);
+        const quote = quotesRef.current[key];
+        return quote ? [[key, quote] as const] : [];
       })),
     };
   }
 
   useEffect(() => {
-    Promise.all([api.loadWorkspace(), api.authStatus()]).then(async ([saved, auth]) => {
+    Promise.all([api.loadWorkspace(), api.authStatus(), api.schwabAuthStatus()]).then(async ([saved, auth, schwabAuth]) => {
       const normalized = normalizeChartWorkspace(saved, defaultWorkspace);
       await api.setEnvironment(normalized.environment);
       await api.setJournalCommission(normalized.settings.journal.commissionPerContractSide);
@@ -603,8 +636,10 @@ function TradingApp() {
       setWorkspace(normalized);
       setCredentialsConfigured(auth.configured);
       setAuthenticated(auth.authenticated);
+      setSchwabConfigured(schwabAuth.configured);
+      setSchwabAuthenticated(schwabAuth.authenticated);
       setAccounts(currentWindowId === MAIN_WINDOW_ID && auth.authenticated ? await api.accounts().catch(() => []) : []);
-      if (currentWindowId === MAIN_WINDOW_ID && api.isNative && !auth.configured) setSetupOpen(true);
+      if (currentWindowId === MAIN_WINDOW_ID && api.isNative && !auth.configured && !schwabAuth.configured) setSetupOpen(true);
     }).finally(() => setWorkspaceLoaded(true));
     const cleanups: Array<() => void> = [];
     if (api.isNative) {
@@ -617,41 +652,48 @@ function TradingApp() {
         showToast("TradeStation connected.");
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
+      listen<{ authenticated: boolean }>("schwab-auth-changed", ({ payload }) => {
+        setSchwabAuthenticated(payload.authenticated);
+        setSchwabConfigured(true);
+        setSchwabAuthEpoch((value) => value + 1);
+        showToast(payload.authenticated ? "Schwab connected." : "Schwab disconnected.");
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<string>("schwab-auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
         if (acceptsWindowBarEvent(tab, payload)) {
           setTabMarkets((current) => {
             const existing = current[payload.subscriptionId];
-            const base = isSameBarMarket(existing, payload.symbol, payload.timeframe)
+            const base = isSameBarMarket(existing, payload.provider, payload.symbol, payload.timeframe)
               ? existing
-              : emptyTabMarket(payload.symbol, payload.timeframe);
+              : emptyTabMarket(payload.provider, payload.symbol, payload.timeframe);
             return { ...current, [payload.subscriptionId]: { ...base, bars: mergeBars(base.bars, payload.bars), generation: payload.generation } };
           });
         }
-        if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
+        if ((payload.provider === "schwab" || payload.environment === environmentRef.current) && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], payload.bars) } }));
         }
-        if (payload.environment === environmentRef.current) primeAlertMarket(payload.symbol, payload.timeframe, payload.bars, false);
+        if (payload.provider === "schwab" || payload.environment === environmentRef.current) primeAlertMarket(payload.symbol, payload.timeframe, payload.bars, false);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
         if (acceptsWindowBarEvent(tab, payload)) {
           setTabMarkets((current) => {
             const existing = current[payload.subscriptionId];
-            const base = isSameBarMarket(existing, payload.symbol, payload.timeframe)
+            const base = isSameBarMarket(existing, payload.provider, payload.symbol, payload.timeframe)
               ? existing
-              : emptyTabMarket(payload.symbol, payload.timeframe);
+              : emptyTabMarket(payload.provider, payload.symbol, payload.timeframe);
             return { ...current, [payload.subscriptionId]: { ...base, bars: mergeBars(base.bars, [payload.bar]), generation: payload.generation } };
           });
         }
-        if (payload.environment === environmentRef.current && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
+        if ((payload.provider === "schwab" || payload.environment === environmentRef.current) && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
           setVwapMarkets((current) => ({ ...current, [payload.symbol]: { ...(current[payload.symbol] ?? { loadedRanges: [], pendingRanges: [] }), bars: mergeVwapBars(current[payload.symbol]?.bars ?? [], [payload.bar]) } }));
         }
         handleAlertBarUpdate(payload);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
-        if (payload.environment !== environmentRef.current) return;
-        setQuotes((current) => ({ ...current, [payload.quote.symbol]: { ...payload.quote, receivedAt: Date.now() } }));
+        if (payload.provider === "tradestation" && payload.environment !== environmentRef.current) return;
+        setQuotes((current) => ({ ...current, [instrumentKey(payload.quote)]: { ...payload.quote, receivedAt: Date.now() } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<StreamStateEvent>("stream-state", ({ payload }) => {
         if (!isBarStateEvent(payload)) return;
@@ -660,9 +702,9 @@ function TradingApp() {
         setTabMarkets((current) => ({
           ...current,
           [payload.subscriptionId]: {
-            ...(isSameBarMarket(current[payload.subscriptionId], payload.symbol, payload.timeframe)
+            ...(isSameBarMarket(current[payload.subscriptionId], payload.provider, payload.symbol, payload.timeframe)
               ? current[payload.subscriptionId]
-              : emptyTabMarket(payload.symbol, payload.timeframe)),
+              : emptyTabMarket(payload.provider, payload.symbol, payload.timeframe)),
             streamState: payload.state,
             streamMessage: payload.message,
             generation: payload.generation,
@@ -752,7 +794,7 @@ function TradingApp() {
         const next = { ...current };
         payload.markets.forEach(({ tabId, symbol, timeframe, market }) => {
           const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
-          if (!tab || tab.symbol.symbol !== symbol || tab.timeframe !== timeframe || !isSameBarMarket(market, symbol, timeframe)) return;
+          if (!tab || tab.symbol.symbol !== symbol || tab.timeframe !== timeframe || !isSameBarMarket(market, tab.symbol.provider, symbol, timeframe)) return;
           if (market.generation != null) {
             const latestGeneration = latestDetachedGenerationRef.current.get(tabId);
             const awaitingReplacement = awaitingDetachedGenerationRef.current.has(tabId);
@@ -761,7 +803,7 @@ function TradingApp() {
             awaitingDetachedGenerationRef.current.delete(tabId);
           }
           const existing = current[tabId];
-          const matchingExisting = isSameBarMarket(existing, symbol, timeframe) ? existing : undefined;
+          const matchingExisting = isSameBarMarket(existing, tab.symbol.provider, symbol, timeframe) ? existing : undefined;
           const liveStateIsNewer = matchingExisting?.generation != null && matchingExisting.generation === market.generation;
           next[tabId] = {
             ...market,
@@ -948,7 +990,7 @@ function TradingApp() {
       const next: Record<string, TabMarketState> = {};
       workspace.tabs.forEach((tab) => {
         const existing = current[tab.id];
-        if (!environmentChanged && isSameBarMarket(existing, tab.symbol.symbol, tab.timeframe)) {
+        if ((!environmentChanged || tab.symbol.provider === "schwab") && isSameBarMarket(existing, tab.symbol.provider, tab.symbol.symbol, tab.timeframe)) {
           next[tab.id] = existing;
           return;
         }
@@ -961,7 +1003,7 @@ function TradingApp() {
           latestDetachedGenerationRef.current.set(tab.id, highWater);
           awaitingDetachedGenerationRef.current.add(tab.id);
         }
-        next[tab.id] = emptyTabMarket(tab.symbol.symbol, tab.timeframe, currentWindowId === MAIN_WINDOW_ID ? undefined : highWater);
+        next[tab.id] = emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe, currentWindowId === MAIN_WINDOW_ID ? undefined : highWater);
       });
       latestDetachedGenerationRef.current.forEach((_, tabId) => { if (!activeIds.has(tabId)) latestDetachedGenerationRef.current.delete(tabId); });
       awaitingDetachedGenerationRef.current.forEach((tabId) => { if (!activeIds.has(tabId)) awaitingDetachedGenerationRef.current.delete(tabId); });
@@ -971,42 +1013,51 @@ function TradingApp() {
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
-    const epoch = `${authEpoch}:${environment}:${authenticated}`;
+    const providerEpoch = (provider: MarketDataProvider) => provider === "schwab"
+      ? `schwab:${schwabAuthEpoch}:${schwabAuthenticated}`
+      : `tradestation:${authEpoch}:${environment}:${authenticated}`;
     const activeIds = new Set(workspace.tabs.map((tab) => tab.id));
     subscriptionsRef.current.forEach((subscription, tabId) => {
       const tab = workspace.tabs.find((item) => item.id === tabId);
-      if (!activeIds.has(tabId) || !tab || subscription.symbol !== tab.symbol.symbol || subscription.timeframe !== tab.timeframe || subscription.epoch !== epoch) {
+      if (!activeIds.has(tabId) || !tab || subscription.provider !== tab.symbol.provider || subscription.symbol !== tab.symbol.symbol || subscription.timeframe !== tab.timeframe || subscription.epoch !== providerEpoch(tab.symbol.provider)) {
         if (api.isNative) void api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration());
         subscriptionsRef.current.delete(tabId);
       }
     });
     workspace.tabs.forEach((tab) => {
       if (subscriptionsRef.current.has(tab.id)) return;
+      const epoch = providerEpoch(tab.symbol.provider);
       const subscriptionId = tab.id;
       const generation = nextBarSubscriptionGeneration();
-      subscriptionsRef.current.set(tab.id, { subscriptionId, symbol: tab.symbol.symbol, timeframe: tab.timeframe, epoch, generation });
-      setTabMarkets((current) => ({ ...current, [tab.id]: emptyTabMarket(tab.symbol.symbol, tab.timeframe, generation) }));
+      const providerIsAuthenticated = tab.symbol.provider === "schwab" ? schwabAuthenticated : authenticated;
+      subscriptionsRef.current.set(tab.id, { subscriptionId, provider: tab.symbol.provider, symbol: tab.symbol.symbol, timeframe: tab.timeframe, epoch, generation });
+      setTabMarkets((current) => {
+        const existing = isSameBarMarket(current[tab.id], tab.symbol.provider, tab.symbol.symbol, tab.timeframe)
+          ? current[tab.id]
+          : emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe, generation);
+        return { ...current, [tab.id]: { ...existing, streamState: api.isNative ? providerIsAuthenticated ? "connecting" : "disconnected" : "streaming", generation } };
+      });
       if (!api.isNative) {
-        api.bars(tab.symbol.symbol, tab.timeframe).then((nextBars) => {
+        api.bars(tab.symbol.provider, tab.symbol.symbol, tab.timeframe).then((nextBars) => {
           if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
-          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(isSameBarMarket(current[tab.id], tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.symbol, tab.timeframe)), bars: nextBars, generation } }));
+          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(isSameBarMarket(current[tab.id], tab.symbol.provider, tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe)), bars: nextBars, generation } }));
         }).catch((error) => showToast(String(error)));
-      } else if (authenticated) {
-        api.cachedBars(tab.symbol.symbol, tab.timeframe).then((cached) => {
+      } else if (providerIsAuthenticated) {
+        api.cachedBars(tab.symbol.provider, tab.symbol.symbol, tab.timeframe).then((cached) => {
           if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
           setTabMarkets((current) => {
-            const existing = isSameBarMarket(current[tab.id], tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.symbol, tab.timeframe);
+            const existing = isSameBarMarket(current[tab.id], tab.symbol.provider, tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe);
             return { ...current, [tab.id]: { ...existing, bars: mergeBars(cached, existing.bars), generation } };
           });
         }).catch(() => undefined);
-        api.startBarStream(subscriptionId, tab.symbol.symbol, tab.timeframe, "chart", generation).catch((error) => {
+        api.startBarStream(subscriptionId, tab.symbol.provider, tab.symbol.symbol, tab.timeframe, "chart", generation).catch((error) => {
           if (subscriptionsRef.current.get(tab.id)?.generation !== generation) return;
-          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(isSameBarMarket(current[tab.id], tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.symbol, tab.timeframe)), streamState: "disconnected", streamMessage: String(error), generation } }));
+          setTabMarkets((current) => ({ ...current, [tab.id]: { ...(isSameBarMarket(current[tab.id], tab.symbol.provider, tab.symbol.symbol, tab.timeframe) ? current[tab.id] : emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe)), streamState: "disconnected", streamMessage: String(error), generation } }));
           showToast(String(error));
         });
       }
     });
-  }, [tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
+  }, [tabStreamKey, authEpoch, authenticated, schwabAuthEpoch, schwabAuthenticated, environment, workspaceLoaded]);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
@@ -1019,6 +1070,7 @@ function TradingApp() {
     }
 
     const desired = desiredAlertMarkets(workspace.tabs);
+    const desiredByKey = new Map(desired.map((market) => [market.key, market]));
     const desiredKeys = new Set(desired.map((market) => market.key));
     const uncovered = uncoveredAlertMarkets(workspace.tabs);
     const uncoveredKeys = new Set(uncovered.map((market) => market.key));
@@ -1027,7 +1079,11 @@ function TradingApp() {
       .map((timeframe) => alertOwnerKey(tab, timeframe))));
 
     alertSubscriptionsRef.current.forEach((subscription, key) => {
-      if (uncoveredKeys.has(key) && subscription.epoch === epoch) return;
+      const desiredMarket = desiredByKey.get(key);
+      const providerEpoch = desiredMarket?.provider === "schwab"
+        ? `schwab:${schwabAuthEpoch}:${schwabAuthenticated}`
+        : `tradestation:${authEpoch}:${environment}:${authenticated}`;
+      if (uncoveredKeys.has(key) && subscription.epoch === providerEpoch) return;
       if (api.isNative) void api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration());
       alertSubscriptionsRef.current.delete(key);
     });
@@ -1042,22 +1098,29 @@ function TradingApp() {
     });
 
     desired.forEach((market) => {
+      const marketEpoch = market.provider === "schwab"
+        ? `schwab:${schwabAuthEpoch}:${schwabAuthenticated}`
+        : `tradestation:${authEpoch}:${environment}:${authenticated}`;
       const existing = alertBarsRef.current.get(market.key);
       if (existing?.length) primeAlertMarket(market.symbol, market.timeframe, existing, false);
-      if (alertLoadedEpochRef.current.get(market.key) === epoch) return;
-      alertLoadedEpochRef.current.set(market.key, epoch);
-      const load = api.isNative ? api.cachedBars(market.symbol, market.timeframe) : api.bars(market.symbol, market.timeframe);
+      if (alertLoadedEpochRef.current.get(market.key) === marketEpoch) return;
+      alertLoadedEpochRef.current.set(market.key, marketEpoch);
+      const load = api.isNative ? api.cachedBars(market.provider, market.symbol, market.timeframe) : api.bars(market.provider, market.symbol, market.timeframe);
       load.then((loaded) => {
-        if (alertDataEpochRef.current === epoch && alertDesiredRef.current.has(market.key)) primeAlertMarket(market.symbol, market.timeframe, loaded, false);
+        if (alertDesiredRef.current.has(market.key)) primeAlertMarket(market.symbol, market.timeframe, loaded, false);
       }).catch(() => undefined);
     });
 
     uncovered.forEach((market) => {
-      if (alertSubscriptionsRef.current.has(market.key) || !api.isNative || !authenticated) return;
+      const providerAuthenticated = market.provider === "schwab" ? schwabAuthenticated : authenticated;
+      if (alertSubscriptionsRef.current.has(market.key) || !api.isNative || !providerAuthenticated) return;
+      const marketEpoch = market.provider === "schwab"
+        ? `schwab:${schwabAuthEpoch}:${schwabAuthenticated}`
+        : `tradestation:${authEpoch}:${environment}:${authenticated}`;
       const subscriptionId = `ema-alert:${encodeURIComponent(market.symbol)}:${market.timeframe}`;
       const generation = nextBarSubscriptionGeneration();
-      alertSubscriptionsRef.current.set(market.key, { subscriptionId, symbol: market.symbol, timeframe: market.timeframe, epoch, generation });
-      api.startBarStream(subscriptionId, market.symbol, market.timeframe, "ema-alert", generation).catch((error) => {
+      alertSubscriptionsRef.current.set(market.key, { subscriptionId, provider: market.provider, symbol: market.symbol, timeframe: market.timeframe, epoch: marketEpoch, generation });
+      api.startBarStream(subscriptionId, market.provider, market.symbol, market.timeframe, "ema-alert", generation).catch((error) => {
         if (alertSubscriptionsRef.current.get(market.key)?.generation !== generation) return;
         alertSubscriptionsRef.current.delete(market.key);
         const message = `EMA alert data unavailable for ${market.symbol} ${market.timeframe}: ${String(error)}`;
@@ -1065,14 +1128,14 @@ function TradingApp() {
         setNotifications((current) => [{ id: crypto.randomUUID(), symbol: market.symbol, time: new Date().toISOString(), title: "EMA alert stream unavailable", text: message, level: "error" as const }, ...current].slice(0, 250));
       });
     });
-  }, [alertMarketsKey, alertOwnershipKey, tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
+  }, [alertMarketsKey, alertOwnershipKey, tabStreamKey, authEpoch, authenticated, schwabAuthEpoch, schwabAuthenticated, environment, workspaceLoaded]);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !entryRulePositionScope || !entryRulePositionsReady) return;
     const inputs = workspace.tabs.flatMap((tab) => {
       const tabMarket = tabMarkets[tab.id];
-      const quote = quotes[tab.symbol.symbol];
-      if (!isSameBarMarket(tabMarket, tab.symbol.symbol, tab.timeframe) || !tabMarket.bars.length || !quote) return [];
+      const quote = quotes[instrumentKey(tab.symbol)];
+      if (!isSameBarMarket(tabMarket, tab.symbol.provider, tab.symbol.symbol, tab.timeframe) || !tabMarket.bars.length || !quote) return [];
       const enabledSides = (["long", "short"] as const).filter((side) => (
         workspace.entryRuleAlerts[side].enabled && workspace.entryRules[side].children.length > 0
       ));
@@ -1159,7 +1222,6 @@ function TradingApp() {
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
-    const epoch = `${authEpoch}:${environment}:${authenticated}`;
     const desired = new Set(vwapSymbolsKey.split("|").filter(Boolean));
     const sharedOneMinute = new Set(workspace.tabs.filter((tab) => tab.timeframe === "1m").map((tab) => tab.symbol.symbol));
 
@@ -1170,6 +1232,9 @@ function TradingApp() {
     });
 
     vwapSubscriptionsRef.current.forEach((subscription, symbol) => {
+      const epoch = subscription.provider === "schwab"
+        ? `schwab:${schwabAuthEpoch}:${schwabAuthenticated}`
+        : `tradestation:${authEpoch}:${environment}:${authenticated}`;
       if (!desired.has(symbol) || sharedOneMinute.has(symbol) || subscription.epoch !== epoch) {
         if (api.isNative) void api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration());
         vwapSubscriptionsRef.current.delete(symbol);
@@ -1178,9 +1243,13 @@ function TradingApp() {
 
     desired.forEach((symbol) => {
       if (sharedOneMinute.has(symbol) || vwapSubscriptionsRef.current.has(symbol)) return;
+      const provider = workspace.tabs.find((tab) => tab.symbol.symbol === symbol)?.symbol.provider ?? "tradestation";
+      const epoch = provider === "schwab"
+        ? `schwab:${schwabAuthEpoch}:${schwabAuthenticated}`
+        : `tradestation:${authEpoch}:${environment}:${authenticated}`;
       const subscriptionId = `ny-session-vwap:${symbol}`;
       const generation = nextBarSubscriptionGeneration();
-      vwapSubscriptionsRef.current.set(symbol, { subscriptionId, symbol, epoch, generation });
+      vwapSubscriptionsRef.current.set(symbol, { subscriptionId, provider, symbol, epoch, generation });
       const mergeSource = (incoming: Bar[]) => {
         if (vwapSubscriptionsRef.current.get(symbol)?.epoch !== epoch) return;
         setVwapMarkets((current) => ({
@@ -1189,10 +1258,10 @@ function TradingApp() {
         }));
       };
       if (!api.isNative) {
-        api.bars(symbol, "1m").then(mergeSource).catch(() => undefined);
-      } else if (authenticated) {
-        api.cachedBars(symbol, "1m").then(mergeSource).catch(() => undefined);
-        api.startBarStream(subscriptionId, symbol, "1m", "vwap", generation).catch((error) => {
+        api.bars(provider, symbol, "1m").then(mergeSource).catch(() => undefined);
+      } else if (provider === "schwab" ? schwabAuthenticated : authenticated) {
+        api.cachedBars(provider, symbol, "1m").then(mergeSource).catch(() => undefined);
+        api.startBarStream(subscriptionId, provider, symbol, "1m", "vwap", generation).catch((error) => {
           if (vwapSubscriptionsRef.current.get(symbol)?.generation !== generation) return;
           vwapSubscriptionsRef.current.delete(symbol);
           setVwapMarkets((current) => ({
@@ -1202,7 +1271,7 @@ function TradingApp() {
         });
       }
     });
-  }, [vwapSymbolsKey, tabStreamKey, authEpoch, authenticated, environment, workspaceLoaded]);
+  }, [vwapSymbolsKey, tabStreamKey, authEpoch, authenticated, schwabAuthEpoch, schwabAuthenticated, environment, workspaceLoaded]);
 
   useEffect(() => {
     setVwapMarkets((current) => {
@@ -1218,20 +1287,21 @@ function TradingApp() {
   }, [vwapSymbolsKey]);
 
   useEffect(() => {
-    if (!workspaceLoaded || isSameBarMarket(tabMarkets[activeTab.id], activeTab.symbol.symbol, activeTab.timeframe) && tabMarkets[activeTab.id].bars.length) return;
+    if (!workspaceLoaded || isSameBarMarket(tabMarkets[activeTab.id], activeTab.symbol.provider, activeTab.symbol.symbol, activeTab.timeframe) && tabMarkets[activeTab.id].bars.length) return;
     const tabId = activeTab.id;
     const symbol = activeTab.symbol.symbol;
     const timeframe = activeTab.timeframe;
-    const load = api.isNative ? api.cachedBars(activeTab.symbol.symbol, activeTab.timeframe) : api.bars(activeTab.symbol.symbol, activeTab.timeframe);
+    const provider = activeTab.symbol.provider;
+    const load = api.isNative ? api.cachedBars(provider, activeTab.symbol.symbol, activeTab.timeframe) : api.bars(provider, activeTab.symbol.symbol, activeTab.timeframe);
     load.then((loadedBars) => {
       const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === tabId);
       if (!currentTab || currentTab.symbol.symbol !== symbol || currentTab.timeframe !== timeframe) return;
       setTabMarkets((current) => {
-        const existing = isSameBarMarket(current[tabId], symbol, timeframe) ? current[tabId] : emptyTabMarket(symbol, timeframe);
+        const existing = isSameBarMarket(current[tabId], provider, symbol, timeframe) ? current[tabId] : emptyTabMarket(provider, symbol, timeframe);
         return { ...current, [tabId]: { ...existing, bars: mergeBars(loadedBars, existing.bars) } };
       });
     }).catch(() => undefined);
-  }, [workspaceLoaded, activeTab.id, activeTab.symbol.symbol, activeTab.timeframe]);
+  }, [workspaceLoaded, activeTab.id, activeTab.symbol.provider, activeTab.symbol.symbol, activeTab.timeframe]);
 
   useEffect(() => () => {
     vwapRangeTimersRef.current.forEach((timer) => window.clearTimeout(timer));
@@ -1244,14 +1314,26 @@ function TradingApp() {
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative || !authenticated) return;
-    const symbols = quoteSymbolsKey.split("|").filter(Boolean);
-    api.startQuoteStream("shared-quotes", symbols).catch((error) => showToast(String(error)));
-    return () => { api.stopQuoteStream("shared-quotes"); };
+    const symbols = quoteInstruments.filter((item) => item.provider === "tradestation").map((item) => item.symbol);
+    if (!symbols.length) return;
+    api.startQuoteStream("shared-quotes-tradestation", "tradestation", symbols).catch((error) => showToast(String(error)));
+    return () => { void api.stopQuoteStream("shared-quotes-tradestation"); };
   }, [quoteSymbolsKey, authEpoch, authenticated, environment, workspaceLoaded]);
 
   useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative || !schwabAuthenticated) return;
+    const symbols = quoteInstruments.filter((item) => item.provider === "schwab").map((item) => item.symbol);
+    if (!symbols.length) return;
+    api.startQuoteStream("shared-quotes-schwab", "schwab", symbols).catch((error) => showToast(String(error)));
+    return () => { void api.stopQuoteStream("shared-quotes-schwab"); };
+  }, [quoteSymbolsKey, schwabAuthEpoch, schwabAuthenticated, workspaceLoaded]);
+
+  useEffect(() => {
     if (api.isNative) return;
-    const refresh = () => api.quotes(quoteSymbolsKey.split("|").filter(Boolean)).then((items) => setQuotes(Object.fromEntries(items.map((quote) => [quote.symbol, { ...quote, receivedAt: Date.now() }])))).catch(() => setQuotes({}));
+    const refresh = () => Promise.all((["tradestation", "schwab"] as MarketDataProvider[]).map((provider) => {
+      const symbols = quoteInstruments.filter((item) => item.provider === provider).map((item) => item.symbol);
+      return symbols.length ? api.quotes(provider, symbols) : Promise.resolve([]);
+    })).then((groups) => groups.flat()).then((items) => setQuotes(Object.fromEntries(items.map((quote) => [instrumentKey(quote), { ...quote, receivedAt: Date.now() }])))).catch(() => setQuotes({}));
     refresh();
     const timer = window.setInterval(refresh, api.isNative ? 3000 : 1800);
     return () => clearInterval(timer);
@@ -1263,6 +1345,7 @@ function TradingApp() {
   }, []);
 
   async function loadVwapRange(symbol: string, range: EpochRange) {
+    const provider = workspaceRef.current.tabs.find((tab) => tab.symbol.symbol === symbol)?.symbol.provider ?? "tradestation";
     const epoch = vwapDataEpochRef.current;
     setVwapMarkets((current) => ({
       ...current,
@@ -1273,7 +1356,7 @@ function TradingApp() {
       },
     }));
     try {
-      const cached = await api.cachedBarRange(symbol, "1m", range.first, range.last).catch(() => []);
+      const cached = await api.cachedBarRange(provider, symbol, "1m", range.first, range.last).catch(() => []);
       if (epoch !== vwapDataEpochRef.current) return;
       if (!vwapSymbolsRef.current.has(symbol)) {
         setVwapMarkets((current) => current[symbol] ? ({
@@ -1304,7 +1387,7 @@ function TradingApp() {
           return;
         }
       }
-      const loaded = await api.barRange(symbol, "1m", range.first, range.last);
+      const loaded = await api.barRange(provider, symbol, "1m", range.first, range.last);
       if (epoch !== vwapDataEpochRef.current) return;
       if (!vwapSymbolsRef.current.has(symbol)) {
         setVwapMarkets((current) => current[symbol] ? ({
@@ -1399,7 +1482,7 @@ function TradingApp() {
   async function loadOlder(tabId: string) {
     const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
     if (!tab) return;
-    const tabMarket = tabMarketsRef.current[tabId] ?? emptyTabMarket(tab.symbol.symbol, tab.timeframe);
+    const tabMarket = tabMarketsRef.current[tabId] ?? emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe);
     const tabBars = tabMarket.bars;
     if (!api.isNative || tabMarket.loadingOlder || !tabMarket.hasOlder || !tabBars.length) return;
     const symbol = tab.symbol.symbol;
@@ -1407,16 +1490,16 @@ function TradingApp() {
     const before = tabBars[0].time;
     setTabMarkets((current) => ({ ...current, [tabId]: { ...tabMarket, loadingOlder: true } }));
     try {
-      const older = await api.olderBars(symbol, timeframe, before);
+      const older = await api.olderBars(tab.symbol.provider, symbol, timeframe, before);
       const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === tabId);
       if (!currentTab || currentTab.symbol.symbol !== symbol || currentTab.timeframe !== timeframe) return;
       setTabMarkets((current) => {
-        const existing = isSameBarMarket(current[tabId], symbol, timeframe) ? current[tabId] : emptyTabMarket(symbol, timeframe);
+        const existing = isSameBarMarket(current[tabId], tab.symbol.provider, symbol, timeframe) ? current[tabId] : emptyTabMarket(tab.symbol.provider, symbol, timeframe);
         return { ...current, [tabId]: { ...existing, hasOlder: older.length > 0, bars: older.length ? mergeBars(older, existing.bars) : existing.bars } };
       });
     } catch (error) { showToast(String(error)); }
     finally {
-      setTabMarkets((current) => isSameBarMarket(current[tabId], symbol, timeframe)
+      setTabMarkets((current) => isSameBarMarket(current[tabId], tab.symbol.provider, symbol, timeframe)
         ? { ...current, [tabId]: { ...current[tabId], loadingOlder: false } }
         : current);
     }
@@ -1500,21 +1583,22 @@ function TradingApp() {
   }, [environment]);
 
   useEffect(() => {
-    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || api.isNative && !authenticated) return;
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || api.isNative && !authenticated && !schwabAuthenticated) return;
     let active = true;
     const refresh = async () => {
-      const symbols = chartSymbolsKey.split("|").filter(Boolean);
-      const settled = await Promise.all(symbols.map(async (symbol) => {
-        try { return await api.symbolDetails(symbol); }
+      const instruments = [...new Map(workspaceRef.current.tabs.map((tab) => [instrumentKey(tab.symbol), tab.symbol])).values()];
+      const settled = await Promise.all(instruments.map(async (instrument) => {
+        if (api.isNative && (instrument.provider === "schwab" ? !schwabAuthenticated : !authenticated)) return null;
+        try { return await api.symbolDetails(instrument.provider, instrument.symbol); }
         catch { return null; }
       }));
       if (!active) return;
-      const details = new Map(settled.filter((item): item is SymbolMeta => Boolean(item)).map((item) => [item.symbol, item]));
+      const details = new Map(settled.filter((item): item is SymbolMeta => Boolean(item)).map((item) => [instrumentKey(item), item]));
       if (!details.size) return;
       commitWorkspace((current) => {
         let changed = false;
         const tabs = current.tabs.map((tab) => {
-          const next = details.get(tab.symbol.symbol);
+          const next = details.get(instrumentKey(tab.symbol));
           if (!next || sameSymbolMeta(tab.symbol, next)) return tab;
           changed = true;
           return { ...tab, symbol: next };
@@ -1525,7 +1609,7 @@ function TradingApp() {
     void refresh();
     const timer = window.setInterval(refresh, 15 * 60_000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [workspaceLoaded, authenticated, environment, authEpoch, chartSymbolsKey]);
+  }, [workspaceLoaded, authenticated, schwabAuthenticated, environment, authEpoch, schwabAuthEpoch, chartSymbolsKey]);
 
   useEffect(() => {
     if (!workspaceLoaded || api.isNative && !authenticated) return;
@@ -1533,7 +1617,7 @@ function TradingApp() {
     const symbols = tradeDetailSymbolsKey.split("|").filter(Boolean);
     if (!symbols.length) return;
     Promise.all(symbols.map(async (symbol) => {
-      try { return { symbol, details: await api.symbolDetails(symbol) }; }
+      try { return { symbol, details: await api.symbolDetails("tradestation", symbol) }; }
       catch (error) { return { symbol, error: String(error) }; }
     })).then((items) => {
       if (!active) return;
@@ -1842,14 +1926,8 @@ function TradingApp() {
     updateActiveTab({ pointAndFigureSettings: normalizePointAndFigureSettings({ ...activeTab.pointAndFigureSettings, ...patch }) });
   }
 
-  async function selectWatchlistSymbol(value: string) {
-    const symbol = value.trim().toUpperCase();
-    try {
-      const meta = futures.find((item) => item.symbol === symbol) ?? await api.symbolDetails(symbol);
-      updateActiveTab({ symbol: meta, tradeContract: undefined });
-    } catch {
-      showToast(`Unable to load ${symbol}. The current chart was not changed.`);
-    }
+  async function selectWatchlistSymbol(instrument: SymbolMeta) {
+    updateActiveTab({ symbol: instrument, tradeContract: undefined });
   }
 
   function updateSymbolDrawings(symbol: string, update: (drawings: Drawing[]) => Drawing[]) {
@@ -2223,6 +2301,38 @@ function TradingApp() {
     finally { setBusy(false); }
   }
 
+  async function saveSchwabApiCredentials() {
+    if (!schwabClientId.trim() || !schwabSecret.trim()) return showToast("Schwab App Key and App Secret are required.");
+    setBusy(true);
+    try {
+      await api.saveSchwabCredentials(schwabClientId.trim(), schwabSecret);
+      setSchwabConfigured(true);
+      setSchwabAuthenticated(false);
+      setSchwabSecret("");
+      showToast("Schwab credentials saved. Connect to authorize market data.");
+    } catch (error) { showToast(String(error)); }
+    finally { setBusy(false); }
+  }
+
+  async function connectSchwab() {
+    if (!schwabConfigured) return showToast("Save Schwab credentials before connecting.");
+    setBusy(true);
+    try { await api.beginSchwabLogin(); }
+    catch (error) { showToast(String(error)); }
+    finally { setBusy(false); }
+  }
+
+  async function disconnectSchwab() {
+    setBusy(true);
+    try {
+      await api.logoutSchwab();
+      setSchwabAuthenticated(false);
+      setSchwabAuthEpoch((value) => value + 1);
+      showToast("Schwab disconnected. Cached equity charts remain available.");
+    } catch (error) { showToast(String(error)); }
+    finally { setBusy(false); }
+  }
+
   function eligibilityForEntry(sourceTabId: string, expectedChartSymbol: string, expectedTradeSymbol: string): Record<EntryRuleSide, EntryRuleResult> {
     const tab = workspace.tabs.find((item) => item.id === sourceTabId);
     if (!tab || tab.symbol.symbol !== expectedChartSymbol) {
@@ -2234,9 +2344,9 @@ function TradingApp() {
       return { long: result, short: result };
     }
     const sourceBars = tabMarkets[sourceTabId]?.bars ?? [];
-    const sourceQuote = quotes[tab.symbol.symbol] ?? (api.isNative
-      ? { symbol: tab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
-      : quoteFor(tab.symbol.symbol));
+    const sourceQuote = quotes[instrumentKey(tab.symbol)] ?? (api.isNative
+      ? { provider: tab.symbol.provider, symbol: tab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+      : quoteFor(tab.symbol.symbol, 0, tab.symbol.provider));
     return evaluateEntryRules(workspace.entryRules, sourceBars, sourceQuote);
   }
 
@@ -2421,7 +2531,9 @@ function TradingApp() {
     finally { setBusy(false); }
   }
 
-  const connectionLabel = api.isNative ? (authenticated ? market.streamState === "rate-limited" ? "PAUSED" : market.streamState.toUpperCase() : "NOT CONNECTED") : "DEMO FEED";
+  const activeProviderConnected = activeTab.symbol.provider === "schwab" ? schwabAuthenticated : authenticated;
+  const providerLabel = activeTab.symbol.provider === "schwab" ? "SCHWAB" : "TRADESTATION";
+  const connectionLabel = api.isNative ? (activeProviderConnected ? `${providerLabel} ${market.streamState === "rate-limited" ? "PAUSED" : market.streamState.toUpperCase()}` : `${providerLabel} OFFLINE`) : `${providerLabel} DEMO`;
   const brokerageConnectionState = brokerageDisplayState(brokerageStreamStates);
   const marketTime = newYorkClock.format(new Date(currentTime));
   const reviewEntryEligibility = review?.kind === "entry"
@@ -2451,18 +2563,17 @@ function TradingApp() {
   };
 
   function renderChartPane(tab: ChartTabState) {
-    const tabMarket = isSameBarMarket(tabMarkets[tab.id], tab.symbol.symbol, tab.timeframe)
+    const tabMarket = isSameBarMarket(tabMarkets[tab.id], tab.symbol.provider, tab.symbol.symbol, tab.timeframe)
       ? tabMarkets[tab.id]
-      : emptyTabMarket(tab.symbol.symbol, tab.timeframe);
+      : emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe);
     const tabTradeSymbol = resolveTradeSymbol(tab);
     const tabTradeMeta = isContinuousFuture(tab.symbol)
       ? tabTradeSymbol ? tradeDetails[tabTradeSymbol] : undefined
       : tab.symbol;
-    const tabTradeQuote = tabTradeSymbol
-      ? quotes[tabTradeSymbol] ?? (api.isNative
-        ? { symbol: tabTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
-        : quoteFor(tabTradeSymbol))
-      : { symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
+    const tabQuoteSymbol = tabTradeSymbol ?? tab.symbol.symbol;
+    const tabTradeQuote = quotes[`${tab.symbol.provider}:${tabQuoteSymbol}`] ?? (api.isNative
+      ? { provider: tab.symbol.provider, symbol: tabQuoteSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+      : quoteFor(tabQuoteSymbol, 0, tab.symbol.provider));
     const focused = tab.id === activeTab.id;
     return <TradingChart
       ref={(handle) => { if (handle) chartCaptureRefs.current.set(tab.id, handle); else chartCaptureRefs.current.delete(tab.id); }}
@@ -2510,11 +2621,11 @@ function TradingApp() {
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
       <div className="brand"><div className="brand-glyph"><TrendingUp size={16} strokeWidth={2.4} /></div><span>NORTHSTAR</span><small>TRADER</small></div>
-      {hasWindowTabs && <TopbarWatchlist symbols={workspace.watchlist} quotes={quotes} active={activeTab.symbol.symbol} onSelect={selectWatchlistSymbol} />}
+      {hasWindowTabs && <TopbarWatchlist symbols={workspace.watchlist} quotes={quotes} active={instrumentKey(activeTab.symbol)} onSelect={selectWatchlistSymbol} />}
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
-      {!isDetached && <button className={`environment-badge ${environment}`} onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
-      <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
+      {!isDetached && <button className={`environment-badge ${environment}`} title="TradeStation futures environment" onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
+      <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => activeTab.symbol.provider === "schwab" ? setSettingsOpen(true) : setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
     <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} visibleTabIds={visibleTabIds} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} entryRuleSignals={entryRuleTabSignals} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); if (api.isNative) emit("chart-strip-bounds", bounds); }} />
@@ -2614,14 +2725,16 @@ function TradingApp() {
       {!isDetached && <aside className={`right-panel ${workspace.rightPanelOpen ? "open" : "collapsed"}`} aria-labelledby="order-panel-title">
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>
         {workspace.rightPanelOpen && <div id="order-panel-content" className="right-panel-content">
-          <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />
+          {activeTab.symbol.provider === "schwab"
+            ? <div className="equity-order-disabled"><span>Schwab</span><strong>Chart data only</strong><p>Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available.</p></div>
+            : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}
         </div>}
       </aside>}
 
       {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
     </section>
 
-    {searchOpen && <Modal title="Select futures contract" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search symbol or contract name" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={result.symbol} onClick={() => { updateActiveTab({ symbol: result, tradeContract: undefined }); setSearchOpen(false); setSearch(""); }}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.expiration}</small></span></button>)}{!searchResults.length && <div className="empty-state">No futures contracts matched “{search}”.</div>}</div></Modal>}
+    {searchOpen && <Modal title="Select symbol" onClose={() => setSearchOpen(false)} width={620}><div className="search-box"><Search size={17} /><input autoFocus placeholder="Search equity, ETF, or futures contract" value={search} onChange={(e) => setSearch(e.target.value)} /></div><div className="symbol-results">{searchResults.map((result) => <button key={instrumentKey(result)} onClick={() => { updateActiveTab({ symbol: result, tradeContract: undefined }); setSearchOpen(false); setSearch(""); }}><span className={`instrument-icon ${result.provider}`}>{result.provider === "schwab" ? "E" : "F"}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? "Schwab" : `TradeStation${result.expiration ? ` · ${result.expiration}` : ""}`}</small></span></button>)}{!searchResults.length && <div className="empty-state">No supported symbols matched “{search}”.</div>}</div></Modal>}
 
     {setupOpen && <Modal title="Connect TradeStation" onClose={() => setSetupOpen(false)}><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></Modal>}
 
@@ -2632,6 +2745,7 @@ function TradingApp() {
       <section className="settings-section" aria-labelledby="journal-fee-settings"><header><span>Journal</span><h3 id="journal-fee-settings">Commission and fees</h3><p>Used for journal net P&amp;L on every opening and closing fill.</p></header><label className="settings-control-row"><span><strong>Fee per contract, per side</strong><small>One contract opened and closed is charged twice</small></span><div className="settings-number-control"><input aria-label="Journal fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.commissionPerContractSide} onChange={(event) => updateJournalCommission(Number(event.target.value))} /><span>USD</span></div></label></section>
       <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings preferenceSync={preferenceSync} preferenceRealtime={preferenceRealtime} onConnectionChanged={() => { void syncCloudPreferences(); }} /></section>
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
+      <section className="settings-section settings-api-section" aria-labelledby="schwab-api-settings"><header><span>Connection</span><h3 id="schwab-api-settings">Schwab API</h3><p>Equity and ETF chart data. Credentials and the refresh token stay in the operating system credential vault.</p></header><SchwabCredentials clientId={schwabClientId} secret={schwabSecret} busy={busy} configured={schwabConfigured} connected={schwabAuthenticated} native={api.isNative} onClientIdChange={setSchwabClientId} onSecretChange={setSchwabSecret} onSave={saveSchwabApiCredentials} onConnect={connectSchwab} onDisconnect={disconnectSchwab} /></section>
     </div></Modal>}
 
     {envConfirm && <Modal title={`Switch to ${envConfirm.toUpperCase()}?`} onClose={() => setEnvConfirm(null)}><div className={`environment-confirm ${envConfirm}`}><Zap size={22} /><div><strong>{envConfirm === "live" ? "Real orders and real money" : "Simulated execution"}</strong><p>{envConfirm === "live" ? "Changing to LIVE clears SIM account data." : "SIM uses a separate account environment and simulated fills."}</p></div></div><div className="modal-actions"><button className="secondary-button" onClick={() => setEnvConfirm(null)}>Cancel</button><button className={envConfirm === "live" ? "danger-button" : "primary-button"} disabled={busy} onClick={confirmEnvironment}>Switch to {envConfirm.toUpperCase()}</button></div></Modal>}
@@ -2723,7 +2837,7 @@ function ChartTabStrip({ tabs, activeTabId, visibleTabIds, totalTabs, windowId, 
   </nav>;
 }
 
-function TopbarWatchlist({ symbols, quotes, active, onSelect }: { symbols: string[]; quotes: Record<string, Quote>; active: string; onSelect: (symbol: string) => void | Promise<void> }) {
+function TopbarWatchlist({ symbols, quotes, active, onSelect }: { symbols: SymbolMeta[]; quotes: Record<string, Quote>; active: string; onSelect: (symbol: SymbolMeta) => void | Promise<void> }) {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
@@ -2737,12 +2851,13 @@ function TopbarWatchlist({ symbols, quotes, active, onSelect }: { symbols: strin
 
   return <div ref={scrollRef} className="topbar-watchlist" role="navigation" aria-label="Watchlist" onWheel={handleWheel}>
     <div className="topbar-watchlist-track">
-      {symbols.map((symbol) => {
-        const quote = quotes[symbol] ?? (api.isNative ? undefined : quoteFor(symbol));
+      {symbols.map((instrument) => {
+        const key = instrumentKey(instrument);
+        const quote = quotes[key] ?? (api.isNative ? undefined : quoteFor(instrument.symbol, 0, instrument.provider));
         const changePct = quote ? quoteDayChangePercent(quote) : undefined;
         const price = quote ? quote.last.toLocaleString(undefined, { minimumFractionDigits: 2 }) : "—";
         const change = changePct == null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
-        return <button key={symbol} type="button" className={active === symbol ? "active" : ""} aria-current={active === symbol ? "true" : undefined} aria-label={`${symbol}, ${price}, ${change}`} onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })} onClick={() => void onSelect(symbol)}><strong>{symbol}</strong><span>{price}</span><span className={changePct == null ? "muted" : changePct >= 0 ? "positive" : "negative"}>{change}</span></button>;
+        return <button key={key} type="button" className={active === key ? "active" : ""} aria-current={active === key ? "true" : undefined} aria-label={`${instrument.symbol}, ${instrument.provider}, ${price}, ${change}`} onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest" })} onClick={() => void onSelect(instrument)}><strong>{instrument.symbol}</strong><span>{price}</span><span className={changePct == null ? "muted" : changePct >= 0 ? "positive" : "negative"}>{change}</span></button>;
       })}
     </div>
   </div>;
@@ -2762,7 +2877,7 @@ function ChartLayoutGlyph({ layout }: { layout: ChartLayout }) {
   </span>;
 }
 
-function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: WorkspaceState; onChange: (symbols: string[]) => void; onNotify: (message: string) => void }) {
+function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: WorkspaceState; onChange: (symbols: SymbolMeta[]) => void; onNotify: (message: string) => void }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SymbolMeta[]>([]);
   const [loading, setLoading] = useState(false);
@@ -2829,7 +2944,7 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
     }
     setDropSymbol(target);
     const current = watchlistRef.current;
-    move(current.indexOf(drag.symbol), current.indexOf(target));
+    move(current.findIndex((item) => instrumentKey(item) === drag.symbol), current.findIndex((item) => instrumentKey(item) === target));
   };
 
   const finishPointerDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -2842,37 +2957,35 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   };
 
   const add = (result: SymbolMeta) => {
-    const symbol = result.symbol.trim().toUpperCase();
-    if (workspace.watchlist.includes(symbol)) return;
-    if (!canAddWatchlistSymbol(workspace, symbol)) {
-      onNotify("The watchlist cannot exceed TradeStation's 100-symbol quote stream limit.");
+    const key = instrumentKey(result);
+    if (workspace.watchlist.some((item) => instrumentKey(item) === key)) return;
+    if (!canAddWatchlistSymbol(workspace, result)) {
+      onNotify("The watchlist cannot exceed the 100-instrument streaming limit.");
       return;
     }
-    onChange([...workspace.watchlist, symbol]);
+    onChange([...workspace.watchlist, result]);
   };
 
-  const knownSymbols = new Map([...futures, ...results].map((item) => [item.symbol, item]));
-
   return <section className="settings-section watchlist-settings" aria-labelledby="watchlist-settings-title">
-    <header><span>Market data</span><h3 id="watchlist-settings-title">Top bar watchlist</h3><p>Search futures, remove symbols, and drag them into the order shown beside the Northstar logo.</p></header>
-    <div className="watchlist-search-box"><Search size={15} /><input aria-label="Search futures for watchlist" placeholder="Search symbol or contract name" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+    <header><span>Market data</span><h3 id="watchlist-settings-title">Top bar watchlist</h3><p>Search equities, ETFs, and futures, then drag them into the order shown beside the Northstar logo.</p></header>
+    <div className="watchlist-search-box"><Search size={15} /><input aria-label="Search symbols for watchlist" placeholder="Search symbol or instrument name" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
     {query.trim() && <div className="watchlist-search-results" aria-live="polite">
       {loading && <div className="watchlist-search-state">Searching…</div>}
       {!loading && error && <div className="watchlist-search-state negative">{error}</div>}
       {!loading && !error && results.map((result) => {
-        const added = workspace.watchlist.includes(result.symbol.trim().toUpperCase());
-        const available = canAddWatchlistSymbol(workspace, result.symbol);
-        return <div className="watchlist-search-result" key={result.symbol}><span className="future-icon">F</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{formatContractExpiration(result.expiration)}</small></span><button type="button" disabled={added || !available} title={!available && !added ? "100-symbol quote stream limit reached" : undefined} onClick={() => add(result)}>{added ? "Added" : !available ? "Limit" : "Add"}</button></div>;
+        const added = workspace.watchlist.some((item) => instrumentKey(item) === instrumentKey(result));
+        const available = canAddWatchlistSymbol(workspace, result);
+        return <div className="watchlist-search-result" key={instrumentKey(result)}><span className={`instrument-icon ${result.provider}`}>{result.provider === "schwab" ? "E" : "F"}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? "Schwab · Equity" : `TradeStation · ${formatContractExpiration(result.expiration)}`}</small></span><button type="button" disabled={added || !available} title={!available && !added ? "100-instrument quote stream limit reached" : undefined} onClick={() => add(result)}>{added ? "Added" : !available ? "Limit" : "Add"}</button></div>;
       })}
-      {!loading && !error && !results.length && <div className="watchlist-search-state">No futures contracts matched “{query}”.</div>}
+      {!loading && !error && !results.length && <div className="watchlist-search-state">No supported symbols matched “{query}”.</div>}
     </div>}
     <div className={`watchlist-editor ${draggedSymbol ? "dragging" : ""}`} aria-label="Saved watchlist">
-      {workspace.watchlist.map((symbol, index) => {
-        const meta = knownSymbols.get(symbol);
-        return <div key={symbol} data-watchlist-symbol={symbol} className={`watchlist-editor-row ${draggedSymbol === symbol ? "dragging" : ""} ${dropSymbol === symbol ? "drop-target" : ""}`}>
-          <button type="button" className="watchlist-drag-handle" aria-label={`Reorder ${symbol}`} aria-pressed={draggedSymbol === symbol} title="Drag or use the up and down arrow keys" onPointerDown={(event) => startPointerDrag(event, symbol)} onPointerMove={updatePointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={finishPointerDrag} onLostPointerCapture={(event) => { if (pointerDragRef.current?.pointerId === event.pointerId) finishPointerDrag(event); }} onKeyDown={(event) => { const offset = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0; if (!offset) return; event.preventDefault(); move(index, index + offset); }}><GripVertical size={15} /></button>
-          <span><strong>{symbol}</strong><small>{meta ? `${meta.exchange} · ${meta.description}` : "Futures symbol"}</small></span>
-          <button type="button" className="watchlist-remove" aria-label={`Remove ${symbol} from watchlist`} onClick={() => onChange(workspace.watchlist.filter((item) => item !== symbol))}><X size={14} /></button>
+      {workspace.watchlist.map((instrument, index) => {
+        const key = instrumentKey(instrument);
+        return <div key={key} data-watchlist-symbol={key} className={`watchlist-editor-row ${draggedSymbol === key ? "dragging" : ""} ${dropSymbol === key ? "drop-target" : ""}`}>
+          <button type="button" className="watchlist-drag-handle" aria-label={`Reorder ${instrument.symbol}`} aria-pressed={draggedSymbol === key} title="Drag or use the up and down arrow keys" onPointerDown={(event) => startPointerDrag(event, key)} onPointerMove={updatePointerDrag} onPointerUp={finishPointerDrag} onPointerCancel={finishPointerDrag} onLostPointerCapture={(event) => { if (pointerDragRef.current?.pointerId === event.pointerId) finishPointerDrag(event); }} onKeyDown={(event) => { const offset = event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : 0; if (!offset) return; event.preventDefault(); move(index, index + offset); }}><GripVertical size={15} /></button>
+          <span><strong>{instrument.symbol}</strong><small>{instrument.provider === "schwab" ? `Schwab · ${instrument.description}` : `TradeStation · ${instrument.exchange || instrument.description}`}</small></span>
+          <button type="button" className="watchlist-remove" aria-label={`Remove ${instrument.symbol} from watchlist`} onClick={() => onChange(workspace.watchlist.filter((item) => instrumentKey(item) !== key))}><X size={14} /></button>
         </div>;
       })}
       {!workspace.watchlist.length && <div className="watchlist-editor-empty"><strong>No symbols saved</strong><span>Use the search above to build your top bar watchlist.</span></div>}

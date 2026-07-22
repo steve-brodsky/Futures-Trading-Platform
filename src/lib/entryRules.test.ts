@@ -12,7 +12,7 @@ const bars: Bar[] = Array.from({ length: 220 }, (_, index) => ({
   close: 101 + index,
   volume: 1000,
 }));
-const quote: Quote = { symbol: "MES", last: 321, bid: 320, ask: 322, change: 0, changePct: 0, delayed: false, halted: false, timestamp: "" };
+const quote: Quote = { provider: "tradestation", symbol: "MES", last: 321, bid: 320, ask: 322, change: 0, changePct: 0, delayed: false, halted: false, timestamp: "" };
 
 function exampleRules(): EntryRules {
   return {

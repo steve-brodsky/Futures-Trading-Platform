@@ -8,7 +8,7 @@ import { defaultEntryRules } from "./entryRules";
 
 const bars: Bar[] = [{ time: 1, open: 100, high: 101, low: 99, close: 100, volume: 10 }];
 const quote = (ask: number, bid = ask - 1): Quote => ({
-  symbol: "MES", last: ask, bid, ask, change: 0, changePct: 0, delayed: false, halted: false, timestamp: "",
+  provider: "tradestation", symbol: "MES", last: ask, bid, ask, change: 0, changePct: 0, delayed: false, halted: false, timestamp: "",
 });
 const rules = (): EntryRules => ({
   long: { id: "long-root", kind: "group", combinator: "and", children: [{

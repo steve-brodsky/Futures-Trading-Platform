@@ -1,0 +1,857 @@
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc, Weekday};
+use reqwest::StatusCode;
+use serde::Deserialize;
+use serde_json::Value;
+use tokio::sync::{Mutex, RwLock};
+
+use crate::{
+    models::{Bar, MarketDataProvider, Quote, SymbolMeta},
+    storage, AppError,
+};
+
+const TOKEN_URL: &str = "https://api.schwabapi.com/v1/oauth/token";
+const MARKET_URL: &str = "https://api.schwabapi.com/marketdata/v1";
+const TRADER_URL: &str = "https://api.schwabapi.com/trader/v1";
+pub const AUTHORIZE_URL: &str = "https://api.schwabapi.com/v1/oauth/authorize";
+pub const REDIRECT_URI: &str = "https://127.0.0.1:8182/callback";
+
+#[derive(Clone, Debug)]
+struct AccessToken {
+    value: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenPayload {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamerInfo {
+    pub streamer_socket_url: String,
+    pub schwab_client_customer_id: String,
+    pub schwab_client_correl_id: String,
+    pub schwab_client_channel: String,
+    pub schwab_client_function_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserPreference {
+    streamer_info: Vec<StreamerInfo>,
+}
+
+#[derive(Clone)]
+pub struct Schwab {
+    http: reqwest::Client,
+    access_token: Arc<RwLock<Option<AccessToken>>>,
+    refresh_lock: Arc<Mutex<()>>,
+}
+
+impl Schwab {
+    pub fn new() -> Result<Self, AppError> {
+        Ok(Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .user_agent("Northstar-Trader/0.1")
+                .build()?,
+            access_token: Arc::new(RwLock::new(None)),
+            refresh_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    pub async fn clear_access_token(&self) {
+        *self.access_token.write().await = None;
+    }
+
+    pub async fn authenticated(&self) -> bool {
+        if storage::schwab_refresh_token().ok().flatten().is_none() {
+            return false;
+        }
+        self.access_token(false).await.is_ok()
+    }
+
+    async fn token_request(&self, fields: &[(&str, &str)]) -> Result<TokenPayload, AppError> {
+        let (client_id, client_secret) =
+            storage::schwab_client()?.ok_or(AppError::AuthenticationRequired)?;
+        let response = self
+            .http
+            .post(TOKEN_URL)
+            .header(
+                "Authorization",
+                format!(
+                    "Basic {}",
+                    STANDARD.encode(format!("{client_id}:{client_secret}"))
+                ),
+            )
+            .header("Accept", "application/json")
+            .form(fields)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(AppError::Api(format!(
+                "Schwab token request failed ({status}): {}",
+                truncate(&detail)
+            )));
+        }
+        Ok(response.json().await?)
+    }
+
+    pub async fn exchange_code(&self, code: &str) -> Result<(), AppError> {
+        let payload = self
+            .token_request(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", REDIRECT_URI),
+            ])
+            .await?;
+        let refresh = payload
+            .refresh_token
+            .ok_or_else(|| AppError::Api("Schwab did not return a refresh token".into()))?;
+        storage::save_schwab_refresh_token(&refresh)?;
+        *self.access_token.write().await = Some(AccessToken {
+            value: payload.access_token,
+            expires_at: Utc::now().timestamp_millis() + payload.expires_in * 1_000,
+        });
+        Ok(())
+    }
+
+    pub async fn access_token(&self, force: bool) -> Result<String, AppError> {
+        if !force {
+            if let Some(token) = self.access_token.read().await.as_ref() {
+                if token.expires_at > Utc::now().timestamp_millis() + 60_000 {
+                    return Ok(token.value.clone());
+                }
+            }
+        }
+        let _guard = self.refresh_lock.lock().await;
+        if !force {
+            if let Some(token) = self.access_token.read().await.as_ref() {
+                if token.expires_at > Utc::now().timestamp_millis() + 60_000 {
+                    return Ok(token.value.clone());
+                }
+            }
+        }
+        let refresh = storage::schwab_refresh_token()?.ok_or(AppError::AuthenticationRequired)?;
+        match self
+            .token_request(&[("grant_type", "refresh_token"), ("refresh_token", &refresh)])
+            .await
+        {
+            Ok(payload) => {
+                if let Some(rotated) = payload.refresh_token.as_deref() {
+                    storage::save_schwab_refresh_token(rotated)?;
+                }
+                let value = payload.access_token.clone();
+                *self.access_token.write().await = Some(AccessToken {
+                    value: payload.access_token,
+                    expires_at: Utc::now().timestamp_millis() + payload.expires_in * 1_000,
+                });
+                Ok(value)
+            }
+            Err(_error) => {
+                storage::clear_schwab_refresh_token()?;
+                *self.access_token.write().await = None;
+                Err(AppError::AuthenticationRequired)
+            }
+        }
+    }
+
+    async fn get_json(&self, url: &str) -> Result<Value, AppError> {
+        let mut token = self.access_token(false).await?;
+        for retry in 0..=1 {
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(&token)
+                .header("Accept", "application/json")
+                .send()
+                .await?;
+            if response.status() == StatusCode::UNAUTHORIZED && retry == 0 {
+                token = self.access_token(true).await?;
+                continue;
+            }
+            let status = response.status();
+            if !status.is_success() {
+                let detail = response.text().await.unwrap_or_default();
+                return Err(AppError::Api(format!(
+                    "Schwab request failed ({status}): {}",
+                    truncate(&detail)
+                )));
+            }
+            return Ok(response.json().await?);
+        }
+        Err(AppError::AuthenticationRequired)
+    }
+
+    pub async fn search_symbols(&self, query: &str) -> Result<Vec<SymbolMeta>, AppError> {
+        let mut url = url::Url::parse(&format!("{MARKET_URL}/instruments"))?;
+        url.query_pairs_mut()
+            .append_pair("symbol", query.trim())
+            .append_pair("projection", "symbol-search");
+        let body = self.get_json(url.as_str()).await?;
+        let mut result: Vec<_> = body
+            .get("instruments")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(instrument_from_value)
+            .collect();
+        result.sort_by(|left, right| {
+            let left_exact = !left.symbol.eq_ignore_ascii_case(query);
+            let right_exact = !right.symbol.eq_ignore_ascii_case(query);
+            left_exact
+                .cmp(&right_exact)
+                .then_with(|| left.symbol.cmp(&right.symbol))
+        });
+        result.dedup_by(|left, right| left.symbol == right.symbol);
+        Ok(result)
+    }
+
+    pub async fn symbol_details(&self, symbol: &str) -> Result<SymbolMeta, AppError> {
+        self.search_symbols(symbol)
+            .await?
+            .into_iter()
+            .find(|item| item.symbol.eq_ignore_ascii_case(symbol))
+            .ok_or_else(|| AppError::Api(format!("Schwab equity symbol not found: {symbol}")))
+    }
+
+    pub async fn quotes(&self, symbols: &[String]) -> Result<Vec<Quote>, AppError> {
+        if symbols.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut url = url::Url::parse(&format!("{MARKET_URL}/quotes"))?;
+        url.query_pairs_mut()
+            .append_pair("symbols", &symbols.join(","))
+            .append_pair("fields", "quote,reference,regular");
+        let body = self.get_json(url.as_str()).await?;
+        Ok(body
+            .as_object()
+            .into_iter()
+            .flat_map(|items| items.iter())
+            .filter_map(|(symbol, value)| quote_from_value(symbol, value))
+            .collect())
+    }
+
+    pub async fn streamer_info(&self) -> Result<StreamerInfo, AppError> {
+        let value = self
+            .get_json(&format!("{TRADER_URL}/userPreference"))
+            .await?;
+        let preference: UserPreference = serde_json::from_value(value)?;
+        preference.streamer_info.into_iter().next().ok_or_else(|| {
+            AppError::Api("Schwab User Preference returned no Streamer information".into())
+        })
+    }
+
+    pub async fn bars(&self, symbol: &str, timeframe: &str) -> Result<Vec<Bar>, AppError> {
+        self.bars_before(symbol, timeframe, None).await
+    }
+
+    pub async fn older_bars(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        before: i64,
+    ) -> Result<Vec<Bar>, AppError> {
+        let mut bars = self.bars_before(symbol, timeframe, Some(before)).await?;
+        bars.retain(|bar| bar.time < before);
+        Ok(bars)
+    }
+
+    async fn bars_before(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        before: Option<i64>,
+    ) -> Result<Vec<Bar>, AppError> {
+        match timeframe {
+            "1m" | "5m" | "15m" | "30m" | "1h" | "4h" => {
+                let source = self
+                    .price_history(symbol, "day", 10, "minute", 1, before, None)
+                    .await?;
+                Ok(aggregate_bars(&source, timeframe))
+            }
+            "D" | "W" | "M" => {
+                let mut daily = self
+                    .price_history(symbol, "year", 20, "daily", 1, before, None)
+                    .await?;
+                if before.is_none() {
+                    let minutes = self
+                        .price_history(symbol, "day", 10, "minute", 1, None, None)
+                        .await?;
+                    let recent_daily = aggregate_bars(&minutes, "D");
+                    let mut by_time: BTreeMap<_, _> =
+                        daily.into_iter().map(|bar| (bar.time, bar)).collect();
+                    by_time.extend(recent_daily.into_iter().map(|bar| (bar.time, bar)));
+                    daily = by_time.into_values().collect();
+                }
+                Ok(aggregate_bars(&daily, timeframe))
+            }
+            _ => Err(AppError::Validation("Unsupported Schwab timeframe".into())),
+        }
+    }
+
+    pub async fn bars_range(
+        &self,
+        symbol: &str,
+        first: i64,
+        last: i64,
+    ) -> Result<Vec<Bar>, AppError> {
+        if first >= last {
+            return Err(AppError::Validation("Invalid Schwab bar range".into()));
+        }
+        let mut bars = self
+            .price_history(symbol, "day", 10, "minute", 1, None, Some((first, last)))
+            .await?;
+        bars.retain(|bar| bar.time >= first && bar.time < last);
+        Ok(bars)
+    }
+
+    async fn price_history(
+        &self,
+        symbol: &str,
+        period_type: &str,
+        period: u32,
+        frequency_type: &str,
+        frequency: u32,
+        before: Option<i64>,
+        range: Option<(i64, i64)>,
+    ) -> Result<Vec<Bar>, AppError> {
+        let mut url = url::Url::parse(&format!("{MARKET_URL}/pricehistory"))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query
+                .append_pair("symbol", symbol)
+                .append_pair("periodType", period_type)
+                .append_pair("period", &period.to_string())
+                .append_pair("frequencyType", frequency_type)
+                .append_pair("frequency", &frequency.to_string())
+                .append_pair("needExtendedHoursData", "true")
+                .append_pair("needPreviousClose", "true");
+            if let Some(before) = before {
+                query.append_pair("endDate", &(before.saturating_mul(1_000) - 1).to_string());
+            }
+            if let Some((first, last)) = range {
+                query
+                    .append_pair("startDate", &first.saturating_mul(1_000).to_string())
+                    .append_pair("endDate", &(last.saturating_mul(1_000) - 1).to_string());
+            }
+        }
+        let body = self.get_json(url.as_str()).await?;
+        let mut bars: Vec<_> = body
+            .get("candles")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(history_bar_from_value)
+            .collect();
+        bars.sort_by_key(|bar| bar.time);
+        bars.dedup_by_key(|bar| bar.time);
+        Ok(bars)
+    }
+}
+
+pub fn aggregate_bars(source: &[Bar], timeframe: &str) -> Vec<Bar> {
+    let mut buckets: BTreeMap<i64, Bar> = BTreeMap::new();
+    let source_by_minute: BTreeMap<i64, &Bar> = source.iter().map(|bar| (bar.time, bar)).collect();
+    for bar in source_by_minute.into_values() {
+        let Some(time) = bucket_start(bar.time, timeframe) else {
+            continue;
+        };
+        buckets
+            .entry(time)
+            .and_modify(|bucket| {
+                bucket.high = bucket.high.max(bar.high);
+                bucket.low = bucket.low.min(bar.low);
+                bucket.close = bar.close;
+                bucket.volume += bar.volume;
+                bucket.realtime |= bar.realtime;
+            })
+            .or_insert_with(|| Bar {
+                time,
+                open: bar.open,
+                high: bar.high,
+                low: bar.low,
+                close: bar.close,
+                volume: bar.volume,
+                realtime: bar.realtime,
+            });
+    }
+    buckets.into_values().collect()
+}
+
+pub fn bucket_start(epoch: i64, timeframe: &str) -> Option<i64> {
+    if timeframe == "1m" {
+        return Some(epoch.div_euclid(60) * 60);
+    }
+    let local = new_york_local(epoch)?;
+    let date = local.date();
+    let naive = match timeframe {
+        "5m" | "15m" | "30m" | "1h" | "4h" => {
+            let minutes = match timeframe {
+                "5m" => 5,
+                "15m" => 15,
+                "30m" => 30,
+                "1h" => 60,
+                "4h" => 240,
+                _ => unreachable!(),
+            };
+            let minute_of_day = local.hour() * 60 + local.minute();
+            let bucket = minute_of_day / minutes * minutes;
+            date.and_hms_opt(bucket / 60, bucket % 60, 0)?
+        }
+        "D" => date.and_hms_opt(0, 0, 0)?,
+        "W" => {
+            let monday =
+                date - chrono::Duration::days(local.weekday().num_days_from_monday() as i64);
+            monday.and_hms_opt(0, 0, 0)?
+        }
+        "M" => date.with_day(1)?.and_hms_opt(0, 0, 0)?,
+        _ => return None,
+    };
+    Some(new_york_epoch(naive))
+}
+
+fn new_york_local(epoch: i64) -> Option<NaiveDateTime> {
+    let utc = Utc.timestamp_opt(epoch, 0).single()?.naive_utc();
+    Some(utc + chrono::Duration::seconds(new_york_offset_at(epoch)))
+}
+
+fn new_york_epoch(local: NaiveDateTime) -> i64 {
+    local.and_utc().timestamp() - i64::from(new_york_offset_for_date(local.date()))
+}
+
+fn new_york_offset_at(epoch: i64) -> i64 {
+    let Some(utc) = Utc.timestamp_opt(epoch, 0).single() else {
+        return -5 * 3_600;
+    };
+    let year = utc.year();
+    let march = nth_weekday(year, 3, Weekday::Sun, 2)
+        .and_hms_opt(7, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    let november = nth_weekday(year, 11, Weekday::Sun, 1)
+        .and_hms_opt(6, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    if epoch >= march && epoch < november {
+        -4 * 3_600
+    } else {
+        -5 * 3_600
+    }
+}
+
+fn new_york_offset_for_date(date: NaiveDate) -> i32 {
+    let start = nth_weekday(date.year(), 3, Weekday::Sun, 2);
+    let end = nth_weekday(date.year(), 11, Weekday::Sun, 1);
+    if date >= start && date < end {
+        -4 * 3_600
+    } else {
+        -5 * 3_600
+    }
+}
+
+fn nth_weekday(year: i32, month: u32, weekday: Weekday, nth: u32) -> NaiveDate {
+    let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+    let offset = (7 + weekday.num_days_from_monday() as i64
+        - first.weekday().num_days_from_monday() as i64)
+        % 7;
+    first + chrono::Duration::days(offset + i64::from((nth - 1) * 7))
+}
+
+pub fn chart_bar_from_value(value: &Value) -> Option<Bar> {
+    let time = integer_field(value, 7)?.div_euclid(1_000);
+
+    // Schwab production currently prefixes CHART_EQUITY OHLCV with the
+    // sequence number (1=sequence, 2..6=OHLCV). Older contract copies list
+    // OHLCV at 1..5. Accept both shapes, but only when the resulting candle
+    // satisfies the basic OHLC invariants so a sequence can never become a
+    // giant price wick.
+    let current = stream_bar_candidate(value, time, 2, 3, 4, 5, 6);
+    current.or_else(|| stream_bar_candidate(value, time, 1, 2, 3, 4, 5))
+}
+
+fn stream_bar_candidate(
+    value: &Value,
+    time: i64,
+    open_field: u8,
+    high_field: u8,
+    low_field: u8,
+    close_field: u8,
+    volume_field: u8,
+) -> Option<Bar> {
+    let bar = Bar {
+        time,
+        open: numeric_field(value, open_field)?,
+        high: numeric_field(value, high_field)?,
+        low: numeric_field(value, low_field)?,
+        close: numeric_field(value, close_field)?,
+        volume: numeric_field(value, volume_field).unwrap_or(0.0),
+        realtime: true,
+    };
+    valid_equity_bar(&bar).then_some(bar)
+}
+
+pub fn valid_equity_bar(bar: &Bar) -> bool {
+    bar.time > 0
+        && [bar.open, bar.high, bar.low, bar.close, bar.volume]
+            .into_iter()
+            .all(f64::is_finite)
+        && bar.open > 0.0
+        && bar.high > 0.0
+        && bar.low > 0.0
+        && bar.close > 0.0
+        && bar.volume >= 0.0
+        && bar.high >= bar.low
+        && bar.high >= bar.open
+        && bar.high >= bar.close
+        && bar.low <= bar.open
+        && bar.low <= bar.close
+}
+
+pub fn streamed_quote_from_value(value: &Value) -> Option<Quote> {
+    let symbol = value
+        .get("key")
+        .or_else(|| value.get("0"))?
+        .as_str()?
+        .to_owned();
+    let close = numeric_field(value, 12).unwrap_or(0.0);
+    let last = numeric_field(value, 3).or_else(|| numeric_field(value, 33))?;
+    let change = numeric_field(value, 18).unwrap_or(last - close);
+    let change_pct = numeric_field(value, 42).unwrap_or_else(|| {
+        if close == 0.0 {
+            0.0
+        } else {
+            change / close * 100.0
+        }
+    });
+    let timestamp_ms = integer_field(value, 34).unwrap_or_else(|| Utc::now().timestamp_millis());
+    Some(Quote {
+        provider: MarketDataProvider::Schwab,
+        symbol,
+        last,
+        bid: numeric_field(value, 1).unwrap_or(last),
+        ask: numeric_field(value, 2).unwrap_or(last),
+        change,
+        change_pct,
+        delayed: value
+            .get("delayed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        halted: value
+            .get("32")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status.eq_ignore_ascii_case("Halted")),
+        timestamp: chrono::DateTime::<Utc>::from_timestamp_millis(timestamp_ms)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339(),
+    })
+}
+
+fn instrument_from_value(value: &Value) -> Option<SymbolMeta> {
+    let mut asset_type = text(value, "assetType");
+    if asset_type.is_empty() {
+        asset_type = text(value, "assetMainType");
+    }
+    if !asset_type.eq_ignore_ascii_case("EQUITY") && !asset_type.eq_ignore_ascii_case("ETF") {
+        return None;
+    }
+    let symbol = text(value, "symbol").trim().to_uppercase();
+    if symbol.is_empty() {
+        return None;
+    }
+    Some(SymbolMeta {
+        provider: MarketDataProvider::Schwab,
+        symbol,
+        description: text(value, "description"),
+        exchange: normalize_equity_exchange(&text(value, "exchange")),
+        asset_type,
+        min_move: 0.01,
+        point_value: 1.0,
+        expiration: None,
+        root: None,
+        underlying: None,
+    })
+}
+
+fn normalize_equity_exchange(value: &str) -> String {
+    match value.trim().to_uppercase().as_str() {
+        "Q" => "NASDAQ".into(),
+        "N" => "NYSE".into(),
+        "A" => "AMEX".into(),
+        "P" => "ARCA".into(),
+        other => other.to_owned(),
+    }
+}
+
+fn history_bar_from_value(value: &Value) -> Option<Bar> {
+    Some(Bar {
+        time: integer_named(value, "datetime")?.div_euclid(1_000),
+        open: number_named(value, "open")?,
+        high: number_named(value, "high")?,
+        low: number_named(value, "low")?,
+        close: number_named(value, "close")?,
+        volume: number_named(value, "volume").unwrap_or(0.0),
+        realtime: false,
+    })
+}
+
+fn quote_from_value(symbol: &str, value: &Value) -> Option<Quote> {
+    let quote = value.get("quote")?;
+    let regular = value.get("regular").unwrap_or(&Value::Null);
+    let last = number_named(quote, "lastPrice")
+        .or_else(|| number_named(quote, "mark"))
+        .or_else(|| number_named(regular, "regularMarketLastPrice"))?;
+    let close = number_named(quote, "closePrice").unwrap_or(last);
+    let change = number_named(quote, "netChange").unwrap_or(last - close);
+    let timestamp_ms = integer_named(quote, "quoteTime")
+        .or_else(|| integer_named(quote, "tradeTime"))
+        .unwrap_or_else(|| Utc::now().timestamp_millis());
+    Some(Quote {
+        provider: MarketDataProvider::Schwab,
+        symbol: symbol.to_uppercase(),
+        last,
+        bid: number_named(quote, "bidPrice").unwrap_or(last),
+        ask: number_named(quote, "askPrice").unwrap_or(last),
+        change,
+        change_pct: number_named(quote, "netPercentChange").unwrap_or_else(|| {
+            if close == 0.0 {
+                0.0
+            } else {
+                change / close * 100.0
+            }
+        }),
+        delayed: value.get("realtime").and_then(Value::as_bool) == Some(false),
+        halted: quote
+            .get("securityStatus")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status.eq_ignore_ascii_case("Halted")),
+        timestamp: chrono::DateTime::<Utc>::from_timestamp_millis(timestamp_ms)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339(),
+    })
+}
+
+fn numeric_field(value: &Value, index: u8) -> Option<f64> {
+    value
+        .get(index.to_string())
+        .and_then(|item| item.as_f64().or_else(|| item.as_i64().map(|v| v as f64)))
+        .filter(|item| item.is_finite())
+}
+
+fn integer_field(value: &Value, index: u8) -> Option<i64> {
+    value
+        .get(index.to_string())
+        .and_then(|item| item.as_i64().or_else(|| item.as_f64().map(|v| v as i64)))
+}
+
+fn number_named(value: &Value, key: &str) -> Option<f64> {
+    value
+        .get(key)
+        .and_then(|item| item.as_f64().or_else(|| item.as_i64().map(|v| v as f64)))
+        .filter(|item| item.is_finite())
+}
+
+fn integer_named(value: &Value, key: &str) -> Option<i64> {
+    value
+        .get(key)
+        .and_then(|item| item.as_i64().or_else(|| item.as_f64().map(|v| v as i64)))
+}
+
+fn text(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn truncate(value: &str) -> String {
+    value.chars().take(500).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bar(time: i64, open: f64, high: f64, low: f64, close: f64, volume: f64) -> Bar {
+        Bar {
+            time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            realtime: true,
+        }
+    }
+
+    #[test]
+    fn aggregates_intraday_bars_without_losing_volume() {
+        let start = new_york_epoch(
+            NaiveDate::from_ymd_opt(2026, 7, 20)
+                .unwrap()
+                .and_hms_opt(9, 30, 0)
+                .unwrap(),
+        );
+        let result = aggregate_bars(
+            &[
+                bar(start, 10.0, 11.0, 9.0, 10.5, 100.0),
+                bar(start + 60, 10.5, 12.0, 10.0, 11.5, 125.0),
+            ],
+            "5m",
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].open, 10.0);
+        assert_eq!(result[0].high, 12.0);
+        assert_eq!(result[0].low, 9.0);
+        assert_eq!(result[0].close, 11.5);
+        assert_eq!(result[0].volume, 225.0);
+    }
+
+    #[test]
+    fn four_hour_buckets_follow_new_york_time_across_dst() {
+        let winter = Utc
+            .with_ymd_and_hms(2026, 1, 5, 14, 30, 0)
+            .unwrap()
+            .timestamp();
+        let summer = Utc
+            .with_ymd_and_hms(2026, 7, 20, 13, 30, 0)
+            .unwrap()
+            .timestamp();
+        for time in [winter, summer] {
+            let bucket = bucket_start(time, "4h").unwrap();
+            let local = new_york_local(bucket).unwrap();
+            assert_eq!((local.hour(), local.minute()), (8, 0));
+        }
+    }
+
+    #[test]
+    fn parses_sparse_stream_quote_fields() {
+        let quote = streamed_quote_from_value(&serde_json::json!({
+            "key":"AAPL", "delayed":false, "1":210.1, "2":210.2, "3":210.15,
+            "12":208.0, "18":2.15, "32":"Normal", "34":1_784_592_000_000_i64,
+            "42":1.03365
+        }))
+        .unwrap();
+        assert_eq!(quote.provider, MarketDataProvider::Schwab);
+        assert_eq!(quote.symbol, "AAPL");
+        assert!(!quote.delayed);
+        assert!(!quote.halted);
+    }
+
+    #[test]
+    fn parses_production_chart_equity_sequence_before_ohlcv() {
+        let bar = chart_bar_from_value(&serde_json::json!({
+            "key":"AAPL", "1":779, "2":324.35, "3":324.50,
+            "4":324.32, "5":324.50, "6":337,
+            "7":1_784_678_340_000_i64, "8":20_260_721
+        }))
+        .unwrap();
+        assert_eq!(bar.time, 1_784_678_340);
+        assert_eq!(bar.open, 324.35);
+        assert_eq!(bar.high, 324.50);
+        assert_eq!(bar.low, 324.32);
+        assert_eq!(bar.close, 324.50);
+        assert_eq!(bar.volume, 337.0);
+    }
+
+    #[test]
+    fn keeps_compatibility_with_documented_chart_equity_ohlcv_layout() {
+        let bar = chart_bar_from_value(&serde_json::json!({
+            "key":"AAPL", "1":324.35, "2":324.50, "3":324.32,
+            "4":324.50, "5":337, "6":779,
+            "7":1_784_678_340_000_i64, "8":20_260_721
+        }))
+        .unwrap();
+        assert_eq!(bar.open, 324.35);
+        assert_eq!(bar.high, 324.50);
+        assert_eq!(bar.low, 324.32);
+        assert_eq!(bar.close, 324.50);
+        assert_eq!(bar.volume, 337.0);
+    }
+
+    #[test]
+    fn accepts_equities_and_etfs_but_rejects_other_instruments() {
+        let equity = instrument_from_value(&serde_json::json!({
+            "symbol":"AAPL", "description":"Apple Inc", "assetType":"EQUITY", "exchange":"Q"
+        }))
+        .unwrap();
+        let etf = instrument_from_value(&serde_json::json!({
+            "symbol":"SPY", "description":"SPDR S&P 500 ETF", "assetType":"ETF", "exchange":"P"
+        }))
+        .unwrap();
+        assert_eq!(equity.symbol, "AAPL");
+        assert_eq!(etf.symbol, "SPY");
+        assert_eq!(etf.asset_type, "ETF");
+        assert_eq!(etf.exchange, "ARCA");
+        assert!(instrument_from_value(&serde_json::json!({
+            "symbol":"SPY  260821C00600000", "assetType":"OPTION"
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn rejects_sequence_shifted_candles_from_cache() {
+        assert!(!valid_equity_bar(&bar(
+            1_784_678_340,
+            779.0,
+            324.35,
+            324.50,
+            324.32,
+            324.50
+        )));
+    }
+
+    #[test]
+    fn out_of_order_minutes_and_replacements_are_normalized() {
+        let start = new_york_epoch(
+            NaiveDate::from_ymd_opt(2026, 7, 20)
+                .unwrap()
+                .and_hms_opt(9, 30, 0)
+                .unwrap(),
+        );
+        let result = aggregate_bars(
+            &[
+                bar(start + 60, 11.0, 12.0, 10.0, 11.5, 125.0),
+                bar(start, 10.0, 11.0, 9.0, 10.5, 100.0),
+                bar(start + 60, 11.0, 12.5, 10.0, 12.0, 130.0),
+            ],
+            "5m",
+        );
+        assert_eq!(result[0].open, 10.0);
+        assert_eq!(result[0].close, 12.0);
+        assert_eq!(result[0].high, 12.5);
+        assert_eq!(result[0].volume, 230.0);
+    }
+
+    #[test]
+    fn calendar_buckets_roll_in_new_york_time() {
+        let sunday = new_york_epoch(
+            NaiveDate::from_ymd_opt(2026, 7, 19)
+                .unwrap()
+                .and_hms_opt(20, 0, 0)
+                .unwrap(),
+        );
+        let monday = sunday + 12 * 3_600;
+        assert_ne!(bucket_start(sunday, "W"), bucket_start(monday, "W"));
+        let july = new_york_epoch(
+            NaiveDate::from_ymd_opt(2026, 7, 31)
+                .unwrap()
+                .and_hms_opt(20, 0, 0)
+                .unwrap(),
+        );
+        let august = july + 12 * 3_600;
+        assert_ne!(bucket_start(july, "M"), bucket_start(august, "M"));
+        assert_ne!(bucket_start(july, "D"), bucket_start(august, "D"));
+    }
+}

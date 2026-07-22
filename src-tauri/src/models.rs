@@ -1,5 +1,22 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum MarketDataProvider {
+    #[default]
+    Tradestation,
+    Schwab,
+}
+
+impl MarketDataProvider {
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Tradestation => "tradestation",
+            Self::Schwab => "schwab",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum TradingEnvironment {
@@ -37,6 +54,8 @@ pub struct Account {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SymbolMeta {
+    #[serde(default)]
+    pub provider: MarketDataProvider,
     pub symbol: String,
     pub description: String,
     pub exchange: String,
@@ -63,6 +82,8 @@ pub struct Bar {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Quote {
+    #[serde(default)]
+    pub provider: MarketDataProvider,
     pub symbol: String,
     pub last: f64,
     pub bid: f64,
@@ -204,6 +225,7 @@ pub struct AuthStatus {
 #[serde(rename_all = "camelCase")]
 pub struct BarSnapshotEvent {
     pub subscription_id: String,
+    pub provider: MarketDataProvider,
     pub environment: TradingEnvironment,
     pub symbol: String,
     pub timeframe: String,
@@ -215,6 +237,7 @@ pub struct BarSnapshotEvent {
 #[serde(rename_all = "camelCase")]
 pub struct BarUpdateEvent {
     pub subscription_id: String,
+    pub provider: MarketDataProvider,
     pub environment: TradingEnvironment,
     pub symbol: String,
     pub timeframe: String,
@@ -226,6 +249,7 @@ pub struct BarUpdateEvent {
 #[serde(rename_all = "camelCase")]
 pub struct QuoteUpdateEvent {
     pub subscription_id: String,
+    pub provider: MarketDataProvider,
     pub environment: TradingEnvironment,
     pub quote: Quote,
 }
@@ -234,6 +258,7 @@ pub struct QuoteUpdateEvent {
 #[serde(rename_all = "camelCase")]
 pub struct StreamStateEvent {
     pub subscription_id: String,
+    pub provider: MarketDataProvider,
     pub environment: TradingEnvironment,
     pub channel: String,
     pub state: String,

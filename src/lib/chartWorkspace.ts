@@ -2,8 +2,8 @@ import type { ChartLayout, ChartSplitRatios, ChartTabState, ChartWindowState, Dr
 import { normalizeEntryRules } from "./entryRules";
 import { normalizeEntryRuleAlerts, sameEntryRuleAlerts } from "./entryRuleAlerts";
 import { cloneEma200Alert, normalizeEma200Alert, sameEma200Alert } from "./emaAlerts";
-import { quoteSubscriptionSymbols } from "./futuresContracts";
-import { normalizeWatchlist } from "./watchlist";
+import { quoteSubscriptionInstruments } from "./futuresContracts";
+import { normalizeSymbolMeta, normalizeWatchlist } from "./watchlist";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./priceBasedCharts";
 import { isValidPositionDrawing } from "./positionDrawing";
@@ -249,7 +249,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       ...fallbackTab,
       ...tab,
       id,
-      symbol: { ...(tab.symbol ?? fallbackTab.symbol) },
+      symbol: normalizeSymbolMeta(tab.symbol) ?? { ...fallbackTab.symbol },
       indicators: normalizeIndicators(tab.indicators).map((indicator) => ({ ...indicator })),
       ema200Alert: normalizeEma200Alert(tab.ema200Alert),
       chartKind: ["candles", "line", "area", "renko", "point-and-figure"].includes(tab.chartKind) ? tab.chartKind : fallbackTab.chartKind,
@@ -314,7 +314,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   });
   const watchlist = normalizeWatchlist(
     Array.isArray(value.watchlist) ? value.watchlist : fallback.watchlist,
-    quoteSubscriptionSymbols({ tabs, watchlist: [] }),
+    quoteSubscriptionInstruments({ tabs, watchlist: [] }),
   );
   return {
     revision: typeof value.revision === "number" ? value.revision : 0,
@@ -396,7 +396,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
   const tabs = incoming.tabs.map((tab) => {
     const prior = currentTabs.get(tab.id);
     if (!prior) return tab;
-    const symbol = prior.symbol.symbol === tab.symbol.symbol
+    const symbol = prior.symbol.provider === tab.symbol.provider
+      && prior.symbol.symbol === tab.symbol.symbol
       && prior.symbol.description === tab.symbol.description
       && prior.symbol.exchange === tab.symbol.exchange
       && prior.symbol.assetType === tab.symbol.assetType

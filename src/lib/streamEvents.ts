@@ -1,7 +1,8 @@
-import type { ChartTabState, StreamStateEvent, Timeframe, TradingEnvironment } from "../types";
+import type { ChartTabState, MarketDataProvider, StreamStateEvent, Timeframe, TradingEnvironment } from "../types";
 
 export interface BarEventIdentity {
   subscriptionId: string;
+  provider: MarketDataProvider;
   environment: TradingEnvironment;
   symbol: string;
   timeframe: Timeframe;
@@ -9,16 +10,18 @@ export interface BarEventIdentity {
 }
 
 export interface BarMarketIdentity {
+  provider: MarketDataProvider;
   symbol: string;
   timeframe: Timeframe;
 }
 
 export function isSameBarMarket(
   market: BarMarketIdentity | undefined,
+  provider: MarketDataProvider,
   symbol: string,
   timeframe: Timeframe,
 ): boolean {
-  return market?.symbol === symbol && market.timeframe === timeframe;
+  return market?.provider === provider && market.symbol === symbol && market.timeframe === timeframe;
 }
 
 /**
@@ -44,7 +47,8 @@ export function acceptsBarEvent(
 ): boolean {
   return Boolean(tab)
     && event.subscriptionId === tab!.id
-    && event.environment === environment
+    && event.provider === tab!.symbol.provider
+    && (event.provider === "schwab" || event.environment === environment)
     && event.symbol === tab!.symbol.symbol
     && event.timeframe === tab!.timeframe
     && (expectedGeneration == null || event.generation === expectedGeneration);
