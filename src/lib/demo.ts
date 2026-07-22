@@ -1,4 +1,4 @@
-import type { Account, AccountBalance, Bar, OrderUpdate, Position, Quote, SymbolMeta } from "../types";
+import type { Account, AccountBalance, Bar, OptionChainSnapshot, OptionExpiration, OrderUpdate, Position, Quote, SymbolMeta } from "../types";
 
 export const futures: SymbolMeta[] = [
   { provider: "tradestation", symbol: "@MES", root: "MES", underlying: "MESU26", description: "Micro E-mini S&P 500 Continuous", exchange: "CME", assetType: "FUTURE", minMove: 0.25, pointValue: 5 },
@@ -50,4 +50,65 @@ export function quoteFor(symbol: string, offset = 0, provider: Quote["provider"]
   const last = symbol === "AAPL" ? 224.85 : symbol === "SPY" ? 632.14 : symbol.startsWith("MNQ") ? 23048.5 : symbol.startsWith("MCL") ? 68.42 : symbol.startsWith("MGC") ? 3478.2 : symbol.startsWith("MYM") ? 44982 : 6260 + offset;
   const move = symbol.charCodeAt(1) % 2 ? 0.42 : -0.18;
   return { provider, symbol, last, bid: last - (provider === "schwab" ? 0.01 : 0.25), ask: last + (provider === "schwab" ? 0.01 : 0.25), change: move * 10, changePct: move, delayed: false, halted: false, timestamp: new Date().toISOString() };
+}
+
+function nextFridays(count: number): string[] {
+  const date = new Date();
+  date.setUTCHours(0, 0, 0, 0);
+  const daysToFriday = (5 - date.getUTCDay() + 7) % 7;
+  date.setUTCDate(date.getUTCDate() + daysToFriday);
+  return Array.from({ length: count }, (_, index) => {
+    const expiration = new Date(date);
+    expiration.setUTCDate(expiration.getUTCDate() + index * 7);
+    return expiration.toISOString().slice(0, 10);
+  });
+}
+
+export function demoOptionExpirations(_symbol: string): OptionExpiration[] {
+  return nextFridays(8).map((expirationDate, index) => ({
+    expirationDate,
+    daysToExpiration: Math.max(0, Math.round((Date.parse(`${expirationDate}T20:00:00Z`) - Date.now()) / 86_400_000)),
+    expirationType: index === 3 || index === 7 ? "S" : "W",
+    standard: true,
+  }));
+}
+
+export function demoOptionChain(symbol: string, expirationDates: string[]): OptionChainSnapshot {
+  const spot = quoteFor(symbol, 0, "schwab").last;
+  const strikeStep = symbol === "SPY" ? 2 : 2.5;
+  const center = Math.round(spot / strikeStep) * strikeStep;
+  const contracts = expirationDates.flatMap((expirationDate, expirationIndex) => (
+    Array.from({ length: 31 }, (_, strikeIndex) => center + (strikeIndex - 15) * strikeStep).flatMap((strikePrice, strikeIndex) => (
+      (["CALL", "PUT"] as const).map((putCall) => {
+        const distance = Math.abs(strikeIndex - 15);
+        const gamma = 0.0015 + Math.exp(-(distance * distance) / 42) * (0.024 / (1 + expirationIndex * 0.34));
+        const sideBias = putCall === "CALL" ? 1 + Math.sin(strikeIndex * 0.71) * 0.18 : 1 + Math.cos(strikeIndex * 0.63) * 0.22;
+        const openInterest = Math.round((850 + (15 - Math.min(15, distance)) * 260 + ((strikeIndex * 173 + expirationIndex * 97) % 900)) * sideBias);
+        const compactDate = expirationDate.slice(2).replaceAll("-", "");
+        const strikeCode = String(Math.round(strikePrice * 1_000)).padStart(8, "0");
+        return {
+          symbol: `${symbol.padEnd(6, " ")}${compactDate}${putCall === "CALL" ? "C" : "P"}${strikeCode}`,
+          underlying: symbol,
+          putCall,
+          expirationDate,
+          strikePrice,
+          multiplier: 100,
+          gamma,
+          openInterest,
+          bidPrice: Math.max(0.01, Math.abs(spot - strikePrice) * 0.18 + 0.55),
+          askPrice: Math.max(0.02, Math.abs(spot - strikePrice) * 0.18 + 0.61),
+          markPrice: Math.max(0.015, Math.abs(spot - strikePrice) * 0.18 + 0.58),
+          totalVolume: (strikeIndex * 47 + expirationIndex * 83) % 1_500,
+          volatility: 0.18 + distance * 0.004,
+          delta: putCall === "CALL" ? Math.max(0.05, 0.5 - (strikePrice - spot) / 80) : Math.min(-0.05, -0.5 - (strikePrice - spot) / 80),
+          underlyingPrice: spot,
+          quoteTime: Date.now(),
+          delayed: false,
+          isMini: false,
+          isNonStandard: false,
+        };
+      })
+    ))
+  ));
+  return { symbol, underlyingPrice: spot, delayed: false, fetchedAt: new Date().toISOString(), contracts };
 }

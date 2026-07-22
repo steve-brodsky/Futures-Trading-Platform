@@ -6,7 +6,7 @@ import { canAddWatchlistSymbol, formatContractExpiration, hasOpenFuturesPosition
 
 const continuous: SymbolMeta = { provider: "tradestation", symbol: "@MES", root: "MES", underlying: "MESU26", description: "Continuous MES", exchange: "CME", assetType: "FUTURE", minMove: .25, pointValue: 5 };
 const instrument = (symbol: string): SymbolMeta => ({ ...continuous, symbol, root: undefined, underlying: undefined });
-const tab = (symbol: SymbolMeta, tradeContract?: string): ChartTabState => ({ id: symbol.symbol, symbol, tradeContract, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false });
+const tab = (symbol: SymbolMeta, tradeContract?: string): ChartTabState => ({ id: symbol.symbol, symbol, tradeContract, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net" } });
 const position = (symbol: string, quantity = 1): Position => ({ id: symbol, symbol, side: "Long", quantity, averagePrice: 100, last: 101, unrealizedPnl: 1 });
 
 describe("futures trade-contract resolution", () => {

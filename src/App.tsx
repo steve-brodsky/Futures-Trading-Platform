@@ -34,12 +34,13 @@ import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryD
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
 import { isTargetOutside } from "./lib/menuFocus";
 import { defaultIndicators } from "./lib/workspace";
+import { allocateGexStreamBudgets, calculateGexLevels, defaultGexSelection, formatGex, normalizeGexSelection, prioritizeOptionContracts, resolveGexExpirations, type GexLevel } from "./lib/gex";
 import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndFigureSettings, normalizeRenkoSettings } from "./lib/priceBasedCharts";
 import { instrumentKey, rememberRecentSymbol, reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartTool, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartTool, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -70,9 +71,9 @@ const newYorkClock = new Intl.DateTimeFormat("en-US", {
 const defaultWorkspace: WorkspaceState = {
   revision: 0,
   environment: "sim",
-  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
+  tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net" } }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
-  drawings: {},
+  drawings: {}, gexSelections: {},
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
   settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
@@ -164,6 +165,14 @@ function formatPrice(value?: number): string {
   return value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
 }
 
+function supportsGex(symbol: SymbolMeta): boolean {
+  return symbol.provider === "schwab" && ["EQUITY", "ETF"].includes(symbol.assetType.toUpperCase());
+}
+
+function gexStatusLabel(status: GexMarketStatus): string {
+  return ({ loading: "Loading", live: "Live", hybrid: "Hybrid", "rest-only": "REST only", delayed: "Delayed", stale: "Stale", error: "Error" })[status];
+}
+
 async function syncWorkspaceToOpenWindows(workspace: WorkspaceState): Promise<void> {
   await Promise.all(workspace.windows.map((window) => emitTo(window.id, "workspace-sync", workspace).catch(() => undefined)));
 }
@@ -227,6 +236,25 @@ function TradeStationCredentials({ clientId, secret, busy, configured, native, s
   </>;
 }
 
+type GexMarketStatus = "loading" | "live" | "hybrid" | "rest-only" | "delayed" | "stale" | "error";
+
+interface GexMarketState {
+  symbol: string;
+  expirations: OptionExpiration[];
+  selectedDates: string[];
+  contracts: Record<string, OptionContract>;
+  underlyingPrice: number;
+  delayed: boolean;
+  fetchedAt?: string;
+  lastUpdate?: number;
+  status: GexMarketStatus;
+  message?: string;
+}
+
+interface GexMarketSyncEvent {
+  markets: Record<string, GexMarketState>;
+}
+
 function SchwabCredentials({ clientId, secret, busy, configured, connected, native, onClientIdChange, onSecretChange, onSave, onConnect, onDisconnect }: {
   clientId: string;
   secret: string;
@@ -279,6 +307,11 @@ function TradingApp() {
   const entryRuleTabSignalsRef = useRef(entryRuleTabSignals);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const quotesRef = useRef(quotes);
+  const [gexMarkets, setGexMarkets] = useState<Record<string, GexMarketState>>({});
+  const gexMarketsRef = useRef(gexMarkets);
+  const [gexCoverage, setGexCoverage] = useState<Record<string, number>>({});
+  const gexCoverageRef = useRef(gexCoverage);
+  const gexStreamSubscriptionsRef = useRef(new Map<string, string>());
   const [orderProjection, setOrderProjection] = useState<(OrderProjection & { tradeSymbol?: string }) | null>(null);
   const [orderTicketResetEpochs, setOrderTicketResetEpochs] = useState<Record<string, number>>({});
   const [tradeDetails, setTradeDetails] = useState<Record<string, SymbolMeta>>({});
@@ -399,6 +432,8 @@ function TradingApp() {
   tabMarketsRef.current = tabMarkets;
   vwapMarketsRef.current = vwapMarkets;
   quotesRef.current = quotes;
+  gexMarketsRef.current = gexMarkets;
+  gexCoverageRef.current = gexCoverage;
   entryRuleTabSignalsRef.current = entryRuleTabSignals;
 
   const activeQuote = quotes[instrumentKey(activeTab.symbol)] ?? (api.isNative
@@ -418,6 +453,25 @@ function TradingApp() {
   const quoteInstruments = quoteSubscriptionInstruments(workspace);
   const quoteSymbolsKey = quoteInstruments.map(instrumentKey).join("|");
   const vwapSymbolsKey = nySessionVwapSymbols(workspace.tabs).join("|");
+  const enabledGexSymbols = [...new Set(workspace.tabs
+    .filter((tab) => tab.gex.enabled && supportsGex(tab.symbol))
+    .map((tab) => tab.symbol.symbol.toUpperCase()))].sort();
+  const gexRequestsKey = enabledGexSymbols.map((symbol) => {
+    const selection = normalizeGexSelection(workspace.gexSelections[symbol] ?? defaultGexSelection());
+    return `${symbol}:${selection.mode}:${selection.expirationDates.join(",")}`;
+  }).join("|");
+  const visibleGexSymbols = [...new Set(workspace.windows.flatMap((window) => {
+    const layout = normalizedChartLayout(window.chartLayout);
+    const visible = (window.visibleTabIds ?? [window.activeTabId]).slice(0, chartLayoutCapacity(layout));
+    return visible.flatMap((tabId) => {
+      const tab = workspace.tabs.find((item) => item.id === tabId);
+      return tab?.gex.enabled && supportsGex(tab.symbol) ? [tab.symbol.symbol.toUpperCase()] : [];
+    });
+  }))].sort();
+  const gexStreamPlanKey = visibleGexSymbols.map((symbol) => {
+    const market = gexMarkets[symbol];
+    return `${symbol}:${market?.fetchedAt ?? ""}:${market ? Object.keys(market.contracts).length : 0}`;
+  }).join("|");
   const ema200Positions = useMemo(() => deriveEma200TabPositions(
     workspace.tabs,
     tabMarkets,
@@ -695,6 +749,36 @@ function TradingApp() {
         if (payload.provider === "tradestation" && payload.environment !== environmentRef.current) return;
         setQuotes((current) => ({ ...current, [instrumentKey(payload.quote)]: { ...payload.quote, receivedAt: Date.now() } }));
       }).then((unlisten) => cleanups.push(unlisten));
+      listen<OptionUpdateEvent>("option-update", ({ payload }) => {
+        setGexMarkets((current) => {
+          let changed = false;
+          const next = { ...current };
+          Object.entries(current).forEach(([symbol, market]) => {
+            const existing = market.contracts[payload.contract.symbol];
+            if (!existing) return;
+            changed = true;
+            next[symbol] = {
+              ...market,
+              contracts: { ...market.contracts, [payload.contract.symbol]: { ...existing, ...payload.contract, isMini: existing.isMini, isNonStandard: existing.isNonStandard, delayed: existing.delayed } },
+              lastUpdate: Date.now(),
+            };
+          });
+          return changed ? next : current;
+        });
+      }).then((unlisten) => cleanups.push(unlisten));
+      listen<OptionStreamStateEvent>("option-stream-state", ({ payload }) => {
+        setGexMarkets((current) => {
+          const market = current[payload.symbol];
+          if (!market) return current;
+          const covered = gexCoverageRef.current[payload.symbol] ?? 0;
+          const status: GexMarketStatus = payload.state === "streaming"
+            ? market.delayed ? "delayed" : covered >= Object.keys(market.contracts).length ? "live" : "hybrid"
+            : payload.state === "rest-only" ? "rest-only"
+              : payload.state === "stale" || payload.state === "reconnecting" ? "stale"
+                : market.status;
+          return { ...current, [payload.symbol]: { ...market, status, message: payload.message } };
+        });
+      }).then((unlisten) => cleanups.push(unlisten));
       listen<StreamStateEvent>("stream-state", ({ payload }) => {
         if (!isBarStateEvent(payload)) return;
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
@@ -782,6 +866,7 @@ function TradingApp() {
       void (async () => {
         await emitTo(payload.windowId, "workspace-sync", workspaceRef.current).catch(() => undefined);
         await emitTo(payload.windowId, "window-market-sync", marketSyncForWindow(payload.windowId)).catch(() => undefined);
+        await emitTo(payload.windowId, "gex-market-sync", { markets: gexMarketsRef.current } satisfies GexMarketSyncEvent).catch(() => undefined);
         const signals = Object.entries(entryRuleTabSignalsRef.current).map(([tabId, signal]) => ({
           tabId, symbol: signal.symbol, timeframe: signal.timeframe, sides: signal.sides,
         }));
@@ -815,6 +900,9 @@ function TradingApp() {
       });
       setQuotes((current) => ({ ...current, ...payload.quotes }));
     }).then((unlisten) => cleanups.push(unlisten));
+    listen<GexMarketSyncEvent>("gex-market-sync", ({ payload }) => {
+      if (currentWindowId !== MAIN_WINDOW_ID) setGexMarkets(payload.markets);
+    }).then((unlisten) => cleanups.push(unlisten));
     if (api.isNative) {
       listen<EntryRuleTabSignalEvent>("entry-rule-tab-signal", ({ payload }) => applyEntryRuleTabSignal(payload))
         .then((unlisten) => cleanups.push(unlisten));
@@ -843,6 +931,109 @@ function TradingApp() {
   useEffect(() => {
     if (workspaceLoaded && currentWindowId !== MAIN_WINDOW_ID) emitTo(MAIN_WINDOW_ID, "workspace-window-ready", { windowId: currentWindowId }).catch(() => undefined);
   }, [workspaceLoaded]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    let cancelled = false;
+    const wanted = new Set(enabledGexSymbols);
+    const publishMarkets = (next: Record<string, GexMarketState>) => {
+      gexMarketsRef.current = next;
+      setGexMarkets(next);
+      if (api.isNative) workspaceRef.current.windows
+        .filter((window) => window.id !== MAIN_WINDOW_ID)
+        .forEach((window) => { void emitTo(window.id, "gex-market-sync", { markets: next } satisfies GexMarketSyncEvent).catch(() => undefined); });
+    };
+    const updateMarket = (symbol: string, update: (current?: GexMarketState) => GexMarketState) => {
+      if (cancelled) return;
+      publishMarkets({ ...gexMarketsRef.current, [symbol]: update(gexMarketsRef.current[symbol]) });
+    };
+    const refresh = async (symbol: string, initial: boolean) => {
+      const existing = gexMarketsRef.current[symbol];
+      if (initial && !existing?.contracts) updateMarket(symbol, () => ({
+        symbol, expirations: [], selectedDates: [], contracts: {}, underlyingPrice: 0, delayed: false, status: "loading",
+      }));
+      try {
+        const expirations = await api.optionExpirations(symbol);
+        if (cancelled || !wanted.has(symbol)) return;
+        const selection = normalizeGexSelection(workspaceRef.current.gexSelections[symbol] ?? defaultGexSelection());
+        const selectedDates = resolveGexExpirations(expirations, selection);
+        if (!selectedDates.length) throw new Error(`${symbol} has no standard, unexpired option expirations.`);
+        if (selection.mode === "custom" && !selection.expirationDates.some((date) => selectedDates.includes(date))) {
+          commitWorkspace((current) => ({
+            ...current,
+            gexSelections: { ...current.gexSelections, [symbol]: defaultGexSelection() },
+          }));
+        }
+        const snapshot = await api.optionChain(symbol, selectedDates);
+        if (cancelled || !wanted.has(symbol)) return;
+        const contracts = Object.fromEntries(snapshot.contracts.map((contract) => [contract.symbol, contract]));
+        updateMarket(symbol, (current) => ({
+          symbol,
+          expirations,
+          selectedDates,
+          contracts,
+          underlyingPrice: snapshot.underlyingPrice,
+          delayed: snapshot.delayed,
+          fetchedAt: snapshot.fetchedAt,
+          lastUpdate: Date.now(),
+          status: snapshot.delayed ? "delayed" : current && ["live", "hybrid"].includes(current.status) ? current.status : "rest-only",
+          message: snapshot.contracts.length ? undefined : "The selected expirations returned no standard contracts.",
+        }));
+      } catch (error) {
+        updateMarket(symbol, (current) => current && Object.keys(current.contracts).length
+          ? { ...current, status: "stale", message: String(error) }
+          : { symbol, expirations: current?.expirations ?? [], selectedDates: current?.selectedDates ?? [], contracts: current?.contracts ?? {}, underlyingPrice: current?.underlyingPrice ?? 0, delayed: current?.delayed ?? false, status: "error", message: String(error) });
+      }
+    };
+
+    const retained = Object.fromEntries(Object.entries(gexMarketsRef.current).filter(([symbol]) => wanted.has(symbol)));
+    if (Object.keys(retained).length !== Object.keys(gexMarketsRef.current).length) publishMarkets(retained);
+    enabledGexSymbols.forEach((symbol) => { void refresh(symbol, true); });
+    const timer = window.setInterval(() => enabledGexSymbols.forEach((symbol) => { void refresh(symbol, false); }), 5 * 60_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [workspaceLoaded, gexRequestsKey, schwabAuthEpoch]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    const budgets = allocateGexStreamBudgets(visibleGexSymbols, activeTab.gex.enabled ? activeTab.symbol.symbol : undefined, 100);
+    const nextSubscriptions = new Map<string, string>();
+    const nextCoverage: Record<string, number> = {};
+    visibleGexSymbols.forEach((symbol) => {
+      const market = gexMarketsRef.current[symbol];
+      if (!market) return;
+      const contractSymbols = prioritizeOptionContracts(Object.values(market.contracts), budgets[symbol] ?? 0);
+      nextCoverage[symbol] = contractSymbols.length;
+      const subscriptionId = `gex:${symbol}`;
+      const signature = `${schwabAuthEpoch}:${contractSymbols.join("|")}`;
+      nextSubscriptions.set(subscriptionId, signature);
+      if (gexStreamSubscriptionsRef.current.get(subscriptionId) === signature) return;
+      gexStreamSubscriptionsRef.current.set(subscriptionId, signature);
+      void api.startOptionStream(subscriptionId, symbol, contractSymbols).then(() => {
+        setGexMarkets((current) => {
+          const item = current[symbol];
+          if (!item) return current;
+          const status: GexMarketStatus = item.delayed ? "delayed" : contractSymbols.length >= Object.keys(item.contracts).length ? "live" : contractSymbols.length ? "hybrid" : "rest-only";
+          return { ...current, [symbol]: { ...item, status, message: undefined } };
+        });
+      }).catch((error) => {
+        setGexMarkets((current) => current[symbol]
+          ? { ...current, [symbol]: { ...current[symbol], status: "rest-only", message: String(error) } }
+          : current);
+      });
+    });
+    gexStreamSubscriptionsRef.current.forEach((_signature, subscriptionId) => {
+      if (nextSubscriptions.has(subscriptionId)) return;
+      gexStreamSubscriptionsRef.current.delete(subscriptionId);
+      void api.stopOptionStream(subscriptionId);
+    });
+    gexCoverageRef.current = nextCoverage;
+    setGexCoverage(nextCoverage);
+  }, [workspaceLoaded, gexStreamPlanKey, activeTab.id, schwabAuthEpoch]);
+
+  useEffect(() => () => {
+    gexStreamSubscriptionsRef.current.forEach((_signature, subscriptionId) => { void api.stopOptionStream(subscriptionId); });
+    gexStreamSubscriptionsRef.current.clear();
+  }, []);
 
   const selectedAccount = accounts.find((account) => account.id === workspace.selectedAccountId) ?? accounts[0];
   selectedAccountIdRef.current = selectedAccount?.id;
@@ -1951,6 +2142,32 @@ function TradingApp() {
     updateActiveTab({ indicators: activeTab.indicators.map((indicator) => indicator.id === id ? { ...indicator, ...patch } : indicator) });
   }
 
+  function updateGexTab(patch: Partial<ChartTabState["gex"]>) {
+    updateActiveTab({ gex: { ...activeTab.gex, ...patch } });
+  }
+
+  function updateGexExpirationMode(mode: GexExpirationMode) {
+    const symbol = activeTab.symbol.symbol.toUpperCase();
+    commitWorkspace((current) => ({
+      ...current,
+      gexSelections: { ...current.gexSelections, [symbol]: { mode, expirationDates: mode === "custom" ? current.gexSelections[symbol]?.expirationDates ?? [] : [] } },
+    }));
+  }
+
+  function toggleGexExpiration(expirationDate: string) {
+    const symbol = activeTab.symbol.symbol.toUpperCase();
+    commitWorkspace((current) => {
+      const saved = normalizeGexSelection(current.gexSelections[symbol] ?? defaultGexSelection());
+      const expirationDates = saved.expirationDates.includes(expirationDate)
+        ? saved.expirationDates.filter((date) => date !== expirationDate)
+        : [...saved.expirationDates, expirationDate].sort();
+      return {
+        ...current,
+        gexSelections: { ...current.gexSelections, [symbol]: expirationDates.length ? { mode: "custom", expirationDates } : defaultGexSelection() },
+      };
+    });
+  }
+
   function updateTimeframeAlert(timeframe: Timeframe, patch: Partial<TimeframeAlertConfig>) {
     updateActiveTab({ ema200Alert: { ...activeTab.ema200Alert, [timeframe]: { ...activeTab.ema200Alert[timeframe], ...patch } } });
   }
@@ -2555,6 +2772,13 @@ function TradingApp() {
     : null;
   const activeRoot = activeTab.symbol.root;
   const activeContracts = activeRoot ? contractChoices[activeRoot] ?? [] : [];
+  const activeGexSupported = supportsGex(activeTab.symbol);
+  const activeGexMarket = activeGexSupported ? gexMarkets[activeTab.symbol.symbol] : undefined;
+  const activeGexSelection = normalizeGexSelection(workspace.gexSelections[activeTab.symbol.symbol] ?? defaultGexSelection());
+  const activeGexSelectedDates = activeGexMarket?.selectedDates ?? resolveGexExpirations(activeGexMarket?.expirations ?? [], activeGexSelection);
+  const activeGexContractCount = activeGexMarket ? Object.keys(activeGexMarket.contracts).length : 0;
+  const activeGexCoverage = gexCoverage[activeTab.symbol.symbol] ?? 0;
+  const activeGexStatus = activeGexMarket ? gexStatusLabel(activeGexMarket.status) : activeTab.gex.enabled ? "Loading" : "Off";
   const tradeContractStatus = !activeContinuous ? undefined
     : !activeTradeSymbol ? "Auto unavailable: TradeStation did not return an underlying contract."
     : tradeDetailErrors[activeTradeSymbol] ? `Contract details unavailable for ${activeTradeSymbol}.`
@@ -2589,6 +2813,13 @@ function TradingApp() {
       ? { provider: tab.symbol.provider, symbol: tabQuoteSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
       : quoteFor(tabQuoteSymbol, 0, tab.symbol.provider));
     const focused = tab.id === activeTab.id;
+    const gexMarket = tab.gex.enabled && supportsGex(tab.symbol) ? gexMarkets[tab.symbol.symbol] : undefined;
+    const gexSpot = tabTradeQuote.last > 0 ? tabTradeQuote.last : gexMarket?.underlyingPrice ?? 0;
+    const gexCalculation = gexMarket ? calculateGexLevels(Object.values(gexMarket.contracts), gexSpot, gexMarket.selectedDates) : undefined;
+    const gexIsStale = Boolean(gexMarket?.fetchedAt && currentTime - Date.parse(gexMarket.fetchedAt) > 10 * 60_000);
+    const gexDisplayStatus = gexMarket
+      ? `${gexStatusLabel(gexIsStale ? "stale" : gexMarket.status)}${Object.keys(gexMarket.contracts).length ? ` · ${gexCoverage[tab.symbol.symbol] ?? 0}/${Object.keys(gexMarket.contracts).length}` : ""}`
+      : tab.gex.enabled && supportsGex(tab.symbol) ? "Loading" : undefined;
     return <TradingChart
       ref={(handle) => { if (handle) chartCaptureRefs.current.set(tab.id, handle); else chartCaptureRefs.current.delete(tab.id); }}
       bars={tabMarket.bars}
@@ -2608,6 +2839,10 @@ function TradingApp() {
       chartLabelSettings={workspace.settings.chartLabels}
       timeframe={tab.timeframe}
       indicators={tab.indicators}
+      gexLevels={gexCalculation?.levels ?? []}
+      gexView={tab.gex.view}
+      gexStatus={gexDisplayStatus}
+      gexExpirationCount={gexMarket?.selectedDates.length ?? 0}
       orders={orders}
       positions={positions}
       orderProjection={focused ? activeOrderProjection : undefined}
@@ -2682,10 +2917,19 @@ function TradingApp() {
       </div>
       <div className="toolbar-popover-anchor">
         <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => { setAlertOpen(false); setChartStyleOpen(false); setIndicatorOpen((value) => !value); }}><SlidersHorizontal size={16} />Indicators</button>
-        {indicatorOpen && <div className="popover indicator-popover"><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible && (i.kind !== "VWAP" || (activeTab.chartKind !== "renko" && activeTab.chartKind !== "point-and-figure"))).length} active</span></header>{activeTab.indicators.map((indicator) => {
+        {indicatorOpen && <div className={`popover indicator-popover ${activeGexSupported ? "with-gex" : ""}`}><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible && (i.kind !== "VWAP" || (activeTab.chartKind !== "renko" && activeTab.chartKind !== "point-and-figure"))).length + (activeGexSupported && activeTab.gex.enabled ? 1 : 0)} active</span></header>{activeTab.indicators.map((indicator) => {
           const unavailable = indicator.kind === "VWAP" && (activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure");
           return <div key={indicator.id} className={`indicator-row ${unavailable ? "unavailable" : ""}`}><label className="indicator-color" title={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`}><input type="color" value={indicator.color} disabled={unavailable} aria-label={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" disabled={unavailable} aria-pressed={unavailable ? false : indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind === "VWAP" ? "NY Session VWAP" : indicator.kind}</strong><small>{unavailable ? "Time-based charts only" : indicator.kind === "VWAP" ? isIntradayTimeframe(activeTab.timeframe) ? "9:30 AM–4:00 PM ET" : "Intraday only" : `${activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure" ? "Synthetic" : "Source"} length ${indicator.period}`}</small></span><span className={`toggle ${!unavailable && indicator.visible ? "on" : ""}`} /></button></div>;
-        })}</div>}
+        })}{activeGexSupported && <section className={`gex-settings ${activeTab.gex.enabled ? "enabled" : ""}`} aria-label="Gamma exposure settings">
+          <button className="gex-toggle-button" type="button" aria-pressed={activeTab.gex.enabled} onClick={() => updateGexTab({ enabled: !activeTab.gex.enabled })}><span className="gex-swatch"><i /><i /></span><span><strong>Gamma Exposure</strong><small>{activeTab.gex.enabled ? `${activeGexStatus}${activeGexContractCount ? ` · ${activeGexCoverage}/${activeGexContractCount} live` : ""}` : "Schwab option chain"}</small></span><span className={`toggle ${activeTab.gex.enabled ? "on" : ""}`} /></button>
+          {activeTab.gex.enabled && <div className="gex-controls">
+            <div className="gex-segmented" role="group" aria-label="GEX display mode"><button type="button" className={activeTab.gex.view === "net" ? "active" : ""} aria-pressed={activeTab.gex.view === "net"} onClick={() => updateGexTab({ view: "net" })}>Net</button><button type="button" className={activeTab.gex.view === "calls-puts" ? "active" : ""} aria-pressed={activeTab.gex.view === "calls-puts"} onClick={() => updateGexTab({ view: "calls-puts" })}>Calls / Puts</button></div>
+            <div className="gex-presets" role="group" aria-label="GEX expiration preset">{([ ["front", "Front"], ["next-four", "Next 4"], ["all", "All"] ] as Array<[GexExpirationMode, string]>).map(([mode, label]) => <button key={mode} type="button" className={activeGexSelection.mode === mode ? "active" : ""} aria-pressed={activeGexSelection.mode === mode} onClick={() => updateGexExpirationMode(mode)}>{label}</button>)}</div>
+            {activeGexMarket?.expirations.length ? <div className="gex-expiration-list" aria-label="Option expirations">{activeGexMarket.expirations.map((expiration) => <label key={expiration.expirationDate}><input type="checkbox" checked={activeGexSelectedDates.includes(expiration.expirationDate)} onChange={() => toggleGexExpiration(expiration.expirationDate)} /><span><strong>{new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(new Date(`${expiration.expirationDate}T12:00:00Z`))}</strong><small>{expiration.daysToExpiration === 0 ? "0DTE" : `${expiration.daysToExpiration} DTE`} · {expiration.expirationType}</small></span></label>)}</div>
+              : <div className="gex-loading-line">{activeGexMarket?.message ?? "Loading expirations…"}</div>}
+            <footer><span>{activeGexSelectedDates.length} expiration{activeGexSelectedDates.length === 1 ? "" : "s"}</span><span>{activeGexMarket?.fetchedAt ? `Updated ${new Date(activeGexMarket.fetchedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : activeGexStatus}</span></footer>
+          </div>}
+        </section>}</div>}
       </div>
       {!isDetached && <div className="toolbar-popover-anchor">
         <button className={`text-tool-button alert-tool-button ${alertOpen || activeAlertCount > 0 ? "active" : ""}`} aria-pressed={activeAlertCount > 0} title={`${activeAlertCount} EMA 200 alert timeframe${activeAlertCount === 1 ? "" : "s"} active`} onClick={() => { prepareAlertAudio(); setIndicatorOpen(false); setChartStyleOpen(false); setAlertOpen((value) => !value); }}><Bell size={16} fill={activeAlertCount > 0 ? "currentColor" : "none"} /><span className="tool-label">Alert</span></button>

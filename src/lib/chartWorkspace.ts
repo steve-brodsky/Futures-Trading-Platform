@@ -5,6 +5,7 @@ import { cloneEma200Alert, normalizeEma200Alert, sameEma200Alert } from "./emaAl
 import { quoteSubscriptionInstruments } from "./futuresContracts";
 import { normalizeRecentSymbols, normalizeSymbolMeta, normalizeWatchlist } from "./watchlist";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
+import { normalizeGexSelection, normalizeGexTabSettings } from "./gex";
 import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./priceBasedCharts";
 import { isValidPositionDrawing } from "./positionDrawing";
 
@@ -219,6 +220,7 @@ export function cloneChartTab(tab: ChartTabState, id: string): ChartTabState {
     ema200Alert: cloneEma200Alert(tab.ema200Alert),
     renkoSettings: { ...tab.renkoSettings },
     pointAndFigureSettings: { ...tab.pointAndFigureSettings },
+    gex: { ...tab.gex },
   };
 }
 
@@ -238,6 +240,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       ema200Alert: normalizeEma200Alert(value.ema200Alert),
       chartTimezone: value.chartTimezone ?? fallbackTab.chartTimezone,
       magnetEnabled: normalizeMagnetEnabled(value.magnetEnabled),
+      gex: normalizeGexTabSettings(value.gex),
     }];
   const seen = new Set<string>();
   const tabs = sourceTabs.map((tab, index) => {
@@ -257,6 +260,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       pointAndFigureSettings: normalizePointAndFigureSettings(tab.pointAndFigureSettings),
       chartTimezone: tab.chartTimezone ?? "exchange",
       magnetEnabled: normalizeMagnetEnabled(tab.magnetEnabled),
+      gex: normalizeGexTabSettings(tab.gex),
       tradeContract: typeof tab.tradeContract === "string" && tab.tradeContract.trim() && !tab.tradeContract.trim().startsWith("@")
         ? tab.tradeContract.trim().toUpperCase()
         : undefined,
@@ -304,6 +308,10 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       : { ...item, locked: item.locked === true, lineWidth: [1, 2, 3, 4].includes(item.lineWidth ?? 1) ? item.lineWidth ?? 1 : 1, points: item.points.map((point) => ({ ...point })) });
     return valid.length ? [[symbol, valid]] : [];
   }));
+  const gexSelections = Object.fromEntries(Object.entries(value.gexSelections ?? fallback.gexSelections ?? {}).flatMap(([symbol, selection]) => {
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    return normalizedSymbol ? [[normalizedSymbol, normalizeGexSelection(selection)]] : [];
+  }));
   const savedChartLabels = value.settings?.chartLabels;
   const savedOrderTicket = value.settings?.orderTicket;
   const savedJournal = value.settings?.journal;
@@ -334,6 +342,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     watchlist,
     recentSymbols,
     drawings,
+    gexSelections,
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
     bottomTab: (legacyBottomTab ?? fallback.bottomTab) as WorkspaceState["bottomTab"],
     bottomPanelOpen: value.bottomPanelOpen ?? fallback.bottomPanelOpen,

@@ -9,10 +9,11 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::{models::Quote, schwab, schwab::Schwab, AppError};
+use crate::{models::{OptionContract, Quote}, schwab, schwab::Schwab, AppError};
 
 const EQUITY_FIELDS: &str = "0,1,2,3,8,12,18,32,33,34,42";
 const CHART_FIELDS: &str = "0,1,2,3,4,5,6,7,8";
+const OPTION_FIELDS: &str = "0,2,3,8,9,10,12,13,20,21,22,23,26,27,28,29,33,35,37,38,39";
 
 #[derive(Clone, Debug)]
 pub enum SchwabStreamEvent {
@@ -25,12 +26,18 @@ pub enum SchwabStreamEvent {
         symbol: String,
         bar: crate::models::Bar,
     },
+    Option(OptionContract),
+    OptionState {
+        state: String,
+        message: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct DesiredSubscriptions {
     charts: BTreeSet<String>,
     quotes: BTreeSet<String>,
+    options: BTreeSet<String>,
 }
 
 struct Inner {
@@ -96,6 +103,17 @@ impl SchwabStreamer {
         let mut desired = self.inner.desired.write().await;
         if desired.quotes != next {
             desired.quotes = next;
+            drop(desired);
+            self.ensure_running().await;
+            self.inner.changed.notify_one();
+        }
+    }
+
+    pub async fn set_option_symbols(&self, symbols: impl IntoIterator<Item = String>) {
+        let next = normalize_symbols(symbols);
+        let mut desired = self.inner.desired.write().await;
+        if desired.options != next {
+            desired.options = next;
             drop(desired);
             self.ensure_running().await;
             self.inner.changed.notify_one();
@@ -249,6 +267,7 @@ async fn connect_once(inner: Arc<Inner>) -> Result<(), AppError> {
     let timeout = tokio::time::sleep(Duration::from_secs(60));
     tokio::pin!(timeout);
     let mut quote_state = HashMap::new();
+    let mut option_state = HashMap::new();
     loop {
         tokio::select! {
             _ = &mut timeout => return Err(AppError::Api("Schwab Streamer heartbeat timed out".into())),
@@ -262,7 +281,7 @@ async fn connect_once(inner: Arc<Inner>) -> Result<(), AppError> {
                     .map_err(|error| AppError::Api(format!("Schwab Streamer error: {error}")))?;
                 timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(60));
                 match message {
-                    Message::Text(text) => process_message(&inner, text.as_ref(), &mut quote_state)?,
+                    Message::Text(text) => process_message(&inner, text.as_ref(), &mut quote_state, &mut option_state)?,
                     Message::Ping(payload) => write.send(Message::Pong(payload)).await.map_err(|error| AppError::Api(error.to_string()))?,
                     Message::Close(_) => return Err(AppError::Api("Schwab Streamer closed".into())),
                     _ => {}
@@ -333,6 +352,31 @@ where
             .await
             .map_err(|error| AppError::Api(error.to_string()))?;
     }
+    if previous.options != next.options {
+        *request_id += 1;
+        let (command, keys) = if next.options.is_empty() {
+            (
+                "UNSUBS",
+                previous.options.iter().cloned().collect::<Vec<_>>(),
+            )
+        } else {
+            ("SUBS", next.options.iter().cloned().collect::<Vec<_>>())
+        };
+        write
+            .send(Message::Text(
+                request(
+                    info,
+                    *request_id,
+                    "LEVELONE_OPTIONS",
+                    command,
+                    json!({"keys":keys.join(","),"fields":OPTION_FIELDS}),
+                )
+                .to_string()
+                .into(),
+            ))
+            .await
+            .map_err(|error| AppError::Api(error.to_string()))?;
+    }
     Ok(())
 }
 
@@ -340,8 +384,28 @@ fn process_message(
     inner: &Inner,
     text: &str,
     quote_state: &mut HashMap<String, Value>,
+    option_state: &mut HashMap<String, Value>,
 ) -> Result<(), AppError> {
     let value: Value = serde_json::from_str(text)?;
+    for response in value
+        .get("response")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if response.get("service").and_then(Value::as_str) != Some("LEVELONE_OPTIONS") {
+            continue;
+        }
+        let code = response.pointer("/content/code").and_then(Value::as_i64).unwrap_or(-1);
+        let message = response
+            .pointer("/content/msg")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let _ = inner.events.send(SchwabStreamEvent::OptionState {
+            state: if code == 0 { "streaming" } else if code == 19 { "rest-only" } else { "error" }.into(),
+            message,
+        });
+    }
     for data in value
         .get("data")
         .and_then(Value::as_array)
@@ -376,11 +440,35 @@ fn process_message(
                         let _ = inner.events.send(SchwabStreamEvent::Chart { symbol, bar });
                     }
                 }
+                "LEVELONE_OPTIONS" => {
+                    if let Some(option) = merge_sparse_option(option_state, content) {
+                        let _ = inner.events.send(SchwabStreamEvent::Option(option));
+                    }
+                }
                 _ => {}
             }
         }
     }
     Ok(())
+}
+
+fn merge_sparse_option(
+    option_state: &mut HashMap<String, Value>,
+    content: &Value,
+) -> Option<OptionContract> {
+    let symbol = content
+        .get("key")
+        .or_else(|| content.get("0"))?
+        .as_str()?
+        .to_uppercase();
+    let fields = option_state
+        .entry(symbol.clone())
+        .or_insert_with(|| json!({"key": symbol}));
+    let target = fields.as_object_mut()?;
+    for (key, value) in content.as_object()? {
+        target.insert(key.clone(), value.clone());
+    }
+    schwab::streamed_option_from_value(fields)
 }
 
 fn merge_sparse_quote(quote_state: &mut HashMap<String, Value>, content: &Value) -> Option<Quote> {
@@ -463,6 +551,42 @@ mod tests {
     fn desired_symbols_are_uppercase_and_deduplicated() {
         let symbols = normalize_symbols([" aapl ".into(), "AAPL".into(), "spy".into()]);
         assert_eq!(symbols.into_iter().collect::<Vec<_>>(), vec!["AAPL", "SPY"]);
+    }
+
+    #[test]
+    fn sparse_option_updates_merge_into_a_complete_contract() {
+        let mut state = HashMap::new();
+        assert!(merge_sparse_option(&mut state, &json!({
+            "key":"AAPL  260821C00200000","12":2026,"23":8,"26":21,"20":200.0,
+            "21":"C","22":"AAPL","13":100.0,"29":0.02,"9":1200,"35":205.0
+        })).is_some());
+        let option = merge_sparse_option(&mut state, &json!({
+            "key":"AAPL  260821C00200000","29":0.025,"38":123456
+        })).unwrap();
+        assert_eq!(option.underlying, "AAPL");
+        assert_eq!(option.gamma, 0.025);
+        assert_eq!(option.open_interest, 1200.0);
+        assert_eq!(option.expiration_date, "2026-08-21");
+    }
+
+    #[tokio::test]
+    async fn option_limit_rejection_downgrades_only_options_to_rest_only() {
+        let streamer = SchwabStreamer::new(Schwab::new().unwrap());
+        let mut receiver = streamer.subscribe();
+        process_message(
+            &streamer.inner,
+            r#"{"response":[{"service":"LEVELONE_OPTIONS","command":"SUBS","content":{"code":19,"msg":"subscription limit exceeded"}}]}"#,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        match receiver.recv().await.unwrap() {
+            SchwabStreamEvent::OptionState { state, message } => {
+                assert_eq!(state, "rest-only");
+                assert_eq!(message.as_deref(), Some("subscription limit exceeded"));
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 
     #[tokio::test]

@@ -15,6 +15,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 - Shared streaming bars across matching charts, EMA alerts, and VWAP consumers, plus a deduplicated quote stream for charts, contracts, and the watchlist.
 - Provider-aware symbol search and mixed futures/equity watchlists, with TradeStation routing futures and Schwab routing equities and ETFs.
 - One shared Schwab Streamer connection for equity candles and quotes, including extended-hours history and local `1h`/`4h` aggregation on New York calendar boundaries.
+- Real-time Schwab gamma-exposure heatmaps for equity and ETF charts, bootstrapped from the current option chain and updated through the shared streamer with selectable expirations and Net or Calls/Puts views.
 - SQLite-backed candle caching, initial history, and lazy backfill when the chart approaches its oldest loaded bar.
 - Quota-aware TradeStation request scheduling with response-header reconciliation, historical-credit pacing, trading reserves, and reset-aware reconnects.
 - New York regular-session shading, an exchange-aware chart timezone selector, current-price label, and candle countdown.
@@ -54,7 +55,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 
 ### Browser demo
 
-`npm run dev` starts a browser-safe UI demo with futures plus AAPL/SPY equity fixtures, generated bars, quotes, positions, orders, and balances. Browser mode does not authenticate with either provider and cannot place, replace, cancel, or close real orders. Its workspace is saved in browser `localStorage`.
+`npm run dev` starts a browser-safe UI demo with futures plus AAPL/SPY equity fixtures, generated bars, quotes, deterministic current option chains, positions, orders, and balances. Browser mode does not authenticate with either provider and cannot place, replace, cancel, or close real orders. Its workspace is saved in browser `localStorage`.
 
 ## Technology
 
@@ -164,9 +165,11 @@ The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes,
 2. Start the native app and open **Settings → Schwab API**.
 3. Enter the Schwab App Key and App Secret, then choose **Save**.
 4. Choose **Connect** and complete authorization in the dedicated in-app window.
-5. Select an equity or ETF from the combined symbol picker. Equity order entry remains disabled; Schwab is currently chart data only.
+5. Select an equity or ETF from the combined symbol picker. Open **Indicators** to enable GEX and choose the included expirations. Equity order entry remains disabled; Schwab is currently chart data only.
 
 Schwab and TradeStation connections are independent. Changing the TradeStation SIM/LIVE environment does not affect Schwab charts or streams.
+
+GEX uses only the current Schwab option chain in memory. It does not collect option history or write option snapshots to SQLite; the chain refreshes every five minutes while an enabled chart still needs the symbol and is discarded after the last consumer closes.
 
 ## Supabase cloud configuration
 

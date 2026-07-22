@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalSyncStatus, JournalTrade, MarketDataProvider, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalSyncStatus, JournalTrade, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, monthSummary } from "./journal";
-import { demoAccounts, demoBalance, demoBodBalance, demoOrders, demoPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
+import { demoAccounts, demoBalance, demoBodBalance, demoOptionChain, demoOptionExpirations, demoOrders, demoPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -150,6 +150,18 @@ export const api = {
   async syncPreferences(cloudProfile: CloudPreferenceProfile): Promise<PreferenceSyncResult> {
     if (!isTauri) return { state: "synced", records: [], replacedCategories: [], conflictedCategories: [], lastSyncedAt: new Date().toISOString(), message: "Browser preferences are local only" };
     return native("sync_app_preferences", { cloudProfile });
+  },
+  async optionExpirations(symbol: string): Promise<OptionExpiration[]> {
+    return isTauri ? native("get_option_expirations", { symbol }) : demoOptionExpirations(symbol);
+  },
+  async optionChain(symbol: string, expirationDates: string[]): Promise<OptionChainSnapshot> {
+    return isTauri ? native("get_option_chain", { symbol, expirationDates }) : demoOptionChain(symbol, expirationDates);
+  },
+  async startOptionStream(subscriptionId: string, symbol: string, contractSymbols: string[]): Promise<void> {
+    if (isTauri) await native("start_option_stream", { subscriptionId, symbol, contractSymbols });
+  },
+  async stopOptionStream(subscriptionId: string): Promise<void> {
+    if (isTauri) await native("stop_option_stream", { subscriptionId });
   },
   async startPreferenceRealtime(): Promise<void> {
     if (isTauri) await native("start_preference_realtime");

@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    models::{Bar, MarketDataProvider, Quote, SymbolMeta},
+    models::{Bar, MarketDataProvider, OptionChainSnapshot, OptionContract, OptionExpiration, Quote, SymbolMeta},
     storage, AppError,
 };
 
@@ -238,6 +238,42 @@ impl Schwab {
             .flat_map(|items| items.iter())
             .filter_map(|(symbol, value)| quote_from_value(symbol, value))
             .collect())
+    }
+
+    pub async fn option_expirations(&self, symbol: &str) -> Result<Vec<OptionExpiration>, AppError> {
+        let mut url = url::Url::parse(&format!("{MARKET_URL}/expirationchain"))?;
+        url.query_pairs_mut().append_pair("symbol", symbol.trim());
+        let body = self.get_json(url.as_str()).await?;
+        Ok(option_expirations_from_value(&body))
+    }
+
+    pub async fn option_chain(
+        &self,
+        symbol: &str,
+        expiration_dates: &[String],
+    ) -> Result<OptionChainSnapshot, AppError> {
+        if expiration_dates.is_empty() {
+            return Err(AppError::Validation(
+                "At least one option expiration is required".into(),
+            ));
+        }
+        let mut dates = expiration_dates
+            .iter()
+            .map(|date| date.trim().to_string())
+            .filter(|date| !date.is_empty())
+            .collect::<Vec<_>>();
+        dates.sort();
+        dates.dedup();
+        let mut url = url::Url::parse(&format!("{MARKET_URL}/chains"))?;
+        url.query_pairs_mut()
+            .append_pair("symbol", symbol.trim())
+            .append_pair("contractType", "ALL")
+            .append_pair("includeUnderlyingQuote", "true")
+            .append_pair("strategy", "SINGLE")
+            .append_pair("fromDate", &dates[0])
+            .append_pair("toDate", dates.last().unwrap_or(&dates[0]));
+        let body = self.get_json(url.as_str()).await?;
+        Ok(option_chain_from_value(&body, symbol, &dates))
     }
 
     pub async fn streamer_info(&self) -> Result<StreamerInfo, AppError> {
@@ -641,6 +677,176 @@ fn quote_from_value(symbol: &str, value: &Value) -> Option<Quote> {
     })
 }
 
+pub fn option_expirations_from_value(value: &Value) -> Vec<OptionExpiration> {
+    let mut expirations = value
+        .get("expirationList")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let expiration_date = item.get("expirationDate")?.as_str()?.to_string();
+            Some(OptionExpiration {
+                expiration_date,
+                days_to_expiration: item
+                    .get("daysToExpiration")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default(),
+                expiration_type: item
+                    .get("expirationType")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                standard: item.get("standard").and_then(Value::as_bool).unwrap_or(true),
+            })
+        })
+        .collect::<Vec<_>>();
+    expirations.sort_by(|left, right| left.expiration_date.cmp(&right.expiration_date));
+    expirations.dedup_by(|left, right| left.expiration_date == right.expiration_date);
+    expirations
+}
+
+pub fn option_chain_from_value(
+    value: &Value,
+    requested_symbol: &str,
+    expiration_dates: &[String],
+) -> OptionChainSnapshot {
+    let requested = expiration_dates.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    let symbol = value
+        .get("symbol")
+        .and_then(Value::as_str)
+        .unwrap_or(requested_symbol)
+        .to_uppercase();
+    let underlying_price = number_named(value, "underlyingPrice")
+        .or_else(|| value.pointer("/underlying/mark").and_then(Value::as_f64))
+        .or_else(|| value.pointer("/underlying/last").and_then(Value::as_f64))
+        .unwrap_or_default();
+    let delayed = value.get("isDelayed").and_then(Value::as_bool).unwrap_or(false);
+    let mut contracts = Vec::new();
+    for (map_name, fallback_side) in [("callExpDateMap", "CALL"), ("putExpDateMap", "PUT")] {
+        let Some(expirations) = value.get(map_name).and_then(Value::as_object) else { continue };
+        for (expiration_key, strikes) in expirations {
+            let expiration_date = expiration_key.split(':').next().unwrap_or_default();
+            if !requested.is_empty() && !requested.contains(expiration_date) {
+                continue;
+            }
+            let Some(strikes) = strikes.as_object() else { continue };
+            for contract_value in strikes.values() {
+                let values: Vec<&Value> = contract_value
+                    .as_array()
+                    .map(|items| items.iter().collect())
+                    .unwrap_or_else(|| vec![contract_value]);
+                for contract in values {
+                    if let Some(contract) = option_contract_from_chain(
+                        contract,
+                        &symbol,
+                        expiration_date,
+                        fallback_side,
+                        underlying_price,
+                        delayed,
+                    ) {
+                        contracts.push(contract);
+                    }
+                }
+            }
+        }
+    }
+    contracts.sort_by(|left, right| {
+        left.expiration_date
+            .cmp(&right.expiration_date)
+            .then_with(|| left.strike_price.total_cmp(&right.strike_price))
+            .then_with(|| left.put_call.cmp(&right.put_call))
+    });
+    contracts.dedup_by(|left, right| left.symbol == right.symbol);
+    OptionChainSnapshot {
+        symbol,
+        underlying_price,
+        delayed,
+        fetched_at: Utc::now().to_rfc3339(),
+        contracts,
+    }
+}
+
+fn option_contract_from_chain(
+    value: &Value,
+    underlying: &str,
+    expiration_date: &str,
+    fallback_side: &str,
+    underlying_price: f64,
+    delayed: bool,
+) -> Option<OptionContract> {
+    let symbol = value.get("symbol")?.as_str()?.to_string();
+    let strike_price = number_named(value, "strikePrice")?;
+    Some(OptionContract {
+        symbol,
+        underlying: underlying.to_string(),
+        put_call: value
+            .get("putCall")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback_side)
+            .to_uppercase(),
+        expiration_date: value
+            .get("expirationDate")
+            .and_then(Value::as_str)
+            .unwrap_or(expiration_date)
+            .to_string(),
+        strike_price,
+        multiplier: number_named(value, "multiplier").unwrap_or_default(),
+        gamma: number_named(value, "gamma").unwrap_or_default(),
+        open_interest: number_named(value, "openInterest").unwrap_or_default(),
+        bid_price: number_named(value, "bidPrice").unwrap_or_default(),
+        ask_price: number_named(value, "askPrice").unwrap_or_default(),
+        mark_price: number_named(value, "markPrice").unwrap_or_default(),
+        total_volume: number_named(value, "totalVolume").unwrap_or_default(),
+        volatility: number_named(value, "volatility").unwrap_or_default(),
+        delta: number_named(value, "delta").unwrap_or_default(),
+        underlying_price,
+        quote_time: integer_named(value, "quoteTimeInLong").unwrap_or_default(),
+        delayed,
+        is_mini: value.get("isMini").and_then(Value::as_bool).unwrap_or(false),
+        is_non_standard: value
+            .get("isNonStandard")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+pub fn streamed_option_from_value(value: &Value) -> Option<OptionContract> {
+    let symbol = value.get("key").or_else(|| value.get("0"))?.as_str()?.to_string();
+    let expiration_year = integer_field(value, 12)?;
+    let expiration_month = integer_field(value, 23)?;
+    let expiration_day = integer_field(value, 26)?;
+    let put_call = match value.get("21").and_then(Value::as_str).unwrap_or_default() {
+        "C" | "CALL" => "CALL",
+        "P" | "PUT" => "PUT",
+        other => other,
+    };
+    Some(OptionContract {
+        symbol,
+        underlying: value
+            .get("22")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_uppercase(),
+        put_call: put_call.to_string(),
+        expiration_date: format!("{expiration_year:04}-{expiration_month:02}-{expiration_day:02}"),
+        strike_price: numeric_field(value, 20)?,
+        multiplier: numeric_field(value, 13).unwrap_or_default(),
+        gamma: numeric_field(value, 29).unwrap_or_default(),
+        open_interest: numeric_field(value, 9).unwrap_or_default(),
+        bid_price: numeric_field(value, 2).unwrap_or_default(),
+        ask_price: numeric_field(value, 3).unwrap_or_default(),
+        mark_price: numeric_field(value, 37).unwrap_or_default(),
+        total_volume: numeric_field(value, 8).unwrap_or_default(),
+        volatility: numeric_field(value, 10).unwrap_or_default(),
+        delta: numeric_field(value, 28).unwrap_or_default(),
+        underlying_price: numeric_field(value, 35).unwrap_or_default(),
+        quote_time: integer_field(value, 38).unwrap_or_default(),
+        delayed: false,
+        is_mini: false,
+        is_non_standard: false,
+    })
+}
+
 fn numeric_field(value: &Value, index: u8) -> Option<f64> {
     value
         .get(index.to_string())
@@ -682,6 +888,40 @@ fn truncate(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_and_sorts_option_expirations() {
+        let values = serde_json::json!({"expirationList":[
+            {"expirationDate":"2026-08-21","daysToExpiration":30,"expirationType":"S","standard":true},
+            {"expirationDate":"2026-07-24","daysToExpiration":2,"expirationType":"W","standard":true}
+        ]});
+        let expirations = option_expirations_from_value(&values);
+        assert_eq!(expirations[0].expiration_date, "2026-07-24");
+        assert_eq!(expirations[1].days_to_expiration, 30);
+    }
+
+    #[test]
+    fn parses_nested_chain_and_filters_exact_expirations() {
+        let contract = |symbol: &str, side: &str, expiration: &str| serde_json::json!({
+            "symbol":symbol,"putCall":side,"strikePrice":200.0,"expirationDate":expiration,
+            "multiplier":100.0,"gamma":0.02,"openInterest":1200,"bidPrice":5.0,"askPrice":5.2,
+            "markPrice":5.1,"isMini":false,"isNonStandard":false
+        });
+        let values = serde_json::json!({
+            "symbol":"AAPL","underlyingPrice":205.0,"isDelayed":false,
+            "callExpDateMap":{
+                "2026-07-24:2":{"200.0":[contract("AAPL  260724C00200000","CALL","2026-07-24")]},
+                "2026-08-21:30":{"200.0":[contract("AAPL  260821C00200000","CALL","2026-08-21")]}
+            },
+            "putExpDateMap":{
+                "2026-07-24:2":{"200.0":[contract("AAPL  260724P00200000","PUT","2026-07-24")]}
+            }
+        });
+        let snapshot = option_chain_from_value(&values, "AAPL", &["2026-07-24".into()]);
+        assert_eq!(snapshot.contracts.len(), 2);
+        assert!(snapshot.contracts.iter().all(|item| item.expiration_date == "2026-07-24"));
+        assert_eq!(snapshot.contracts[0].underlying_price, 205.0);
+    }
 
     fn bar(time: i64, open: f64, high: f64, low: f64, close: f64, volume: f64) -> Bar {
         Bar {

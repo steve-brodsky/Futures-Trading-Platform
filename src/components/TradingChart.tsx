@@ -4,7 +4,7 @@ import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type Logical, type LogicalRange, type Time,
 } from "lightweight-charts";
-import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, ChartTool, Drawing, DrawingPatch, IndicatorConfig, LineDrawing, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
+import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, ChartTool, Drawing, DrawingPatch, GexView, IndicatorConfig, LineDrawing, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme } from "../lib/crosshair";
@@ -17,6 +17,8 @@ import { buildPointAndFigure, buildRenko, type PointAndFigureColumn, type RenkoB
 import { PointAndFigureSeries, type PointAndFigureSeriesData } from "../lib/pointAndFigureSeries";
 import { approximateDataUrlBytes, ENTRY_SCREENSHOT_MAX_BYTES } from "../lib/entryScreenshot";
 import { createPositionDrawing, logicalToSourceTime, movePositionDrawing, normalizePositionQuantity, positionMetrics, sourceTimeToLogical, updatePositionPrice } from "../lib/positionDrawing";
+import { formatGex, type GexLevel } from "../lib/gex";
+import { GexHeatmapPrimitive } from "../lib/gexHeatmapPrimitive";
 
 interface Props {
   bars: Bar[];
@@ -37,6 +39,10 @@ interface Props {
   timeframe: Timeframe;
   timezone: ChartTimezone;
   indicators: IndicatorConfig[];
+  gexLevels: GexLevel[];
+  gexView: GexView;
+  gexStatus?: string;
+  gexExpirationCount: number;
   orders: OrderUpdate[];
   positions: Position[];
   orderProjection?: OrderProjection;
@@ -91,7 +97,7 @@ type PositionDragKind = "body" | "entry" | "stop" | "target" | "start" | "end";
 
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, gexLevels, gexView, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -102,6 +108,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const rayPrimitiveRef = useRef<HorizontalRayPrimitive | null>(null);
   const sessionShadingRef = useRef<SessionShading | null>(null);
   const vwapPrimitiveRef = useRef<NySessionVwapPrimitive | null>(null);
+  const gexPrimitiveRef = useRef<GexHeatmapPrimitive | null>(null);
+  const gexLevelsRef = useRef(gexLevels);
   const previousBars = useRef<Bar[]>([]);
   const previousPlotPoints = useRef<Array<{ plotTime: number; sourceTime: number }>>([]);
   const barsRef = useRef(bars);
@@ -116,6 +124,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const visibleRangeChangeRef = useRef(onVisibleRangeChange);
   const firstData = useRef(true);
   const [hovered, setHovered] = useState<DisplayItem | null>(null);
+  const [hoveredGex, setHoveredGex] = useState<GexLevel | null>(null);
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [chartGeneration, setChartGeneration] = useState(0);
   const [drawingMenu, setDrawingMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -226,6 +235,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   }));
 
   barsRef.current = bars;
+  gexLevelsRef.current = gexLevels;
   displayItemsRef.current = displayMap;
   sourceTimeByPlotTimeRef.current = sourceTimeMap;
   plotPointsRef.current = plotPoints;
@@ -336,6 +346,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const rayPrimitive = new HorizontalRayPrimitive();
     priceSeries.attachPrimitive(rayPrimitive);
     rayPrimitiveRef.current = rayPrimitive;
+    const gexPrimitive = new GexHeatmapPrimitive();
+    priceSeries.attachPrimitive(gexPrimitive);
+    gexPrimitiveRef.current = gexPrimitive;
     if (intraday && !isSynthetic) {
       const sessionShading = new SessionShading();
       priceSeries.attachPrimitive(sessionShading);
@@ -354,6 +367,15 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     let settingCrosshair = false;
     chart.subscribeCrosshairMove((param) => {
       syncTradeLabelsRef.current();
+      if (param.point) {
+        const nearest = gexLevelsRef.current.reduce<{ level: GexLevel; distance: number } | null>((best, level) => {
+          const y = priceSeries.priceToCoordinate(level.strike);
+          if (y == null) return best;
+          const distance = Math.abs(param.point!.y - y);
+          return !best || distance < best.distance ? { level, distance } : best;
+        }, null);
+        setHoveredGex(nearest && nearest.distance <= 10 ? nearest.level : null);
+      } else setHoveredGex(null);
       if (!param.time) return setHovered(null);
       const bar = displayItemsRef.current.get(Number(param.time)) ?? null;
       setHovered(bar);
@@ -463,7 +485,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       resizeObserver.disconnect();
       host.current?.removeEventListener("wheel", syncLabels);
       host.current?.removeEventListener("pointermove", syncLabels);
-      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null;
+      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null; gexPrimitiveRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone, renkoSettings.brickSizeTicks, renkoSettings.priceSource, renkoSettings.reversalBricks, pointAndFigureSettings.boxSizeTicks, pointAndFigureSettings.priceSource, pointAndFigureSettings.reversalBoxes]);
 
@@ -515,6 +537,11 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const vwap = indicators.find((indicator) => indicator.kind === "VWAP" && indicator.visible);
     vwapPrimitiveRef.current?.setData(!isSynthetic && vwap ? vwapBars : [], bars.map((bar) => bar.time), vwap?.color ?? "#a879ff", timeframe);
   }, [bars, vwapBars, indicators, chartGeneration, isSynthetic]);
+
+  useEffect(() => {
+    gexPrimitiveRef.current?.setData(gexLevels, gexView);
+    if (!gexLevels.length) setHoveredGex(null);
+  }, [gexLevels, gexView, chartGeneration]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -849,6 +876,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
           ? <div className="ohlc synthetic-metrics"><span className={latest.direction === "x" ? "positive" : "negative"}>{latest.direction.toUpperCase()} COLUMN</span><span>H <b>{latest.high.toFixed(pricePrecision(minMove))}</b></span><span>L <b>{latest.low.toFixed(pricePrecision(minMove))}</b></span><span>{pointAndFigureSettings.boxSizeTicks}T × {pointAndFigureSettings.reversalBoxes}</span></div>
           : latest && <div className="ohlc"><span>O <b>{latestOpen.toFixed(pricePrecision(minMove))}</b></span><span>H <b>{latest.high.toFixed(pricePrecision(minMove))}</b></span><span>L <b>{latest.low.toFixed(pricePrecision(minMove))}</b></span><span>C <b className={change >= 0 ? "positive" : "negative"}>{latest.close.toFixed(pricePrecision(minMove))}</b></span></div>}
         {syntheticLive && <span className="synthetic-live">LIVE</span>}
+        {gexStatus && <div className="gex-heading"><span>GEX</span><strong>{gexStatus}</strong><em>{gexExpirationCount} exp</em>{hoveredGex && <b>{hoveredGex.strike.toFixed(pricePrecision(minMove))} · C {formatGex(hoveredGex.callGex)} · P {formatGex(-hoveredGex.putGex)} · N {formatGex(hoveredGex.netGex)}</b>}</div>}
       </div>
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />

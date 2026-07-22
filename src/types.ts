@@ -37,6 +37,56 @@ export interface Quote {
   receivedAt?: number;
 }
 
+export interface OptionExpiration {
+  expirationDate: string;
+  daysToExpiration: number;
+  expirationType: string;
+  standard: boolean;
+}
+
+export interface OptionContract {
+  symbol: string;
+  underlying: string;
+  putCall: "CALL" | "PUT";
+  expirationDate: string;
+  strikePrice: number;
+  multiplier: number;
+  gamma: number;
+  openInterest: number;
+  bidPrice: number;
+  askPrice: number;
+  markPrice: number;
+  totalVolume: number;
+  volatility: number;
+  delta: number;
+  underlyingPrice: number;
+  quoteTime: number;
+  delayed: boolean;
+  isMini: boolean;
+  isNonStandard: boolean;
+}
+
+export interface OptionChainSnapshot {
+  symbol: string;
+  underlyingPrice: number;
+  delayed: boolean;
+  fetchedAt: string;
+  contracts: OptionContract[];
+}
+
+export type GexView = "net" | "calls-puts";
+export type GexExpirationMode = "front" | "next-four" | "all" | "custom";
+
+export interface GexTabSettings {
+  enabled: boolean;
+  view: GexView;
+}
+
+export interface GexExpirationSelection {
+  mode: GexExpirationMode;
+  expirationDates: string[];
+}
+
 export interface Account {
   id: string;
   displayId: string;
@@ -270,6 +320,7 @@ export interface ChartTabState {
   ema200Alert: Ema200AlertConfig;
   chartTimezone: ChartTimezone;
   magnetEnabled: boolean;
+  gex: GexTabSettings;
   /** Concrete contract override for a continuous chart. Undefined means Auto. */
   tradeContract?: string;
 }
@@ -341,6 +392,7 @@ export interface WorkspaceState {
   watchlist: SymbolMeta[];
   recentSymbols: SymbolMeta[];
   drawings: Record<string, Drawing[]>;
+  gexSelections: Record<string, GexExpirationSelection>;
   rightPanelOpen: boolean;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
   bottomPanelOpen: boolean;
@@ -402,6 +454,8 @@ export interface BarSnapshotEvent {
 
 export interface BarUpdateEvent extends Omit<BarSnapshotEvent, "bars"> { bar: Bar; }
 export interface QuoteUpdateEvent { subscriptionId: string; provider: MarketDataProvider; environment: TradingEnvironment; quote: Quote; }
+export interface OptionUpdateEvent { subscriptionId: string; contract: OptionContract; }
+export interface OptionStreamStateEvent { subscriptionId: string; symbol: string; state: StreamConnectionState | "rest-only" | "error"; message?: string; }
 export interface StreamStateEvent {
   subscriptionId: string;
   provider: MarketDataProvider;

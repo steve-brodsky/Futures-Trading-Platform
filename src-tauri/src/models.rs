@@ -95,6 +95,49 @@ pub struct Quote {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionExpiration {
+    pub expiration_date: String,
+    pub days_to_expiration: i64,
+    pub expiration_type: String,
+    pub standard: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionContract {
+    pub symbol: String,
+    pub underlying: String,
+    pub put_call: String,
+    pub expiration_date: String,
+    pub strike_price: f64,
+    pub multiplier: f64,
+    pub gamma: f64,
+    pub open_interest: f64,
+    pub bid_price: f64,
+    pub ask_price: f64,
+    pub mark_price: f64,
+    pub total_volume: f64,
+    pub volatility: f64,
+    pub delta: f64,
+    pub underlying_price: f64,
+    pub quote_time: i64,
+    pub delayed: bool,
+    pub is_mini: bool,
+    pub is_non_standard: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionChainSnapshot {
+    pub symbol: String,
+    pub underlying_price: f64,
+    pub delayed: bool,
+    pub fetched_at: String,
+    pub contracts: Vec<OptionContract>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Position {
@@ -252,6 +295,22 @@ pub struct QuoteUpdateEvent {
     pub provider: MarketDataProvider,
     pub environment: TradingEnvironment,
     pub quote: Quote,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionUpdateEvent {
+    pub subscription_id: String,
+    pub contract: OptionContract,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionStreamStateEvent {
+    pub subscription_id: String,
+    pub symbol: String,
+    pub state: String,
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

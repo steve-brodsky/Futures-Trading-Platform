@@ -13,7 +13,7 @@ use schwab::Schwab;
 use schwab_streamer::{SchwabStreamEvent, SchwabStreamer};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::PathBuf,
     sync::{Arc, RwLock},
 };
@@ -68,8 +68,14 @@ pub struct NativeState {
     db_path: PathBuf,
     bar_streams: Arc<tokio::sync::Mutex<BarStreamRegistry>>,
     quote_streams: tokio::sync::Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    option_streams: tokio::sync::Mutex<HashMap<String, OptionStreamRegistration>>,
     brokerage_streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
     preference_realtime: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+struct OptionStreamRegistration {
+    contracts: BTreeSet<String>,
+    task: tauri::async_runtime::JoinHandle<()>,
 }
 
 #[derive(Default)]
@@ -194,6 +200,11 @@ async fn begin_schwab_login(
 #[tauri::command]
 async fn logout_schwab(state: State<'_, NativeState>) -> Result<(), AppError> {
     state.schwab_streamer.stop().await;
+    let mut registrations = state.option_streams.lock().await;
+    for (_, registration) in registrations.drain() {
+        registration.task.abort();
+    }
+    drop(registrations);
     state.schwab.clear_access_token().await;
     storage::clear_schwab_refresh_token()?;
     Ok(())
@@ -363,6 +374,23 @@ async fn get_quotes(
         MarketDataProvider::Tradestation => state.api.quotes(&symbols).await,
         MarketDataProvider::Schwab => state.schwab.quotes(&symbols).await,
     }
+}
+
+#[tauri::command]
+async fn get_option_expirations(
+    symbol: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<OptionExpiration>, AppError> {
+    state.schwab.option_expirations(&symbol).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_option_chain(
+    symbol: String,
+    expiration_dates: Vec<String>,
+    state: State<'_, NativeState>,
+) -> Result<OptionChainSnapshot, AppError> {
+    state.schwab.option_chain(&symbol, &expiration_dates).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -804,6 +832,87 @@ async fn stop_quote_stream(
             .set_quote_symbols(std::iter::empty())
             .await;
     }
+    Ok(())
+}
+
+async fn sync_schwab_option_symbols(
+    registrations: &tokio::sync::Mutex<HashMap<String, OptionStreamRegistration>>,
+    streamer: &SchwabStreamer,
+) {
+    let symbols = registrations
+        .lock()
+        .await
+        .values()
+        .flat_map(|registration| registration.contracts.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    streamer.set_option_symbols(symbols).await;
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn start_option_stream(
+    app: tauri::AppHandle,
+    subscription_id: String,
+    symbol: String,
+    mut contract_symbols: Vec<String>,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    contract_symbols = contract_symbols
+        .into_iter()
+        .map(|contract| contract.trim().to_uppercase())
+        .filter(|contract| !contract.is_empty())
+        .collect();
+    contract_symbols.sort();
+    contract_symbols.dedup();
+    if contract_symbols.len() > 100 {
+        return Err(AppError::Validation(
+            "A maximum of 100 streamed option contracts is supported".into(),
+        ));
+    }
+    let contracts = contract_symbols.iter().cloned().collect::<BTreeSet<_>>();
+    let desired = contracts.clone();
+    let task = tauri::async_runtime::spawn(run_schwab_option_stream(
+        app,
+        state.schwab_streamer.clone(),
+        subscription_id.clone(),
+        symbol.to_uppercase(),
+        desired,
+    ));
+    let mut current = state.option_streams.lock().await;
+    let mut union = current
+        .iter()
+        .filter(|(id, _)| *id != &subscription_id)
+        .flat_map(|(_, registration)| registration.contracts.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    union.extend(contracts.iter().cloned());
+    if union.len() > 100 {
+        task.abort();
+        return Err(AppError::Validation(
+            "The combined option stream cannot exceed 100 contracts".into(),
+        ));
+    }
+    if let Some(previous) = current.insert(
+        subscription_id,
+        OptionStreamRegistration {
+            contracts,
+            task,
+        },
+    ) {
+        previous.task.abort();
+    }
+    drop(current);
+    sync_schwab_option_symbols(&state.option_streams, &state.schwab_streamer).await;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn stop_option_stream(
+    subscription_id: String,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    if let Some(registration) = state.option_streams.lock().await.remove(&subscription_id) {
+        registration.task.abort();
+    }
+    sync_schwab_option_symbols(&state.option_streams, &state.schwab_streamer).await;
     Ok(())
 }
 
@@ -2601,6 +2710,78 @@ async fn run_schwab_quote_stream(
     }
 }
 
+async fn run_schwab_option_stream(
+    app: tauri::AppHandle,
+    streamer: SchwabStreamer,
+    subscription_id: String,
+    symbol: String,
+    desired: BTreeSet<String>,
+) {
+    let mut receiver = streamer.subscribe();
+    let (current_state, current_message) = streamer.connection_state().await;
+    let _ = app.emit(
+        "option-stream-state",
+        OptionStreamStateEvent {
+            subscription_id: subscription_id.clone(),
+            symbol: symbol.clone(),
+            state: if current_state == "streaming" {
+                "connecting".into()
+            } else {
+                current_state
+            },
+            message: current_message,
+        },
+    );
+    loop {
+        match receiver.recv().await {
+            Ok(SchwabStreamEvent::State { state, message }) => {
+                let _ = app.emit(
+                    "option-stream-state",
+                    OptionStreamStateEvent {
+                        subscription_id: subscription_id.clone(),
+                        symbol: symbol.clone(),
+                        state,
+                        message,
+                    },
+                );
+            }
+            Ok(SchwabStreamEvent::OptionState { state, message }) => {
+                let _ = app.emit(
+                    "option-stream-state",
+                    OptionStreamStateEvent {
+                        subscription_id: subscription_id.clone(),
+                        symbol: symbol.clone(),
+                        state,
+                        message,
+                    },
+                );
+            }
+            Ok(SchwabStreamEvent::Option(contract)) if desired.contains(&contract.symbol) => {
+                let _ = app.emit(
+                    "option-update",
+                    OptionUpdateEvent {
+                        subscription_id: subscription_id.clone(),
+                        contract,
+                    },
+                );
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                let _ = app.emit(
+                    "option-stream-state",
+                    OptionStreamStateEvent {
+                        subscription_id: subscription_id.clone(),
+                        symbol: symbol.clone(),
+                        state: "stale".into(),
+                        message: Some(format!("Option stream skipped {skipped} updates")),
+                    },
+                );
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 async fn run_bar_stream(
     app: tauri::AppHandle,
     api: TradeStation,
@@ -3029,6 +3210,7 @@ pub fn run() {
                 db_path: app_dir.join("northstar.sqlite3"),
                 bar_streams: Arc::new(tokio::sync::Mutex::new(BarStreamRegistry::default())),
                 quote_streams: tokio::sync::Mutex::new(HashMap::new()),
+                option_streams: tokio::sync::Mutex::new(HashMap::new()),
                 brokerage_streams: tokio::sync::Mutex::new(Vec::new()),
                 preference_realtime: tokio::sync::Mutex::new(None),
             });
@@ -3050,6 +3232,8 @@ pub fn run() {
             get_future_contracts,
             get_bars,
             get_quotes,
+            get_option_expirations,
+            get_option_chain,
             load_cached_bars,
             load_cached_bar_range,
             get_older_bars,
@@ -3058,6 +3242,8 @@ pub fn run() {
             stop_bar_stream,
             start_quote_stream,
             stop_quote_stream,
+            start_option_stream,
+            stop_option_stream,
             start_brokerage_stream,
             stop_brokerage_stream,
             get_positions,

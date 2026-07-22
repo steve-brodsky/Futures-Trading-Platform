@@ -9,9 +9,10 @@ import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, 
 const fallback: WorkspaceState = {
   revision: 0,
   environment: "sim",
-  tabs: [{ id: "chart-1", symbol: { provider: "tradestation", symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false }],
+  tabs: [{ id: "chart-1", symbol: { provider: "tradestation", symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net" } }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
+  gexSelections: {},
   watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
   settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
@@ -55,6 +56,26 @@ describe("chart workspace", () => {
     expect(result.tabs).toHaveLength(1);
     expect(result.tabs[0].timeframe).toBe("15m");
     expect(result.windows[0].tabIds).toEqual([result.tabs[0].id]);
+  });
+
+  it("normalizes GEX chart and per-symbol expiration preferences", () => {
+    const result = normalizeChartWorkspace({
+      ...fallback,
+      tabs: [{ ...fallback.tabs[0], gex: { enabled: true, view: "calls-puts" } }],
+      gexSelections: {
+        " spy ": { mode: "custom", expirationDates: ["2026-08-21", "bad", "2026-08-21"] },
+        AAPL: { mode: "next-four", expirationDates: [] },
+      },
+    }, fallback);
+    expect(result.tabs[0].gex).toEqual({ enabled: true, view: "calls-puts" });
+    expect(result.gexSelections).toEqual({
+      SPY: { mode: "custom", expirationDates: ["2026-08-21"] },
+      AAPL: { mode: "next-four", expirationDates: [] },
+    });
+
+    const legacy = normalizeChartWorkspace({ ...fallback, tabs: [{ ...fallback.tabs[0], gex: undefined }], gexSelections: undefined }, fallback);
+    expect(legacy.tabs[0].gex).toEqual({ enabled: false, view: "net" });
+    expect(legacy.gexSelections).toEqual({});
   });
 
   it("defaults legacy environments to SIM and preserves a saved LIVE environment", () => {
