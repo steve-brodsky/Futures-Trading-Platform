@@ -38,6 +38,14 @@ describe("bar stream event acceptance", () => {
     expect(acceptsBarEvent(equityTab, "sim", { ...schwabEvent, provider: "tradestation" }, 42)).toBe(false);
   });
 
+  it("rejects late futures events after the same tab switches to a Schwab equity", () => {
+    const equityTab = { ...tab, symbol: { ...tab.symbol, provider: "schwab" as const, symbol: "AAPL" } };
+    const schwabEvent = { ...event, provider: "schwab" as const, symbol: "AAPL", generation: 44 };
+    expect(acceptsBarEvent(equityTab, "sim", event, 44)).toBe(false);
+    expect(acceptsBarEvent(equityTab, "sim", { ...schwabEvent, generation: 43 }, 44)).toBe(false);
+    expect(acceptsBarEvent(equityTab, "sim", schwabEvent, 44)).toBe(true);
+  });
+
   it("identifies when a tab market buffer belongs to another symbol or timeframe", () => {
     expect(isSameBarMarket({ provider: "tradestation", symbol: "MESU26", timeframe: "5m" }, "tradestation", "MESU26", "5m")).toBe(true);
     expect(isSameBarMarket({ provider: "tradestation", symbol: "MESU26", timeframe: "5m" }, "tradestation", "MESU26", "15m")).toBe(false);

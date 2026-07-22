@@ -455,6 +455,12 @@ pub fn bucket_start(epoch: i64, timeframe: &str) -> Option<i64> {
     Some(new_york_epoch(naive))
 }
 
+pub fn current_new_york_day_range(now: i64) -> Option<(i64, i64)> {
+    let date = new_york_local(now)?.date();
+    let start = new_york_epoch(date.and_hms_opt(0, 0, 0)?);
+    Some((start, now.saturating_add(1).max(start.saturating_add(1))))
+}
+
 fn new_york_local(epoch: i64) -> Option<NaiveDateTime> {
     let utc = Utc.timestamp_opt(epoch, 0).single()?.naive_utc();
     Some(utc + chrono::Duration::seconds(new_york_offset_at(epoch)))
@@ -1093,5 +1099,17 @@ mod tests {
         let august = july + 12 * 3_600;
         assert_ne!(bucket_start(july, "M"), bucket_start(august, "M"));
         assert_ne!(bucket_start(july, "D"), bucket_start(august, "D"));
+    }
+
+    #[test]
+    fn current_day_range_starts_at_new_york_midnight() {
+        for date in [
+            NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 7, 22).unwrap(),
+        ] {
+            let midnight = new_york_epoch(date.and_hms_opt(0, 0, 0).unwrap());
+            let now = new_york_epoch(date.and_hms_opt(14, 46, 0).unwrap());
+            assert_eq!(current_new_york_day_range(now), Some((midnight, now + 1)));
+        }
     }
 }

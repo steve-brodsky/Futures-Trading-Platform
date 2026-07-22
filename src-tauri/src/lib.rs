@@ -616,19 +616,25 @@ async fn start_bar_stream(
                     symbol.clone(),
                     timeframe.clone(),
                 )),
-                MarketDataProvider::Schwab => tauri::async_runtime::spawn(run_schwab_bar_stream(
-                    app.clone(),
-                    state.schwab.clone(),
-                    state.schwab_streamer.clone(),
-                    state.db_path.clone(),
-                    subscribers.clone(),
-                    status.clone(),
-                    latest_bars.clone(),
-                    retained_limit,
-                    environment.clone(),
-                    symbol.clone(),
-                    timeframe.clone(),
-                )),
+                MarketDataProvider::Schwab => {
+                    // Register the receiver before sync_schwab_chart_symbols can
+                    // make an already-connected socket send its initial sequence.
+                    let receiver = state.schwab_streamer.subscribe_chart();
+                    tauri::async_runtime::spawn(run_schwab_bar_stream(
+                        app.clone(),
+                        state.schwab.clone(),
+                        state.schwab_streamer.clone(),
+                        receiver,
+                        state.db_path.clone(),
+                        subscribers.clone(),
+                        status.clone(),
+                        latest_bars.clone(),
+                        retained_limit,
+                        environment.clone(),
+                        symbol.clone(),
+                        timeframe.clone(),
+                    ))
+                }
             };
             registry.streams.insert(
                 key,
@@ -2400,6 +2406,28 @@ fn retain_bar_snapshot(
         .unwrap_or_else(|_| incoming.to_vec())
 }
 
+fn retain_schwab_bootstrap_snapshot(
+    latest_bars: &Arc<RwLock<Vec<Bar>>>,
+    incoming: &[Bar],
+    limit: usize,
+) -> Vec<Bar> {
+    latest_bars
+        .write()
+        .map(|mut retained| {
+            let live = retained
+                .iter()
+                .filter(|bar| bar.realtime)
+                .cloned()
+                .collect::<Vec<_>>();
+            merge_retained_bars(&mut retained, incoming, limit);
+            // A REST request can finish after the first streamed candle. Keep
+            // that newer live value when both sources contain the same minute.
+            merge_retained_bars(&mut retained, &live, limit);
+            retained.clone()
+        })
+        .unwrap_or_else(|_| incoming.to_vec())
+}
+
 fn emit_bar_update(
     app: &tauri::AppHandle,
     subscribers: &Arc<RwLock<HashMap<String, BarSubscriber>>>,
@@ -2499,6 +2527,7 @@ async fn run_schwab_bar_stream(
     app: tauri::AppHandle,
     api: Schwab,
     streamer: SchwabStreamer,
+    mut receiver: tokio::sync::broadcast::Receiver<SchwabStreamEvent>,
     db_path: PathBuf,
     subscribers: Arc<RwLock<HashMap<String, BarSubscriber>>>,
     status: Arc<RwLock<SharedBarStreamStatus>>,
@@ -2508,7 +2537,6 @@ async fn run_schwab_bar_stream(
     symbol: String,
     timeframe: String,
 ) {
-    let mut receiver = streamer.subscribe();
     let (current_state, current_message) = streamer.connection_state().await;
     let initial_state = if current_state == "disconnected" {
         "connecting"
@@ -2526,41 +2554,117 @@ async fn run_schwab_bar_stream(
         initial_state,
         current_message,
     );
-    match api.bars(&symbol, &timeframe).await {
-        Ok(history) => {
-            let _ = storage::save_bars(&db_path, "schwab", &symbol, &timeframe, &history);
-            let retained = retain_bar_snapshot(&latest_bars, &history, retained_limit);
-            emit_bar_snapshot(
-                &app,
-                &subscribers,
-                &MarketDataProvider::Schwab,
-                &environment,
-                &symbol,
-                &timeframe,
-                &retained,
-            );
-        }
-        Err(error) => emit_shared_stream_state(
-            &app,
-            &subscribers,
-            &status,
-            &MarketDataProvider::Schwab,
-            &environment,
-            &symbol,
-            &timeframe,
-            "reconnecting",
-            Some(error.to_string()),
-        ),
-    }
-
-    let source_minutes = api.bars(&symbol, "1m").await.unwrap_or_default();
-    let _ = storage::save_bars(&db_path, "schwab", &symbol, "1m", &source_minutes);
-    let mut live_minutes: BTreeMap<i64, Bar> = source_minutes
-        .into_iter()
-        .map(|bar| (bar.time, bar))
-        .collect();
+    let bootstrap_api = api.clone();
+    let bootstrap_symbol = symbol.clone();
+    let bootstrap_timeframe = timeframe.clone();
+    let bootstrap = async move {
+        let history = bootstrap_api
+            .bars(&bootstrap_symbol, &bootstrap_timeframe)
+            .await;
+        let mut source_minutes = if bootstrap_timeframe == "1m" {
+            history
+                .as_ref()
+                .map(|bars| bars.clone())
+                .unwrap_or_default()
+        } else {
+            bootstrap_api
+                .bars(&bootstrap_symbol, "1m")
+                .await
+                .unwrap_or_default()
+        };
+        let session_error = if let Some((first, last)) =
+            schwab::current_new_york_day_range(Utc::now().timestamp())
+        {
+            match bootstrap_api
+                .bars_range(&bootstrap_symbol, first, last)
+                .await
+            {
+                Ok(current_day) => {
+                    let mut by_time = source_minutes
+                        .into_iter()
+                        .map(|bar| (bar.time, bar))
+                        .collect::<BTreeMap<_, _>>();
+                    by_time.extend(current_day.into_iter().map(|bar| (bar.time, bar)));
+                    source_minutes = by_time.into_values().collect();
+                    None
+                }
+                Err(error) => Some(format!(
+                    "Schwab current-session history failed: {error}"
+                )),
+            }
+        } else {
+            Some("Could not determine the current New York trading day".into())
+        };
+        (history, source_minutes, session_error)
+    };
+    tokio::pin!(bootstrap);
+    let mut bootstrap_pending = true;
+    let mut live_minutes = BTreeMap::new();
     loop {
-        match receiver.recv().await {
+        tokio::select! {
+            result = &mut bootstrap, if bootstrap_pending => {
+                bootstrap_pending = false;
+                let (history, source_minutes, session_error) = result;
+                let mut snapshot = Vec::new();
+                match history {
+                    Ok(history) => {
+                        let _ = storage::save_bars(&db_path, "schwab", &symbol, &timeframe, &history);
+                        snapshot = history;
+                    }
+                    Err(error) => emit_shared_stream_state(
+                        &app,
+                        &subscribers,
+                        &status,
+                        &MarketDataProvider::Schwab,
+                        &environment,
+                        &symbol,
+                        &timeframe,
+                        "reconnecting",
+                        Some(error.to_string()),
+                    ),
+                }
+                if !source_minutes.is_empty() {
+                    let _ = storage::save_bars(&db_path, "schwab", &symbol, "1m", &source_minutes);
+                    source_minutes.iter().for_each(|bar| {
+                        live_minutes.entry(bar.time).or_insert_with(|| bar.clone());
+                    });
+                    snapshot = {
+                        let mut combined = snapshot;
+                        merge_retained_bars(
+                            &mut combined,
+                            &schwab::aggregate_bars(&source_minutes, &timeframe),
+                            retained_limit,
+                        );
+                        combined
+                    };
+                }
+                if !snapshot.is_empty() {
+                    let retained = retain_schwab_bootstrap_snapshot(&latest_bars, &snapshot, retained_limit);
+                    emit_bar_snapshot(
+                        &app,
+                        &subscribers,
+                        &MarketDataProvider::Schwab,
+                        &environment,
+                        &symbol,
+                        &timeframe,
+                        &retained,
+                    );
+                }
+                if let Some(message) = session_error {
+                    emit_shared_stream_state(
+                        &app,
+                        &subscribers,
+                        &status,
+                        &MarketDataProvider::Schwab,
+                        &environment,
+                        &symbol,
+                        &timeframe,
+                        "stale",
+                        Some(message),
+                    );
+                }
+            }
+            received = receiver.recv() => match received {
             Ok(SchwabStreamEvent::State { state, message }) => emit_shared_stream_state(
                 &app,
                 &subscribers,
@@ -2576,6 +2680,23 @@ async fn run_schwab_bar_stream(
                 symbol: event_symbol,
                 bar,
             }) if event_symbol.eq_ignore_ascii_case(&symbol) => {
+                let needs_streaming_state = status
+                    .read()
+                    .map(|current| current.state != "streaming")
+                    .unwrap_or(true);
+                if needs_streaming_state {
+                    emit_shared_stream_state(
+                        &app,
+                        &subscribers,
+                        &status,
+                        &MarketDataProvider::Schwab,
+                        &environment,
+                        &symbol,
+                        &timeframe,
+                        "streaming",
+                        None,
+                    );
+                }
                 let previous = live_minutes.insert(bar.time, bar.clone());
                 let Some(bucket_time) = schwab::bucket_start(bar.time, &timeframe) else {
                     continue;
@@ -2629,8 +2750,21 @@ async fn run_schwab_bar_stream(
                 );
             }
             Ok(_) => {}
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                emit_shared_stream_state(
+                    &app,
+                    &subscribers,
+                    &status,
+                    &MarketDataProvider::Schwab,
+                    &environment,
+                    &symbol,
+                    &timeframe,
+                    "stale",
+                    Some(format!("Schwab chart consumer skipped {skipped} shared updates; waiting for the next chart candle")),
+                );
+            }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     }
 }
@@ -3527,6 +3661,34 @@ mod stream_tests {
             vec![100, 200, 300]
         );
         assert_eq!(retained[1].close, 20.0);
+    }
+
+    #[test]
+    fn schwab_rest_bootstrap_cannot_overwrite_an_early_live_candle() {
+        let bar = |time: i64, close: f64, realtime: bool| Bar {
+            time,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: close,
+            realtime,
+        };
+        let latest = Arc::new(RwLock::new(vec![
+            bar(100, 1.0, false),
+            bar(300, 30.0, true),
+        ]));
+        let retained = retain_schwab_bootstrap_snapshot(
+            &latest,
+            &[bar(200, 2.0, false), bar(300, 3.0, false)],
+            10,
+        );
+        assert_eq!(
+            retained.iter().map(|item| item.time).collect::<Vec<_>>(),
+            vec![100, 200, 300]
+        );
+        assert_eq!(retained[2].close, 30.0);
+        assert!(retained[2].realtime);
     }
 
     #[test]

@@ -46,6 +46,7 @@ struct Inner {
     connection_state: RwLock<SchwabConnectionState>,
     changed: Notify,
     events: broadcast::Sender<SchwabStreamEvent>,
+    chart_events: broadcast::Sender<SchwabStreamEvent>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
@@ -63,6 +64,7 @@ pub struct SchwabStreamer {
 impl SchwabStreamer {
     pub fn new(api: Schwab) -> Self {
         let (events, _) = broadcast::channel(2_048);
+        let (chart_events, _) = broadcast::channel(2_048);
         Self {
             inner: Arc::new(Inner {
                 api,
@@ -73,6 +75,7 @@ impl SchwabStreamer {
                 }),
                 changed: Notify::new(),
                 events,
+                chart_events,
                 task: Mutex::new(None),
             }),
         }
@@ -80,6 +83,10 @@ impl SchwabStreamer {
 
     pub fn subscribe(&self) -> broadcast::Receiver<SchwabStreamEvent> {
         self.inner.events.subscribe()
+    }
+
+    pub fn subscribe_chart(&self) -> broadcast::Receiver<SchwabStreamEvent> {
+        self.inner.chart_events.subscribe()
     }
 
     pub async fn connection_state(&self) -> (String, Option<String>) {
@@ -150,10 +157,12 @@ async fn publish_state(inner: &Inner, state: &str, message: Option<String>) {
         state: state.into(),
         message: message.clone(),
     };
-    let _ = inner.events.send(SchwabStreamEvent::State {
+    let event = SchwabStreamEvent::State {
         state: state.into(),
         message,
-    });
+    };
+    let _ = inner.events.send(event.clone());
+    let _ = inner.chart_events.send(event);
 }
 
 fn normalize_symbols(symbols: impl IntoIterator<Item = String>) -> BTreeSet<String> {
@@ -437,7 +446,9 @@ fn process_message(
                     if let (Some(symbol), Some(bar)) =
                         (symbol, schwab::chart_bar_from_value(content))
                     {
-                        let _ = inner.events.send(SchwabStreamEvent::Chart { symbol, bar });
+                        let _ = inner
+                            .chart_events
+                            .send(SchwabStreamEvent::Chart { symbol, bar });
                     }
                 }
                 "LEVELONE_OPTIONS" => {
@@ -567,6 +578,26 @@ mod tests {
         assert_eq!(option.gamma, 0.025);
         assert_eq!(option.open_interest, 1200.0);
         assert_eq!(option.expiration_date, "2026-08-21");
+    }
+
+    #[test]
+    fn chart_consumers_are_isolated_from_option_traffic() {
+        let streamer = SchwabStreamer::new(Schwab::new().unwrap());
+        let mut general = streamer.subscribe();
+        let mut charts = streamer.subscribe_chart();
+        process_message(
+            &streamer.inner,
+            r#"{"data":[
+                {"service":"LEVELONE_OPTIONS","content":[{"key":"AAPL  260821C00200000","12":2026,"23":8,"26":21,"20":200.0,"21":"C","22":"AAPL","13":100.0,"29":0.02,"9":1200,"35":205.0}]},
+                {"service":"CHART_EQUITY","content":[{"key":"AAPL","1":205.0,"2":205.2,"3":204.9,"4":205.1,"5":1000,"6":1,"7":1784678340000,"8":20260721}]}
+            ]}"#,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        assert!(matches!(general.try_recv(), Ok(SchwabStreamEvent::Option(_))));
+        assert!(matches!(charts.try_recv(), Ok(SchwabStreamEvent::Chart { symbol, .. }) if symbol == "AAPL"));
+        assert!(matches!(charts.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
     }
 
     #[tokio::test]
