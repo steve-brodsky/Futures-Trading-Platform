@@ -11,7 +11,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::{models::{OptionContract, Quote}, schwab, schwab::Schwab, AppError};
 
-const EQUITY_FIELDS: &str = "0,1,2,3,8,12,18,32,33,34,42";
+const EQUITY_FIELDS: &str = "0,1,2,3,8,12,18,32,33,34,35,42";
 const CHART_FIELDS: &str = "0,1,2,3,4,5,6,7,8";
 const OPTION_FIELDS: &str = "0,2,3,8,9,10,12,13,20,21,22,23,26,27,28,29,33,35,37,38,39";
 
@@ -25,6 +25,12 @@ pub enum SchwabStreamEvent {
     Chart {
         symbol: String,
         bar: crate::models::Bar,
+    },
+    EquityTick {
+        symbol: String,
+        price: f64,
+        cumulative_volume: f64,
+        time: i64,
     },
     Option(OptionContract),
     OptionState {
@@ -174,6 +180,10 @@ fn normalize_symbols(symbols: impl IntoIterator<Item = String>) -> BTreeSet<Stri
         .collect()
 }
 
+fn equity_subscription_symbols(desired: &DesiredSubscriptions) -> BTreeSet<String> {
+    desired.quotes.union(&desired.charts).cloned().collect()
+}
+
 async fn run(inner: Arc<Inner>) {
     let mut retry = 0_u32;
     loop {
@@ -311,6 +321,7 @@ where
     S: futures_util::Sink<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
+    let mut requests = Vec::new();
     if previous.charts != next.charts {
         *request_id += 1;
         let (command, keys) = if next.charts.is_empty() {
@@ -321,45 +332,33 @@ where
         } else {
             ("SUBS", next.charts.iter().cloned().collect::<Vec<_>>())
         };
-        write
-            .send(Message::Text(
-                request(
-                    info,
-                    *request_id,
-                    "CHART_EQUITY",
-                    command,
-                    json!({"keys":keys.join(","),"fields":CHART_FIELDS}),
-                )
-                .to_string()
-                .into(),
-            ))
-            .await
-            .map_err(|error| AppError::Api(error.to_string()))?;
+        requests.push(request_entry(
+            info,
+            *request_id,
+            "CHART_EQUITY",
+            command,
+            json!({"keys":keys.join(","),"fields":CHART_FIELDS}),
+        ));
     }
-    if previous.quotes != next.quotes {
+    let previous_equities = equity_subscription_symbols(previous);
+    let next_equities = equity_subscription_symbols(next);
+    if previous_equities != next_equities {
         *request_id += 1;
-        let (command, keys) = if next.quotes.is_empty() {
+        let (command, keys) = if next_equities.is_empty() {
             (
                 "UNSUBS",
-                previous.quotes.iter().cloned().collect::<Vec<_>>(),
+                previous_equities.into_iter().collect::<Vec<_>>(),
             )
         } else {
-            ("SUBS", next.quotes.iter().cloned().collect::<Vec<_>>())
+            ("SUBS", next_equities.into_iter().collect::<Vec<_>>())
         };
-        write
-            .send(Message::Text(
-                request(
-                    info,
-                    *request_id,
-                    "LEVELONE_EQUITIES",
-                    command,
-                    json!({"keys":keys.join(","),"fields":EQUITY_FIELDS}),
-                )
-                .to_string()
-                .into(),
-            ))
-            .await
-            .map_err(|error| AppError::Api(error.to_string()))?;
+        requests.push(request_entry(
+            info,
+            *request_id,
+            "LEVELONE_EQUITIES",
+            command,
+            json!({"keys":keys.join(","),"fields":EQUITY_FIELDS}),
+        ));
     }
     if previous.options != next.options {
         *request_id += 1;
@@ -371,18 +370,17 @@ where
         } else {
             ("SUBS", next.options.iter().cloned().collect::<Vec<_>>())
         };
+        requests.push(request_entry(
+            info,
+            *request_id,
+            "LEVELONE_OPTIONS",
+            command,
+            json!({"keys":keys.join(","),"fields":OPTION_FIELDS}),
+        ));
+    }
+    if !requests.is_empty() {
         write
-            .send(Message::Text(
-                request(
-                    info,
-                    *request_id,
-                    "LEVELONE_OPTIONS",
-                    command,
-                    json!({"keys":keys.join(","),"fields":OPTION_FIELDS}),
-                )
-                .to_string()
-                .into(),
-            ))
+            .send(Message::Text(json!({"requests": requests}).to_string().into()))
             .await
             .map_err(|error| AppError::Api(error.to_string()))?;
     }
@@ -433,8 +431,16 @@ fn process_message(
         {
             match service {
                 "LEVELONE_EQUITIES" => {
-                    if let Some(quote) = merge_sparse_quote(quote_state, content) {
-                        let _ = inner.events.send(SchwabStreamEvent::Quote(quote));
+                    if let Some(update) = merge_sparse_quote(quote_state, content) {
+                        let _ = inner.events.send(SchwabStreamEvent::Quote(update.quote));
+                        if let Some((price, cumulative_volume, time)) = update.tick {
+                            let _ = inner.chart_events.send(SchwabStreamEvent::EquityTick {
+                                symbol: update.symbol,
+                                price,
+                                cumulative_volume,
+                                time,
+                            });
+                        }
                     }
                 }
                 "CHART_EQUITY" => {
@@ -482,7 +488,16 @@ fn merge_sparse_option(
     schwab::streamed_option_from_value(fields)
 }
 
-fn merge_sparse_quote(quote_state: &mut HashMap<String, Value>, content: &Value) -> Option<Quote> {
+struct MergedEquityUpdate {
+    symbol: String,
+    quote: Quote,
+    tick: Option<(f64, f64, i64)>,
+}
+
+fn merge_sparse_quote(
+    quote_state: &mut HashMap<String, Value>,
+    content: &Value,
+) -> Option<MergedEquityUpdate> {
     let symbol = content
         .get("key")
         .or_else(|| content.get("0"))?
@@ -495,7 +510,30 @@ fn merge_sparse_quote(quote_state: &mut HashMap<String, Value>, content: &Value)
     for (key, value) in content.as_object()? {
         target.insert(key.clone(), value.clone());
     }
-    schwab::streamed_quote_from_value(fields)
+    let quote = schwab::streamed_quote_from_value(fields)?;
+    let trade_changed = ["3", "8", "35"]
+        .into_iter()
+        .any(|field| content.get(field).is_some());
+    let tick = trade_changed
+        .then(|| {
+            let price = fields.get("3")?.as_f64()?;
+            let cumulative_volume = fields
+                .get("8")
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            let time_ms = fields
+                .get("35")
+                .or_else(|| fields.get("34"))
+                .and_then(Value::as_i64)
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+            Some((price, cumulative_volume, time_ms.div_euclid(1_000)))
+        })
+        .flatten();
+    Some(MergedEquityUpdate {
+        symbol,
+        quote,
+        tick,
+    })
 }
 
 fn login_succeeded(value: &Value) -> Result<bool, AppError> {
@@ -534,19 +572,54 @@ fn request(
     command: &str,
     parameters: Value,
 ) -> Value {
-    json!({"requests":[{
+    json!({"requests":[request_entry(info, id, service, command, parameters)]})
+}
+
+fn request_entry(
+    info: &schwab::StreamerInfo,
+    id: u64,
+    service: &str,
+    command: &str,
+    parameters: Value,
+) -> Value {
+    json!({
         "service":service,
         "command":command,
         "requestid":id.to_string(),
         "SchwabClientCustomerId":info.schwab_client_customer_id,
         "SchwabClientCorrelId":info.schwab_client_correl_id,
         "parameters":parameters
-    }]})
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{pin::Pin, task::{Context, Poll}};
+
+    #[derive(Default)]
+    struct CaptureSink(Vec<Message>);
+
+    impl futures_util::Sink<Message> for CaptureSink {
+        type Error = std::convert::Infallible;
+
+        fn poll_ready(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+            self.0.push(item);
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn login_must_succeed_before_streaming() {
@@ -562,6 +635,51 @@ mod tests {
     fn desired_symbols_are_uppercase_and_deduplicated() {
         let symbols = normalize_symbols([" aapl ".into(), "AAPL".into(), "spy".into()]);
         assert_eq!(symbols.into_iter().collect::<Vec<_>>(), vec!["AAPL", "SPY"]);
+    }
+
+    #[test]
+    fn chart_symbols_are_always_included_in_level_one_equities() {
+        let desired = DesiredSubscriptions {
+            charts: BTreeSet::from(["SPY".into(), "QQQ".into()]),
+            quotes: BTreeSet::from(["AAPL".into(), "SPY".into()]),
+            options: BTreeSet::new(),
+        };
+        assert_eq!(
+            equity_subscription_symbols(&desired)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec!["AAPL", "QQQ", "SPY"],
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_services_are_batched_into_one_subscription_message() {
+        let info = schwab::StreamerInfo {
+            streamer_socket_url: "wss://example.test".into(),
+            schwab_client_customer_id: "customer".into(),
+            schwab_client_correl_id: "correlation".into(),
+            schwab_client_channel: "channel".into(),
+            schwab_client_function_id: "function".into(),
+        };
+        let previous = DesiredSubscriptions::default();
+        let next = DesiredSubscriptions {
+            charts: BTreeSet::from(["SPY".into()]),
+            quotes: BTreeSet::from(["AAPL".into()]),
+            options: BTreeSet::from(["SPY   260724C00750000".into()]),
+        };
+        let mut sink = CaptureSink::default();
+        let mut request_id = 1;
+        update_subscriptions(&mut sink, &info, &mut request_id, &previous, &next)
+            .await
+            .unwrap();
+        assert_eq!(sink.0.len(), 1);
+        let Message::Text(text) = &sink.0[0] else { panic!("expected text subscription request") };
+        let payload: Value = serde_json::from_str(text.as_ref()).unwrap();
+        let requests = payload["requests"].as_array().unwrap();
+        assert_eq!(requests.len(), 3);
+        let equities = requests.iter().find(|item| item["service"] == "LEVELONE_EQUITIES").unwrap();
+        assert_eq!(equities["parameters"]["keys"], "AAPL,SPY");
+        assert!(equities["parameters"]["fields"].as_str().unwrap().split(',').any(|field| field == "35"));
     }
 
     #[test]
@@ -639,7 +757,7 @@ mod tests {
         let mut state = HashMap::new();
         let initial = merge_sparse_quote(
             &mut state,
-            &json!({"key":"AAPL","delayed":false,"1":210.0,"2":210.2,"3":210.1,"12":208.0}),
+            &json!({"key":"AAPL","delayed":false,"1":210.0,"2":210.2,"3":210.1,"8":1000,"12":208.0,"35":1_784_592_000_000_i64}),
         )
         .unwrap();
         let update = merge_sparse_quote(
@@ -647,8 +765,28 @@ mod tests {
             &json!({"key":"AAPL","1":210.05,"34":1_784_592_000_000_i64}),
         )
         .unwrap();
-        assert_eq!(initial.ask, update.ask);
-        assert_eq!(update.bid, 210.05);
-        assert_eq!(update.last, 210.1);
+        assert_eq!(initial.quote.ask, update.quote.ask);
+        assert_eq!(update.quote.bid, 210.05);
+        assert_eq!(update.quote.last, 210.1);
+        assert_eq!(initial.tick, Some((210.1, 1000.0, 1_784_592_000)));
+        assert_eq!(update.tick, None);
+    }
+
+    #[test]
+    fn trade_only_sparse_updates_emit_chart_ticks_from_merged_fields() {
+        let streamer = SchwabStreamer::new(Schwab::new().unwrap());
+        let mut charts = streamer.subscribe_chart();
+        process_message(
+            &streamer.inner,
+            r#"{"data":[{"service":"LEVELONE_EQUITIES","content":[{"key":"SPY","3":748.1,"8":1000000,"12":745.0,"35":1784762475000}]}]}"#,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+        )
+        .unwrap();
+        assert!(matches!(
+            charts.try_recv(),
+            Ok(SchwabStreamEvent::EquityTick { symbol, price, cumulative_volume, time })
+                if symbol == "SPY" && price == 748.1 && cumulative_volume == 1_000_000.0 && time == 1_784_762_475
+        ));
     }
 }

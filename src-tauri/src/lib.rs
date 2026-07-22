@@ -2523,6 +2523,72 @@ fn stream_provider_error(value: &Value) -> Option<String> {
     }
 }
 
+fn provisional_minute_from_equity_tick(
+    live_minutes: &BTreeMap<i64, Bar>,
+    last_tick: &mut Option<(i64, f64)>,
+    price: f64,
+    cumulative_volume: f64,
+    time: i64,
+) -> Option<Bar> {
+    if !price.is_finite()
+        || price <= 0.0
+        || !cumulative_volume.is_finite()
+        || cumulative_volume < 0.0
+        || time <= 0
+    {
+        return None;
+    }
+    if last_tick.is_some_and(|(previous_time, _)| time < previous_time) {
+        return None;
+    }
+    let minute_time = schwab::bucket_start(time, "1m")?;
+    let volume_delta = last_tick
+        .filter(|(previous_time, previous_volume)| {
+            time.saturating_sub(*previous_time) <= 120 && cumulative_volume >= *previous_volume
+        })
+        .map(|(_, previous_volume)| cumulative_volume - previous_volume)
+        .unwrap_or_default();
+    *last_tick = Some((time, cumulative_volume));
+    let mut minute = live_minutes.get(&minute_time).cloned().unwrap_or(Bar {
+        time: minute_time,
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        volume: 0.0,
+        realtime: true,
+    });
+    minute.high = minute.high.max(price);
+    minute.low = minute.low.min(price);
+    minute.close = price;
+    minute.volume = (minute.volume + volume_delta).max(0.0);
+    minute.realtime = true;
+    Some(minute)
+}
+
+fn aggregate_schwab_live_minute(
+    live_minutes: &mut BTreeMap<i64, Bar>,
+    minute: Bar,
+    timeframe: &str,
+) -> Option<(Bar, Option<Bar>)> {
+    let previous = live_minutes.insert(minute.time, minute.clone());
+    let bucket_time = schwab::bucket_start(minute.time, timeframe)?;
+    // CHART_EQUITY can close the preceding minute after a LEVELONE_EQUITIES
+    // trade has already opened the next one. Keep those newer provisional
+    // minutes so an authoritative close cannot roll the live chart backward.
+    live_minutes.retain(|time, _| {
+        *time > minute.time || schwab::bucket_start(*time, timeframe) == Some(bucket_time)
+    });
+    let mut update = schwab::aggregate_bars(
+        &live_minutes.values().cloned().collect::<Vec<_>>(),
+        timeframe,
+    )
+    .into_iter()
+    .find(|item| item.time == bucket_time)?;
+    update.realtime = true;
+    Some((update, previous))
+}
+
 async fn run_schwab_bar_stream(
     app: tauri::AppHandle,
     api: Schwab,
@@ -2600,6 +2666,7 @@ async fn run_schwab_bar_stream(
     tokio::pin!(bootstrap);
     let mut bootstrap_pending = true;
     let mut live_minutes = BTreeMap::new();
+    let mut last_equity_tick = None;
     loop {
         tokio::select! {
             result = &mut bootstrap, if bootstrap_pending => {
@@ -2619,8 +2686,8 @@ async fn run_schwab_bar_stream(
                         &environment,
                         &symbol,
                         &timeframe,
-                        "reconnecting",
-                        Some(error.to_string()),
+                        "stale",
+                        Some(format!("Schwab history refresh failed; live updates will continue: {error}")),
                     ),
                 }
                 if !source_minutes.is_empty() {
@@ -2697,25 +2764,22 @@ async fn run_schwab_bar_stream(
                         None,
                     );
                 }
-                let previous = live_minutes.insert(bar.time, bar.clone());
-                let Some(bucket_time) = schwab::bucket_start(bar.time, &timeframe) else {
-                    continue;
-                };
-                live_minutes
-                    .retain(|time, _| schwab::bucket_start(*time, &timeframe) == Some(bucket_time));
-                let live_bucket = schwab::aggregate_bars(
-                    &live_minutes.values().cloned().collect::<Vec<_>>(),
-                    &timeframe,
-                )
-                .into_iter()
-                .find(|item| item.time == bucket_time);
-                let Some(mut update) = live_bucket else {
+                let chart_minute = bar.time;
+                if last_equity_tick.is_some_and(|(tick_time, _)| {
+                    schwab::bucket_start(tick_time, "1m")
+                        .is_some_and(|tick_minute| tick_minute <= chart_minute)
+                }) {
+                    last_equity_tick = None;
+                }
+                let Some((mut update, previous)) =
+                    aggregate_schwab_live_minute(&mut live_minutes, bar.clone(), &timeframe)
+                else {
                     continue;
                 };
                 if timeframe == "M" {
                     if let Ok(retained) = latest_bars.read() {
                         if let Some(existing) =
-                            retained.iter().find(|item| item.time == bucket_time)
+                            retained.iter().find(|item| item.time == update.time)
                         {
                             update.open = existing.open;
                             update.high = existing.high.max(update.high);
@@ -2727,6 +2791,86 @@ async fn run_schwab_bar_stream(
                     }
                 }
                 update.realtime = true;
+                let _ = storage::save_bars(
+                    &db_path,
+                    "schwab",
+                    &symbol,
+                    &timeframe,
+                    std::slice::from_ref(&update),
+                );
+                let _ = retain_bar_snapshot(
+                    &latest_bars,
+                    std::slice::from_ref(&update),
+                    retained_limit,
+                );
+                emit_bar_update(
+                    &app,
+                    &subscribers,
+                    &MarketDataProvider::Schwab,
+                    &environment,
+                    &symbol,
+                    &timeframe,
+                    &update,
+                );
+            }
+            Ok(SchwabStreamEvent::EquityTick {
+                symbol: event_symbol,
+                price,
+                cumulative_volume,
+                time,
+            }) if event_symbol.eq_ignore_ascii_case(&symbol) => {
+                let Some(minute) = provisional_minute_from_equity_tick(
+                    &live_minutes,
+                    &mut last_equity_tick,
+                    price,
+                    cumulative_volume,
+                    time,
+                ) else {
+                    continue;
+                };
+                let _ = storage::save_bars(
+                    &db_path,
+                    "schwab",
+                    &symbol,
+                    "1m",
+                    std::slice::from_ref(&minute),
+                );
+                let source = minute.clone();
+                let Some((mut update, previous)) =
+                    aggregate_schwab_live_minute(&mut live_minutes, minute, &timeframe)
+                else {
+                    continue;
+                };
+                if timeframe == "M" {
+                    if let Ok(retained) = latest_bars.read() {
+                        if let Some(existing) = retained.iter().find(|item| item.time == update.time)
+                        {
+                            update.open = existing.open;
+                            update.high = existing.high.max(update.high);
+                            update.low = existing.low.min(update.low);
+                            let previous_volume = previous.map(|item| item.volume).unwrap_or(0.0);
+                            update.volume =
+                                (existing.volume + source.volume - previous_volume).max(0.0);
+                        }
+                    }
+                }
+                let needs_streaming_state = status
+                    .read()
+                    .map(|current| current.state != "streaming")
+                    .unwrap_or(true);
+                if needs_streaming_state {
+                    emit_shared_stream_state(
+                        &app,
+                        &subscribers,
+                        &status,
+                        &MarketDataProvider::Schwab,
+                        &environment,
+                        &symbol,
+                        &timeframe,
+                        "streaming",
+                        None,
+                    );
+                }
                 let _ = storage::save_bars(
                     &db_path,
                     "schwab",
@@ -3689,6 +3833,124 @@ mod stream_tests {
         );
         assert_eq!(retained[2].close, 30.0);
         assert!(retained[2].realtime);
+    }
+
+    #[test]
+    fn schwab_equity_ticks_build_the_open_minute_before_chart_close() {
+        let minute_start = 1_784_762_460;
+        let mut live_minutes = BTreeMap::new();
+        let mut last_tick = None;
+        let first = provisional_minute_from_equity_tick(
+            &live_minutes,
+            &mut last_tick,
+            748.10,
+            1_000_000.0,
+            minute_start + 5,
+        )
+        .unwrap();
+        assert_eq!(
+            (first.open, first.high, first.low, first.close, first.volume),
+            (748.10, 748.10, 748.10, 748.10, 0.0)
+        );
+        live_minutes.insert(first.time, first);
+
+        let higher = provisional_minute_from_equity_tick(
+            &live_minutes,
+            &mut last_tick,
+            748.25,
+            1_000_025.0,
+            minute_start + 15,
+        )
+        .unwrap();
+        live_minutes.insert(higher.time, higher);
+        let lower = provisional_minute_from_equity_tick(
+            &live_minutes,
+            &mut last_tick,
+            748.00,
+            1_000_030.0,
+            minute_start + 25,
+        )
+        .unwrap();
+        assert_eq!(lower.open, 748.10);
+        assert_eq!(lower.high, 748.25);
+        assert_eq!(lower.low, 748.00);
+        assert_eq!(lower.close, 748.00);
+        assert_eq!(lower.volume, 30.0);
+        assert!(lower.realtime);
+    }
+
+    #[test]
+    fn schwab_closed_chart_minute_replaces_the_provisional_source() {
+        let provisional = Bar {
+            time: 1_784_762_460,
+            open: 748.1,
+            high: 748.2,
+            low: 748.0,
+            close: 748.15,
+            volume: 20.0,
+            realtime: true,
+        };
+        let closed = Bar {
+            time: provisional.time,
+            open: 748.08,
+            high: 748.3,
+            low: 747.95,
+            close: 748.22,
+            volume: 1500.0,
+            realtime: true,
+        };
+        let mut live_minutes = BTreeMap::from([(provisional.time, provisional)]);
+        let (update, previous) =
+            aggregate_schwab_live_minute(&mut live_minutes, closed.clone(), "1m").unwrap();
+        assert!(previous.is_some());
+        assert_eq!(
+            (
+                update.open,
+                update.high,
+                update.low,
+                update.close,
+                update.volume
+            ),
+            (
+                closed.open,
+                closed.high,
+                closed.low,
+                closed.close,
+                closed.volume
+            )
+        );
+        assert_eq!(live_minutes[&closed.time].close, closed.close);
+        assert_eq!(live_minutes[&closed.time].volume, closed.volume);
+    }
+
+    #[test]
+    fn schwab_late_chart_close_preserves_the_newer_live_minute() {
+        let closed = Bar {
+            time: 1_784_762_460,
+            open: 748.1,
+            high: 748.2,
+            low: 748.0,
+            close: 748.15,
+            volume: 1500.0,
+            realtime: true,
+        };
+        let current = Bar {
+            time: closed.time + 60,
+            open: 748.16,
+            high: 748.19,
+            low: 748.14,
+            close: 748.18,
+            volume: 12.0,
+            realtime: true,
+        };
+        let mut live_minutes = BTreeMap::from([(current.time, current.clone())]);
+
+        let (update, _) =
+            aggregate_schwab_live_minute(&mut live_minutes, closed.clone(), "1m").unwrap();
+
+        assert_eq!(update.time, closed.time);
+        assert_eq!(live_minutes[&current.time].close, current.close);
+        assert_eq!(live_minutes[&closed.time].close, closed.close);
     }
 
     #[test]
