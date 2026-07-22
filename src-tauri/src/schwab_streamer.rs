@@ -36,9 +36,16 @@ struct DesiredSubscriptions {
 struct Inner {
     api: Schwab,
     desired: RwLock<DesiredSubscriptions>,
+    connection_state: RwLock<SchwabConnectionState>,
     changed: Notify,
     events: broadcast::Sender<SchwabStreamEvent>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SchwabConnectionState {
+    state: String,
+    message: Option<String>,
 }
 
 #[derive(Clone)]
@@ -53,6 +60,10 @@ impl SchwabStreamer {
             inner: Arc::new(Inner {
                 api,
                 desired: RwLock::new(DesiredSubscriptions::default()),
+                connection_state: RwLock::new(SchwabConnectionState {
+                    state: "disconnected".into(),
+                    message: None,
+                }),
                 changed: Notify::new(),
                 events,
                 task: Mutex::new(None),
@@ -62,6 +73,11 @@ impl SchwabStreamer {
 
     pub fn subscribe(&self) -> broadcast::Receiver<SchwabStreamEvent> {
         self.inner.events.subscribe()
+    }
+
+    pub async fn connection_state(&self) -> (String, Option<String>) {
+        let current = self.inner.connection_state.read().await;
+        (current.state.clone(), current.message.clone())
     }
 
     pub async fn set_chart_symbols(&self, symbols: impl IntoIterator<Item = String>) {
@@ -91,10 +107,12 @@ impl SchwabStreamer {
             task.abort();
         }
         *self.inner.desired.write().await = DesiredSubscriptions::default();
-        let _ = self.inner.events.send(SchwabStreamEvent::State {
-            state: "disconnected".into(),
-            message: Some("Schwab disconnected".into()),
-        });
+        publish_state(
+            &self.inner,
+            "disconnected",
+            Some("Schwab disconnected".into()),
+        )
+        .await;
     }
 
     async fn ensure_running(&self) {
@@ -107,6 +125,17 @@ impl SchwabStreamer {
             run(inner).await;
         }));
     }
+}
+
+async fn publish_state(inner: &Inner, state: &str, message: Option<String>) {
+    *inner.connection_state.write().await = SchwabConnectionState {
+        state: state.into(),
+        message: message.clone(),
+    };
+    let _ = inner.events.send(SchwabStreamEvent::State {
+        state: state.into(),
+        message,
+    });
 }
 
 fn normalize_symbols(symbols: impl IntoIterator<Item = String>) -> BTreeSet<String> {
@@ -122,10 +151,7 @@ async fn run(inner: Arc<Inner>) {
     let mut retry = 0_u32;
     loop {
         if *inner.desired.read().await == DesiredSubscriptions::default() {
-            let _ = inner.events.send(SchwabStreamEvent::State {
-                state: "disconnected".into(),
-                message: None,
-            });
+            publish_state(&inner, "disconnected", None).await;
             inner.changed.notified().await;
             retry = 0;
             continue;
@@ -135,27 +161,25 @@ async fn run(inner: Arc<Inner>) {
         } else {
             "reconnecting"
         };
-        let _ = inner.events.send(SchwabStreamEvent::State {
-            state: state.into(),
-            message: None,
-        });
+        publish_state(&inner, state, None).await;
         match connect_once(inner.clone()).await {
             Ok(()) => retry = 0,
             Err(error) => {
                 let reconnect_required = matches!(error, AppError::AuthenticationRequired);
-                let _ = inner.events.send(SchwabStreamEvent::State {
-                    state: if reconnect_required {
+                publish_state(
+                    &inner,
+                    if reconnect_required {
                         "disconnected"
                     } else {
                         "reconnecting"
-                    }
-                    .into(),
-                    message: Some(if reconnect_required {
+                    },
+                    Some(if reconnect_required {
                         "Schwab authorization expired. Reconnect Schwab in Settings.".into()
                     } else {
                         error.to_string()
                     }),
-                });
+                )
+                .await;
                 retry = retry.saturating_add(1);
                 let jitter = rand::random::<u16>() as u64 % 750;
                 let delay = (1_000_u64 * 2_u64.pow(retry.min(5))).min(30_000) + jitter;
@@ -220,10 +244,7 @@ async fn connect_once(inner: Arc<Inner>) -> Result<(), AppError> {
     let desired = inner.desired.read().await.clone();
     update_subscriptions(&mut write, &info, &mut request_id, &subscribed, &desired).await?;
     subscribed = desired;
-    let _ = inner.events.send(SchwabStreamEvent::State {
-        state: "streaming".into(),
-        message: None,
-    });
+    publish_state(&inner, "streaming", None).await;
 
     let timeout = tokio::time::sleep(Duration::from_secs(60));
     tokio::pin!(timeout);
@@ -442,6 +463,20 @@ mod tests {
     fn desired_symbols_are_uppercase_and_deduplicated() {
         let symbols = normalize_symbols([" aapl ".into(), "AAPL".into(), "spy".into()]);
         assert_eq!(symbols.into_iter().collect::<Vec<_>>(), vec!["AAPL", "SPY"]);
+    }
+
+    #[tokio::test]
+    async fn connection_state_replays_latest_status_to_late_consumers() {
+        let streamer = SchwabStreamer::new(Schwab::new().unwrap());
+        publish_state(&streamer.inner, "streaming", None).await;
+
+        // A broadcast receiver created now cannot see the earlier event, so
+        // new chart/quote tasks bootstrap from the retained state instead.
+        let _late_receiver = streamer.subscribe();
+        assert_eq!(
+            streamer.connection_state().await,
+            ("streaming".into(), None)
+        );
     }
 
     #[test]

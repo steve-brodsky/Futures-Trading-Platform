@@ -2400,6 +2400,12 @@ async fn run_schwab_bar_stream(
     timeframe: String,
 ) {
     let mut receiver = streamer.subscribe();
+    let (current_state, current_message) = streamer.connection_state().await;
+    let initial_state = if current_state == "disconnected" {
+        "connecting"
+    } else {
+        &current_state
+    };
     emit_shared_stream_state(
         &app,
         &subscribers,
@@ -2408,8 +2414,8 @@ async fn run_schwab_bar_stream(
         &environment,
         &symbol,
         &timeframe,
-        "connecting",
-        None,
+        initial_state,
+        current_message,
     );
     match api.bars(&symbol, &timeframe).await {
         Ok(history) => {
@@ -2546,6 +2552,23 @@ async fn run_schwab_quote_stream(
         }
     }
     let mut receiver = streamer.subscribe();
+    let (current_state, current_message) = streamer.connection_state().await;
+    emit_stream_state(
+        &app,
+        &subscription_id,
+        &MarketDataProvider::Schwab,
+        &environment,
+        "quotes",
+        if current_state == "disconnected" {
+            "connecting"
+        } else {
+            &current_state
+        },
+        current_message,
+        None,
+        None,
+        None,
+    );
     loop {
         match receiver.recv().await {
             Ok(SchwabStreamEvent::State { state, message }) => emit_stream_state(
