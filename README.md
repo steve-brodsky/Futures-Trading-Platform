@@ -26,7 +26,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 
 - Up to twelve chart tabs with persisted symbols, timeframes, indicators, alert settings, and visible preferences.
 - Native detached chart windows with drag-to-detach, cross-window tab movement, redocking, and restored window geometry.
-- Horizontal lines and horizontal rays with color, width, lock, move, delete, and high/low magnet snapping.
+- Horizontal lines and horizontal rays with color, width, lock, move, delete, high/low magnet snapping, and persistent live price-cross alerts managed from the chart toolbar.
 - Persistent drawings by symbol.
 - Right-side order/watchlist panel and a resizable brokerage panel for positions, orders, order history, balances, and notifications.
 - CSV export for the active brokerage table.

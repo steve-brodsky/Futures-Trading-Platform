@@ -52,6 +52,27 @@ describe("futures trade-contract resolution", () => {
     }).map((item) => item.symbol)).toEqual(["@MES", "MESU26", "MNQU26"]);
   });
 
+  it("includes enabled drawing-alert sources without duplicating chart instruments", () => {
+    expect(quoteSubscriptionInstruments({
+      watchlist: [],
+      tabs: [tab(continuous)],
+      drawings: {
+        "@MES": [{
+          id: "line", kind: "horizontal", points: [{ time: 1, price: 6200 }], color: "#fff",
+          alert: { enabled: true, direction: "either", frequency: "once", sound: "chime", durationSeconds: 3, provider: "tradestation", symbol: "@MES" },
+        }],
+        SPY: [{
+          id: "spy", kind: "horizontal", points: [{ time: 1, price: 500 }], color: "#fff",
+          alert: { enabled: true, direction: "above", frequency: "recurring", sound: "bell", durationSeconds: 1, provider: "schwab", symbol: "SPY" },
+        }],
+      },
+    }).map((item) => `${item.provider}:${item.symbol}`)).toEqual([
+      "schwab:SPY",
+      "tradestation:@MES",
+      "tradestation:MESU26",
+    ]);
+  });
+
   it("allows watchlist additions only while the shared quote stream has capacity", () => {
     const fullWatchlist = Array.from({ length: 98 }, (_, index) => instrument(`Q${index}`));
     const workspace = { watchlist: fullWatchlist, tabs: [tab(continuous)] };

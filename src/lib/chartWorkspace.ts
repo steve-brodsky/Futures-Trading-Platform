@@ -8,6 +8,7 @@ import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 import { normalizeGexSelection, normalizeGexTabSettings } from "./gex";
 import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./priceBasedCharts";
 import { isValidPositionDrawing } from "./positionDrawing";
+import { normalizeDrawingAlert, sameDrawingAlert } from "./drawingAlerts";
 
 export const MAX_CHART_TABS = 12;
 export const MAIN_WINDOW_ID = "main";
@@ -303,9 +304,19 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       if (drawing.kind === "position") return isValidPositionDrawing(drawing);
       return ["horizontal", "horizontal-ray"].includes(drawing.kind) && typeof drawing.id === "string" && typeof drawing.color === "string"
         && Array.isArray(drawing.points) && drawing.points.length > 0 && drawing.points.every((point) => Number.isFinite(point?.time) && Number.isFinite(point?.price));
-    }).map((item) => item.kind === "position"
-      ? { ...item, locked: item.locked === true }
-      : { ...item, locked: item.locked === true, lineWidth: [1, 2, 3, 4].includes(item.lineWidth ?? 1) ? item.lineWidth ?? 1 : 1, points: item.points.map((point) => ({ ...point })) });
+    }).map((item) => {
+      if (item.kind === "position") return { ...item, locked: item.locked === true };
+      const normalized = {
+        ...item,
+        locked: item.locked === true,
+        lineWidth: [1, 2, 3, 4].includes(item.lineWidth ?? 1) ? item.lineWidth ?? 1 : 1,
+        points: item.points.map((point) => ({ ...point })),
+      };
+      const alert = normalizeDrawingAlert(item.alert);
+      if (alert) normalized.alert = alert;
+      else delete normalized.alert;
+      return normalized;
+    });
     return valid.length ? [[symbol, valid]] : [];
   }));
   const gexSelections = Object.fromEntries(Object.entries(value.gexSelections ?? fallback.gexSelections ?? {}).flatMap(([symbol, selection]) => {
@@ -470,7 +481,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
           && a.entryPrice === b.entryPrice && a.stopPrice === b.stopPrice && a.targetPrice === b.targetPrice && a.quantity === b.quantity;
       }
       if (a.kind === "position" || b.kind === "position") return false;
-      return a.text === b.text && a.color === b.color && a.lineWidth === b.lineWidth
+      return a.text === b.text && a.color === b.color && a.lineWidth === b.lineWidth && sameDrawingAlert(a.alert, b.alert)
         && sameArray(a.points, b.points, (left, right) => left.time === right.time && left.price === right.price);
     });
     return [symbol, stable ? prior : items];

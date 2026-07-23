@@ -1,4 +1,5 @@
 import type { ChartTabState, Position, SymbolMeta, WorkspaceState } from "../types";
+import { drawingAlertQuoteInstruments } from "./drawingAlerts";
 import { instrumentKey, MAX_STREAMED_QUOTE_SYMBOLS } from "./watchlist";
 
 export function isContinuousFuture(symbol: SymbolMeta): boolean {
@@ -44,7 +45,7 @@ export function resolveTradeSymbol(tab: ChartTabState): string | undefined {
   return concreteSymbol(tab.tradeContract) ?? concreteSymbol(tab.symbol.underlying);
 }
 
-export function quoteSubscriptionInstruments(workspace: Pick<WorkspaceState, "tabs" | "watchlist">): SymbolMeta[] {
+export function quoteSubscriptionInstruments(workspace: Pick<WorkspaceState, "tabs" | "watchlist"> & Partial<Pick<WorkspaceState, "drawings">>): SymbolMeta[] {
   const instruments = new Map(workspace.watchlist.map((instrument) => [instrumentKey(instrument), instrument]));
   workspace.tabs.forEach((tab) => {
     instruments.set(instrumentKey(tab.symbol), tab.symbol);
@@ -53,10 +54,22 @@ export function quoteSubscriptionInstruments(workspace: Pick<WorkspaceState, "ta
       instruments.set(`tradestation:${tradeSymbol}`, { ...tab.symbol, symbol: tradeSymbol, underlying: undefined });
     }
   });
+  drawingAlertQuoteInstruments(workspace.drawings ?? {}).forEach((requirement) => {
+    const key = instrumentKey(requirement);
+    if (instruments.has(key)) return;
+    instruments.set(key, {
+      ...requirement,
+      description: requirement.symbol,
+      exchange: "",
+      assetType: requirement.provider === "schwab" ? "EQUITY" : "FUTURE",
+      minMove: 0.01,
+      pointValue: 1,
+    });
+  });
   return [...instruments.values()].sort((left, right) => instrumentKey(left).localeCompare(instrumentKey(right)));
 }
 
-export function canAddWatchlistSymbol(workspace: Pick<WorkspaceState, "tabs" | "watchlist">, value: SymbolMeta): boolean {
+export function canAddWatchlistSymbol(workspace: Pick<WorkspaceState, "tabs" | "watchlist"> & Partial<Pick<WorkspaceState, "drawings">>, value: SymbolMeta): boolean {
   if (workspace.watchlist.some((item) => instrumentKey(item) === instrumentKey(value))) return true;
   return quoteSubscriptionInstruments({ ...workspace, watchlist: [...workspace.watchlist, value] }).length <= MAX_STREAMED_QUOTE_SYMBOLS;
 }

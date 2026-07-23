@@ -415,14 +415,25 @@ describe("chart workspace", () => {
 
   it("normalizes persistent symbol drawings and rejects malformed entries", () => {
     const result = normalizeChartWorkspace({ ...fallback, drawings: { MES: [
-      { id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff" },
+      { id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", alert: { enabled: true, direction: "above", frequency: "recurring", sound: "bell", durationSeconds: 5, provider: "tradestation", symbol: " mes " } },
+      { id: "malformed-alert", kind: "horizontal-ray", points: [{ time: 10, price: 5010 }], color: "#0ff", alert: { enabled: true, provider: "invalid", symbol: "MES" } },
       { id: "long", kind: "position", side: "long", startTime: 10, endTime: 20, entryPrice: 5000, stopPrice: 4997.5, targetPrice: 5005, quantity: 2 },
       { id: "bad-position", kind: "position", side: "short", startTime: 10, endTime: 20, entryPrice: 5000, stopPrice: 4999, targetPrice: 5001, quantity: 1 },
       { id: "bad", kind: "horizontal", points: [], color: "#fff" },
     ] } }, fallback);
     expect(result.drawings.MES).toEqual([
-      { id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", locked: false, lineWidth: 1 },
+      { id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", locked: false, lineWidth: 1, alert: { enabled: true, direction: "above", frequency: "recurring", sound: "bell", durationSeconds: 5, provider: "tradestation", symbol: "MES", lastTriggeredAt: undefined } },
+      { id: "malformed-alert", kind: "horizontal-ray", points: [{ time: 10, price: 5010 }], color: "#0ff", locked: false, lineWidth: 1 },
       { id: "long", kind: "position", side: "long", startTime: 10, endTime: 20, entryPrice: 5000, stopPrice: 4997.5, targetPrice: 5005, quantity: 2, locked: false },
     ]);
+  });
+
+  it("replaces stabilized drawing references when only alert configuration changes", () => {
+    const alert = { enabled: true, direction: "either" as const, frequency: "once" as const, sound: "chime" as const, durationSeconds: 3 as const, provider: "tradestation" as const, symbol: "MES" };
+    const current = normalizeChartWorkspace({ ...fallback, drawings: { MES: [{ id: "line", kind: "horizontal", points: [{ time: 10, price: 5000 }], color: "#fff", alert }] } }, fallback);
+    const incoming = normalizeChartWorkspace({ ...current, revision: 2, drawings: { MES: [{ ...current.drawings.MES[0], alert: { ...alert, direction: "below" } }] } }, fallback);
+    const result = stabilizeChartWorkspace(current, incoming);
+    expect(result.drawings.MES).not.toBe(current.drawings.MES);
+    expect(result.drawings.MES[0]).toMatchObject({ alert: { direction: "below" } });
   });
 });

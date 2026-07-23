@@ -4,6 +4,8 @@ export type ConnectionState = "demo" | "connecting" | "live" | "stale" | "discon
 export type Timeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "D" | "W" | "M";
 export type AlertSound = "chime" | "bell" | "pulse" | "siren";
 export type AlertDurationSeconds = 1 | 3 | 5 | 10;
+export type DrawingAlertDirection = "either" | "above" | "below";
+export type DrawingAlertFrequency = "once" | "recurring";
 export type ChartKind = "candles" | "line" | "area" | "renko" | "point-and-figure";
 export type ChartLayout = "single" | "two-columns" | "two-rows" | "three-columns" | "three-rows" | "four-grid";
 export type ChartSplitRatios = Partial<Record<ChartLayout, number[]>>;
@@ -271,6 +273,17 @@ export interface EntryRuleResult {
 
 export type ChartTool = "cursor" | "horizontal" | "horizontal-ray" | "long-position" | "short-position";
 
+export interface DrawingAlertConfig {
+  enabled: boolean;
+  direction: DrawingAlertDirection;
+  frequency: DrawingAlertFrequency;
+  sound: AlertSound;
+  durationSeconds: AlertDurationSeconds;
+  provider: MarketDataProvider;
+  symbol: string;
+  lastTriggeredAt?: string;
+}
+
 export interface LineDrawing {
   id: string;
   kind: "trend" | "horizontal" | "horizontal-ray" | "ray" | "rectangle" | "fibonacci" | "text";
@@ -279,6 +292,7 @@ export interface LineDrawing {
   color: string;
   locked?: boolean;
   lineWidth?: 1 | 2 | 3 | 4;
+  alert?: DrawingAlertConfig;
 }
 
 export interface PositionDrawing {
@@ -302,6 +316,7 @@ export interface DrawingPatch {
   color?: string;
   locked?: boolean;
   lineWidth?: 1 | 2 | 3 | 4;
+  alert?: DrawingAlertConfig | null;
   side?: "long" | "short";
   startTime?: number;
   endTime?: number;

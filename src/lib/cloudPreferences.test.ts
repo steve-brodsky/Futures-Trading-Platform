@@ -131,6 +131,15 @@ describe("cloud preferences", () => {
     expect(merged.drawings["@MES"]).toContainEqual(position);
   });
 
+  it("round-trips drawing alerts through the drawings preference category", () => {
+    const local = workspace();
+    const alert = { enabled: true, direction: "above" as const, frequency: "recurring" as const, sound: "pulse" as const, durationSeconds: 10 as const, provider: "tradestation" as const, symbol: "@MES" };
+    const drawings = { "@MES": local.drawings["@MES"].map((drawing) => ({ ...drawing, alert })) };
+    const profile = cloudPreferenceProfile({ ...local, drawings });
+    const merged = applyCloudPreferenceProfile({ ...local, drawings: {} }, profile);
+    expect(merged.drawings["@MES"][0]).toMatchObject({ alert });
+  });
+
   it("reads rule alerts from the legacy alerts category", () => {
     const local = workspace();
     const profile = cloudPreferenceProfile(local);

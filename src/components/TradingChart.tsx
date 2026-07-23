@@ -1,10 +1,10 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
-import { ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, X } from "lucide-react";
+import { Bell, BellOff, ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, Volume2, X } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type Logical, type LogicalRange, type Time,
 } from "lightweight-charts";
-import type { Bar, ChartKind, ChartLabelSettings, ChartTimezone, ChartTool, Drawing, DrawingPatch, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
+import type { AlertDurationSeconds, AlertSound, Bar, ChartKind, ChartLabelSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme } from "../lib/crosshair";
@@ -19,6 +19,9 @@ import { approximateDataUrlBytes, ENTRY_SCREENSHOT_MAX_BYTES } from "../lib/entr
 import { createPositionDrawing, logicalToSourceTime, movePositionDrawing, normalizePositionQuantity, positionMetrics, sourceTimeToLogical, updatePositionPrice } from "../lib/positionDrawing";
 import { formatGex, formatOpenInterest, type GexLevel } from "../lib/gex";
 import { GexHeatmapPrimitive } from "../lib/gexHeatmapPrimitive";
+import { defaultDrawingAlert } from "../lib/drawingAlerts";
+import { ALERT_DURATIONS, ALERT_SOUNDS } from "../lib/emaAlerts";
+import { playAlertSound, prepareAlertAudio } from "../lib/alertAudio";
 
 interface Props {
   bars: Bar[];
@@ -28,6 +31,7 @@ interface Props {
   pointAndFigureSettings: PointAndFigureSettings;
   magnetEnabled: boolean;
   symbol: string;
+  provider: MarketDataProvider;
   tradeSymbol?: string;
   description: string;
   exchange: string;
@@ -99,7 +103,7 @@ type PositionDragKind = "body" | "entry" | "stop" | "target" | "start" | "end";
 
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -130,6 +134,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
   const [chartGeneration, setChartGeneration] = useState(0);
   const [drawingMenu, setDrawingMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [drawingAlertDraft, setDrawingAlertDraft] = useState<DrawingAlertConfig | null>(null);
   const [movingDrawingId, setMovingDrawingId] = useState<string | null>(null);
   const [selectedPositionId, setSelectedPositionId] = useState<string | null>(null);
   const [positionCoordinates, setPositionCoordinates] = useState<Record<string, PositionCoordinates>>({});
@@ -607,13 +612,17 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         lineVisible: drawing.kind === "horizontal",
         axisLabelVisible: true,
         axisLabelColor: drawing.color,
-        title: "",
+        title: drawing.alert ? drawing.alert.enabled ? "● ALERT" : "○ ALERT" : "",
       }));
     rayPrimitiveRef.current?.setDrawings(drawings.filter((drawing): drawing is LineDrawing => drawing.kind === "horizontal-ray"));
     if (drawingMenu && !drawings.some((drawing) => drawing.id === drawingMenu.id)) setDrawingMenu(null);
     if (selectedPositionId && !drawings.some((drawing) => drawing.id === selectedPositionId && drawing.kind === "position")) setSelectedPositionId(null);
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   }, [drawings, chartGeneration]);
+
+  useEffect(() => {
+    setDrawingAlertDraft(null);
+  }, [drawingMenu?.id]);
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -975,13 +984,40 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       {movingDrawingId && <div className="drawing-move-hint">Click a new chart position to move the drawing · Esc to cancel</div>}
       {selectedLineDrawing && drawingMenu && <>
         <button className="drawing-menu-backdrop" aria-label="Close drawing menu" onClick={() => setDrawingMenu(null)} />
-        <div className="drawing-menu" role="menu" aria-label={`${selectedLineDrawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"} options`} style={{ left: drawingMenu.x, top: drawingMenu.y }}>
+        {!drawingAlertDraft ? <div className="drawing-menu" role="menu" aria-label={`${selectedLineDrawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"} options`} style={{ left: drawingMenu.x, top: drawingMenu.y }}>
           <label className="drawing-menu-color"><input type="color" value={selectedLineDrawing.color} aria-label="Drawing color" onChange={(event) => onUpdateDrawing(selectedLineDrawing.id, { color: event.target.value })} /><span style={{ background: selectedLineDrawing.color }} />Color</label>
           <label className="drawing-menu-width"><span>Line width</span><select aria-label="Line width" value={selectedLineDrawing.lineWidth ?? 1} onChange={(event) => onUpdateDrawing(selectedLineDrawing.id, { lineWidth: Number(event.target.value) as 1 | 2 | 3 | 4 })}>{[1, 2, 3, 4].map((width) => <option key={width} value={width}>{width}px</option>)}</select></label>
+          <button role="menuitem" onClick={() => { prepareAlertAudio(); setDrawingAlertDraft(selectedLineDrawing.alert ? { ...selectedLineDrawing.alert } : defaultDrawingAlert(provider, symbol)); }}>
+            {selectedLineDrawing.alert?.enabled ? <Bell size={15} /> : <BellOff size={15} />}{selectedLineDrawing.alert ? "Edit alert" : "Add alert"}
+          </button>
           <button role="menuitem" disabled={selectedLineDrawing.locked} onClick={() => { movingDrawingIdRef.current = selectedLineDrawing.id; setMovingDrawingId(selectedLineDrawing.id); setDrawingMenu(null); }}><MoveVertical size={15} />Move</button>
           <button role="menuitem" onClick={() => onUpdateDrawing(selectedLineDrawing.id, { locked: !selectedLineDrawing.locked })}>{selectedLineDrawing.locked ? <LockOpen size={15} /> : <Lock size={15} />}{selectedLineDrawing.locked ? "Unlock" : "Lock"}</button>
           <button role="menuitem" className="danger" onClick={() => { onDeleteDrawing(selectedLineDrawing.id); setDrawingMenu(null); }}><Trash2 size={15} />Delete</button>
-        </div>
+        </div> : <div className="drawing-menu drawing-alert-editor" role="dialog" aria-label={`Edit ${selectedLineDrawing.kind === "horizontal-ray" ? "horizontal ray" : "horizontal line"} alert`} style={{
+          left: Math.min(drawingMenu.x, Math.max(8, (host.current?.clientWidth ?? 320) - 300)),
+          top: Math.min(drawingMenu.y, Math.max(8, (host.current?.clientHeight ?? 360) - 382)),
+        }}>
+          <header><span><strong>Drawing alert</strong><small>{symbol} · {selectedLineDrawing.points[0].price.toFixed(pricePrecision(minMove))}</small></span><button type="button" aria-label="Cancel alert editing" onClick={() => setDrawingAlertDraft(null)}><X size={14} /></button></header>
+          <button type="button" className="drawing-alert-enabled" aria-pressed={drawingAlertDraft.enabled} onClick={() => setDrawingAlertDraft({
+            ...drawingAlertDraft,
+            enabled: !drawingAlertDraft.enabled,
+            ...(!drawingAlertDraft.enabled ? { lastTriggeredAt: undefined } : {}),
+          })}>
+            <span><strong>{drawingAlertDraft.enabled ? "Alert armed" : "Alert disabled"}</strong><small>{drawingAlertDraft.enabled ? "Monitoring live last price" : "Save to keep this alert inactive"}</small></span><span className={`toggle ${drawingAlertDraft.enabled ? "on" : ""}`} />
+          </button>
+          <label><span>Condition</span><select aria-label="Drawing alert condition" value={drawingAlertDraft.direction} onChange={(event) => setDrawingAlertDraft({ ...drawingAlertDraft, direction: event.target.value as DrawingAlertDirection })}><option value="either">Crosses either direction</option><option value="above">Crosses above</option><option value="below">Crosses below</option></select></label>
+          <label><span>Frequency</span><select aria-label="Drawing alert frequency" value={drawingAlertDraft.frequency} onChange={(event) => setDrawingAlertDraft({ ...drawingAlertDraft, frequency: event.target.value as DrawingAlertFrequency })}><option value="once">One time</option><option value="recurring">Recurring</option></select></label>
+          <div className="drawing-alert-audio">
+            <label><span>Sound</span><select aria-label="Drawing alert sound" value={drawingAlertDraft.sound} onChange={(event) => setDrawingAlertDraft({ ...drawingAlertDraft, sound: event.target.value as AlertSound })}>{ALERT_SOUNDS.map((sound) => <option key={sound.value} value={sound.value}>{sound.label}</option>)}</select></label>
+            <label><span>Duration</span><select aria-label="Drawing alert duration" value={drawingAlertDraft.durationSeconds} onChange={(event) => setDrawingAlertDraft({ ...drawingAlertDraft, durationSeconds: Number(event.target.value) as AlertDurationSeconds })}>{ALERT_DURATIONS.map((duration) => <option key={duration} value={duration}>{duration}s</option>)}</select></label>
+            <button type="button" aria-label="Preview drawing alert sound" title="Preview sound" onClick={() => playAlertSound(drawingAlertDraft.sound, drawingAlertDraft.durationSeconds)}><Volume2 size={14} /></button>
+          </div>
+          <footer>
+            {selectedLineDrawing.alert && <button type="button" className="danger" onClick={() => { onUpdateDrawing(selectedLineDrawing.id, { alert: null }); setDrawingAlertDraft(null); setDrawingMenu(null); }}>Remove alert</button>}
+            <button type="button" className="secondary-button" onClick={() => setDrawingAlertDraft(null)}>Cancel</button>
+            <button type="button" className="primary-button" onClick={() => { onUpdateDrawing(selectedLineDrawing.id, { alert: drawingAlertDraft }); setDrawingAlertDraft(null); setDrawingMenu(null); }}>Save</button>
+          </footer>
+        </div>}
       </>}
       {selectedPosition && drawingMenu && <>
         <button className="drawing-menu-backdrop" aria-label="Close position properties" onClick={() => setDrawingMenu(null)} />

@@ -4,7 +4,7 @@ import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Activity, BarChart3, Bell, BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
+  Activity, BarChart3, Bell, BellRing, BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
   GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
   Magnet, MousePointer2, PanelsTopLeft, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingDown, TrendingUp,
@@ -38,9 +38,10 @@ import { allocateGexStreamBudgets, calculateGexLevels, defaultGexSelection, gexE
 import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndFigureSettings, normalizeRenkoSettings } from "./lib/priceBasedCharts";
 import { instrumentKey, rememberRecentSymbol, reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
+import { activeDrawingAlerts, applyDrawingPatch, trackDrawingAlertTransitions, type ActiveDrawingAlert, type DrawingAlertTrackerState } from "./lib/drawingAlerts";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartTool, ChartWindowState, Drawing, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -325,6 +326,7 @@ function TradingApp() {
   const [chartStyleOpen, setChartStyleOpen] = useState(false);
   const [chartLayoutOpen, setChartLayoutOpen] = useState(false);
   const [alertOpen, setAlertOpen] = useState(false);
+  const [drawingAlertsOpen, setDrawingAlertsOpen] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [entryRulesOpen, setEntryRulesOpen] = useState(false);
@@ -381,6 +383,7 @@ function TradingApp() {
   const entryRuleSignalTimersRef = useRef(new Map<string, number>());
   const entryRuleAudioTimersRef = useRef(new Set<number>());
   const entryRuleAudioAvailableAtRef = useRef(0);
+  const drawingAlertTrackerRef = useRef<DrawingAlertTrackerState | undefined>(undefined);
   const vwapSubscriptionsRef = useRef(new Map<string, Omit<BarSubscription, "timeframe">>());
   const barSubscriptionGenerationRef = useRef(Date.now() * 1000);
   const vwapSymbolsRef = useRef(new Set<string>());
@@ -448,6 +451,7 @@ function TradingApp() {
   const alertMarkets = desiredAlertMarkets(workspace.tabs);
   const alertMarketsKey = alertMarkets.map((market) => market.key).sort().join("|");
   const activeAlertCount = ALERT_TIMEFRAMES.filter((timeframe) => activeTab.ema200Alert[timeframe].enabled).length;
+  const activeLineAlerts = useMemo(() => activeDrawingAlerts(workspace.drawings), [workspace.drawings]);
   const chartSymbolsKey = [...new Set(workspace.tabs.map((tab) => instrumentKey(tab.symbol)))].sort().join("|");
   const tradeDetailSymbolsKey = [...new Set(workspace.tabs.filter((tab) => isContinuousFuture(tab.symbol)).map(resolveTradeSymbol).filter((symbol): symbol is string => Boolean(symbol)))].sort().join("|");
   const quoteInstruments = quoteSubscriptionInstruments(workspace);
@@ -559,11 +563,9 @@ function TradingApp() {
       .forEach((window) => { void emitTo(window.id, "entry-rule-tab-signal", event).catch(() => undefined); });
   }
 
-  function queueEntryRuleAlertSounds(transitions: EntryRuleAlertTransition[]) {
-    const ordered = [...transitions].sort((left, right) => left.side === right.side ? 0 : left.side === "long" ? -1 : 1);
+  function queueConfiguredAlertSounds(configs: Array<Pick<TimeframeAlertConfig, "sound" | "durationSeconds">>) {
     let availableAt = Math.max(Date.now(), entryRuleAudioAvailableAtRef.current);
-    ordered.forEach((transition) => {
-      const config = workspaceRef.current.entryRuleAlerts[transition.side];
+    configs.forEach((config) => {
       const delay = Math.max(0, availableAt - Date.now());
       const timer = window.setTimeout(() => {
         entryRuleAudioTimersRef.current.delete(timer);
@@ -573,6 +575,11 @@ function TradingApp() {
       availableAt += config.durationSeconds * 1000 + 120;
     });
     entryRuleAudioAvailableAtRef.current = availableAt;
+  }
+
+  function queueEntryRuleAlertSounds(transitions: EntryRuleAlertTransition[]) {
+    const ordered = [...transitions].sort((left, right) => left.side === right.side ? 0 : left.side === "long" ? -1 : 1);
+    queueConfiguredAlertSounds(ordered.map((transition) => workspaceRef.current.entryRuleAlerts[transition.side]));
   }
 
   function primeAlertMarket(symbol: string, timeframe: Timeframe, incoming: Bar[], reset = true) {
@@ -1393,6 +1400,47 @@ function TradingApp() {
   }, [workspaceLoaded, entryRulePositionScope, entryRulePositionsReady, tabStreamKey, workspace.entryRules, workspace.entryRuleAlerts, tabMarkets, quotes, positions]);
 
   useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    const tracked = trackDrawingAlertTransitions(drawingAlertTrackerRef.current, workspace.drawings, quotes, environment);
+    drawingAlertTrackerRef.current = tracked.state;
+    if (!tracked.transitions.length) return;
+
+    const triggeredAt = new Date().toISOString();
+    queueConfiguredAlertSounds(tracked.transitions.map((transition) => transition.alert));
+    setNotifications((current) => [
+      ...tracked.transitions.map((transition) => ({
+        id: crypto.randomUUID(),
+        symbol: transition.workspaceSymbol,
+        time: triggeredAt,
+        title: `${transition.drawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"} alert`,
+        text: `Last price crossed ${transition.direction} ${formatPrice(transition.drawing.points[0].price)} at ${formatPrice(transition.price)}.`,
+        level: "warning" as const,
+      })),
+      ...current,
+    ].slice(0, 250));
+    commitWorkspace((current) => {
+      const drawings = { ...current.drawings };
+      tracked.transitions.forEach((transition) => {
+        const items = drawings[transition.workspaceSymbol];
+        if (!items) return;
+        drawings[transition.workspaceSymbol] = items.map((drawing) => {
+          if (drawing.id !== transition.drawing.id || drawing.kind === "position" || !drawing.alert?.enabled) return drawing;
+          const alert = {
+            ...drawing.alert,
+            enabled: drawing.alert.frequency === "recurring",
+            lastTriggeredAt: triggeredAt,
+          };
+          return { ...drawing, alert };
+        });
+      });
+      return { ...current, drawings };
+    });
+    showToast(tracked.transitions.map((transition) => (
+      `${transition.workspaceSymbol} crossed ${transition.direction} ${formatPrice(transition.drawing.points[0].price)}`
+    )).join(" · "));
+  }, [workspaceLoaded, workspace.drawings, quotes, environment]);
+
+  useEffect(() => {
     setEntryRuleTabSignals((current) => {
       let changed = false;
       const next: Record<string, EntryRuleTabSignal> = {};
@@ -2138,6 +2186,12 @@ function TradingApp() {
     commitWorkspace((current) => ({ ...current, drawings: { ...current.drawings, [symbol]: update(current.drawings[symbol] ?? []) } }));
   }
 
+  function updateDrawingAlert(symbol: string, drawingId: string, alert: DrawingAlertConfig | null) {
+    updateSymbolDrawings(symbol, (items) => items.map((drawing) => drawing.id === drawingId
+      ? applyDrawingPatch(drawing, { alert })
+      : drawing));
+  }
+
   function updateIndicator(id: string, patch: Partial<IndicatorConfig>) {
     updateActiveTab({ indicators: activeTab.indicators.map((indicator) => indicator.id === id ? { ...indicator, ...patch } : indicator) });
   }
@@ -2831,6 +2885,7 @@ function TradingApp() {
       pointAndFigureSettings={tab.pointAndFigureSettings}
       magnetEnabled={tab.magnetEnabled}
       symbol={tab.symbol.symbol}
+      provider={tab.symbol.provider}
       tradeSymbol={tabTradeSymbol}
       description={tab.symbol.description}
       exchange={tab.symbol.exchange}
@@ -2861,7 +2916,7 @@ function TradingApp() {
       drawings={workspace.drawings[tab.symbol.symbol] ?? []}
       onToolComplete={() => { if (focused) setActiveTool("cursor"); }}
       onCreateDrawing={(drawing) => updateSymbolDrawings(tab.symbol.symbol, (items) => [...items, drawing])}
-      onUpdateDrawing={(id, patch) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.map((item) => item.id === id ? { ...item, ...patch } as Drawing : item))}
+      onUpdateDrawing={(id, patch) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.map((item) => item.id === id ? applyDrawingPatch(item, patch) : item))}
       onDeleteDrawing={(id) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.filter((item) => item.id !== id))}
       initialVisibleRange={viewRangesRef.current.get(tab.id)}
       onVisibleRangeChange={(range) => requestVisibleVwap(tab.id, range)}
@@ -2950,6 +3005,23 @@ function TradingApp() {
           </section>;
         })}</div></div>}
       </div>}
+      <button
+        className={`text-tool-button drawing-alerts-button ${drawingAlertsOpen || activeLineAlerts.length > 0 ? "active" : ""}`}
+        aria-pressed={drawingAlertsOpen}
+        title={`${activeLineAlerts.length} active drawing alert${activeLineAlerts.length === 1 ? "" : "s"}`}
+        onClick={() => {
+          prepareAlertAudio();
+          setIndicatorOpen(false);
+          setChartStyleOpen(false);
+          setChartLayoutOpen(false);
+          setAlertOpen(false);
+          setDrawingAlertsOpen(true);
+        }}
+      >
+        <BellRing size={16} fill={activeLineAlerts.length > 0 ? "currentColor" : "none"} />
+        <span className="tool-label">Drawing Alerts</span>
+        {activeLineAlerts.length > 0 && <span className="drawing-alert-count">{activeLineAlerts.length}</span>}
+      </button>
       <div className="divider" />
       <span className="toolbar-spacer" />
       {!isDetached && <><IconButton label="Trade journal" onClick={openTradeJournal}><BookOpen size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
@@ -3022,10 +3094,50 @@ function TradingApp() {
 
     {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder rules={workspace.entryRules} alerts={workspace.entryRuleAlerts} bars={bars} quote={activeQuote} onClose={() => setEntryRulesOpen(false)} onSave={(entryRules, entryRuleAlerts) => { updateWorkspace({ entryRules, entryRuleAlerts }); setEntryRulesOpen(false); showToast("Entry rules and alerts saved."); }} /></Modal>}
 
+    {drawingAlertsOpen && <Modal title="Active drawing alerts" onClose={() => setDrawingAlertsOpen(false)} width={920}>
+      <DrawingAlertsManager
+        alerts={activeLineAlerts}
+        onChange={(item, alert) => updateDrawingAlert(item.workspaceSymbol, item.drawing.id, alert)}
+        onDisable={(item) => updateDrawingAlert(item.workspaceSymbol, item.drawing.id, { ...item.alert, enabled: false })}
+        onRemove={(item) => updateDrawingAlert(item.workspaceSymbol, item.drawing.id, null)}
+      />
+    </Modal>}
+
     {review && <Modal title={review.kind === "close-position" ? "Close position" : "Review order"} onClose={() => setReview(null)}><div className="review-hero"><span className={review.draft.side === "Buy" ? "buy" : "sell"}>{review.draft.side}</span><strong>{review.draft.quantity} {review.draft.symbol}</strong><small>{review.kind === "close-position" ? "Market close · cancels working exits first" : `${review.draft.type} · ${review.draft.duration}${review.chartSymbol !== review.draft.symbol ? ` · Chart ${review.chartSymbol} · Trading ${review.draft.symbol}` : ""}`}</small></div><dl className="review-list">{review.kind === "entry" && <><div><dt>Take profit</dt><dd>{formatPrice(review.draft.takeProfit)}</dd></div><div><dt>Stop loss</dt><dd>{formatPrice(review.draft.stopLoss)}</dd></div></>}<div><dt>Estimated commission</dt><dd>{review.preview.estimatedCommission ?? "—"}</dd></div><div><dt>Initial margin</dt><dd>{review.preview.initialMargin ?? "—"}</dd></div><div><dt>Environment</dt><dd className={environment === "live" ? "negative" : "cyan"}>{environment.toUpperCase()}</dd></div></dl><p className="preview-summary">{review.kind === "close-position" ? "All working close-side orders for this symbol will be cancelled and confirmed inactive before the market close is submitted." : review.preview.summary}</p>{reviewEntryEligibility && <p className={`entry-review-rule ${reviewEntryEligibility.status}`}>{reviewEntryEligibility.reason}</p>}<button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview.valid || busy || Boolean(reviewEntryEligibility && !reviewEntryEligibility.allowed)} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button></Modal>}
 
     {toast && <div className="toast" role="status">{toast}</div>}
   </main>;
+}
+
+function DrawingAlertsManager({ alerts, onChange, onDisable, onRemove }: {
+  alerts: ActiveDrawingAlert[];
+  onChange: (item: ActiveDrawingAlert, alert: DrawingAlertConfig) => void;
+  onDisable: (item: ActiveDrawingAlert) => void;
+  onRemove: (item: ActiveDrawingAlert) => void;
+}) {
+  if (!alerts.length) {
+    return <div className="drawing-alerts-empty"><BellRing size={28} /><strong>No active drawing alerts</strong><span>Select a horizontal line or ray on a chart to add or re-arm an alert.</span></div>;
+  }
+  return <div className="drawing-alerts-manager">
+    <header><span>{alerts.length} armed alert{alerts.length === 1 ? "" : "s"}</span><small>Last-trade crossings · workspace-wide</small></header>
+    <div className="drawing-alerts-list">
+      {alerts.map((item) => <section key={`${item.workspaceSymbol}\u0000${item.drawing.id}`} className="drawing-alert-manager-row">
+        <div className="drawing-alert-identity">
+          <span className="drawing-alert-symbol">{item.workspaceSymbol}</span>
+          <span><strong>{formatPrice(item.drawing.points[0].price)}</strong><small>{item.drawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"}</small></span>
+        </div>
+        <label><span>Condition</span><select aria-label={`${item.workspaceSymbol} drawing alert condition`} value={item.alert.direction} onChange={(event) => onChange(item, { ...item.alert, direction: event.target.value as DrawingAlertConfig["direction"] })}><option value="either">Any cross</option><option value="above">Crosses above</option><option value="below">Crosses below</option></select></label>
+        <label><span>Frequency</span><select aria-label={`${item.workspaceSymbol} drawing alert frequency`} value={item.alert.frequency} onChange={(event) => onChange(item, { ...item.alert, frequency: event.target.value as DrawingAlertConfig["frequency"] })}><option value="once">One time</option><option value="recurring">Recurring</option></select></label>
+        <label><span>Sound</span><select aria-label={`${item.workspaceSymbol} drawing alert sound`} value={item.alert.sound} onChange={(event) => onChange(item, { ...item.alert, sound: event.target.value as AlertSound })}>{ALERT_SOUNDS.map((sound) => <option key={sound.value} value={sound.value}>{sound.label}</option>)}</select></label>
+        <label><span>Duration</span><select aria-label={`${item.workspaceSymbol} drawing alert duration`} value={item.alert.durationSeconds} onChange={(event) => onChange(item, { ...item.alert, durationSeconds: Number(event.target.value) as AlertDurationSeconds })}>{ALERT_DURATIONS.map((duration) => <option key={duration} value={duration}>{duration}s</option>)}</select></label>
+        <div className="drawing-alert-row-actions">
+          <button type="button" onClick={() => playAlertSound(item.alert.sound, item.alert.durationSeconds)}>Preview</button>
+          <button type="button" onClick={() => onDisable(item)}>Disable</button>
+          <button type="button" className="danger" onClick={() => onRemove(item)}>Remove</button>
+        </div>
+      </section>)}
+    </div>
+  </div>;
 }
 
 function ChartTabStrip({ tabs, activeTabId, visibleTabIds, totalTabs, windowId, ema200Positions, entryRuleSignals, onSelect, onAdd, onClose, onReorder, onDragEnd, onBounds }: {
