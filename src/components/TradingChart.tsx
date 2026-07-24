@@ -159,6 +159,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     drawing: PositionDrawing;
   } | null>(null);
   const isSynthetic = kind === "renko" || kind === "point-and-figure";
+  const vwapIndicator = indicators.find((indicator) => indicator.kind === "VWAP" && indicator.visible);
+  const chartBarTimes = useMemo(() => bars.map((bar) => bar.time), [bars]);
   const renkoBricks = useMemo(() => kind === "renko" ? buildRenko(bars, minMove, renkoSettings) : [], [bars, kind, minMove, renkoSettings]);
   const pointAndFigureColumns = useMemo(() => kind === "point-and-figure" ? buildPointAndFigure(bars, minMove, pointAndFigureSettings) : [], [bars, kind, minMove, pointAndFigureSettings]);
   const displayItems = useMemo<DisplayItem[]>(() => kind === "renko" ? renkoBricks : kind === "point-and-figure" ? pointAndFigureColumns : bars, [bars, kind, renkoBricks, pointAndFigureColumns]);
@@ -546,9 +548,13 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   }, [indicators, chartGeneration, minMove, displayItems]);
 
   useEffect(() => {
-    const vwap = indicators.find((indicator) => indicator.kind === "VWAP" && indicator.visible);
-    vwapPrimitiveRef.current?.setData(!isSynthetic && vwap ? vwapBars : [], bars.map((bar) => bar.time), vwap?.color ?? "#a879ff", timeframe);
-  }, [bars, vwapBars, indicators, chartGeneration, isSynthetic]);
+    vwapPrimitiveRef.current?.setData(
+      !isSynthetic && vwapIndicator ? vwapBars : [],
+      chartBarTimes,
+      vwapIndicator?.color ?? "#a879ff",
+      timeframe,
+    );
+  }, [vwapBars, vwapIndicator?.id, vwapIndicator?.color, chartBarTimes, timeframe, chartGeneration, isSynthetic]);
 
   useEffect(() => {
     gexPrimitiveRef.current?.setData(gexLevels, gexView, gexExpirationDisplay, gexExpirationDates);

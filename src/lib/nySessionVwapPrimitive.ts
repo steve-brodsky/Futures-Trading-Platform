@@ -11,6 +11,10 @@ export interface NySessionVwapPoint {
   sessionKey: string;
 }
 
+export interface PositionedNySessionVwapPoint extends NySessionVwapPoint {
+  logical: number;
+}
+
 export function nySessionVwapPoints(bars: Bar[]): NySessionVwapPoint[] {
   const values = nySessionVwap(bars);
   return values.flatMap((point, index) => point.value == null || !point.sessionKey
@@ -56,27 +60,51 @@ export function startsNewVwapPath(previous: NySessionVwapPoint | undefined, curr
   return !previous || previous.sessionKey !== current.sessionKey || current.time - previous.time > 90;
 }
 
+export function visibleVwapPointRange(
+  points: PositionedNySessionVwapPoint[],
+  from: number,
+  to: number,
+): { first: number; last: number } {
+  if (!points.length || !Number.isFinite(from) || !Number.isFinite(to) || from > to) return { first: 0, last: 0 };
+  let low = 0;
+  let high = points.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (points[middle].logical < from) low = middle + 1;
+    else high = middle;
+  }
+  const firstVisible = low;
+  low = firstVisible;
+  high = points.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (points[middle].logical <= to) low = middle + 1;
+    else high = middle;
+  }
+  return {
+    first: Math.max(0, firstVisible - 1),
+    last: Math.min(points.length, low + 1),
+  };
+}
+
 export class NySessionVwapPrimitive implements ISeriesPrimitive<Time> {
   private chart: IChartApi | null = null;
   private series: ISeriesApi<any> | null = null;
   private requestUpdate?: () => void;
   private chartTimes: number[] = [];
-  private points: NySessionVwapPoint[] = [];
+  private points: PositionedNySessionVwapPoint[] = [];
   private color = "#a879ff";
   private finalBarSeconds = 60;
+  private sourceBars: Bar[] | null = null;
+  private sourceChartTimes: number[] | null = null;
 
   private readonly renderer: IPrimitivePaneRenderer = {
     draw: (target) => {
       if (!this.chart || !this.series || !this.points.length || !this.chartTimes.length) return;
       const scale = this.chart.timeScale();
-      const coordinates = this.points.map((point) => {
-        const logical = vwapLogicalPosition(this.chartTimes, point.time, this.finalBarSeconds);
-        return {
-          point,
-          x: logical == null ? null : interpolateLogicalCoordinate(logical, (index) => scale.logicalToCoordinate(index as Logical)),
-          y: this.series!.priceToCoordinate(point.value),
-        };
-      });
+      const visible = scale.getVisibleLogicalRange();
+      if (!visible) return;
+      const range = visibleVwapPointRange(this.points, Number(visible.from), Number(visible.to));
       target.useMediaCoordinateSpace(({ context, mediaSize }) => {
         context.strokeStyle = this.color;
         context.lineWidth = 1.5;
@@ -85,17 +113,20 @@ export class NySessionVwapPrimitive implements ISeriesPrimitive<Time> {
         context.beginPath();
         let previous: NySessionVwapPoint | undefined;
         let pathOpen = false;
-        coordinates.forEach(({ point, x, y }) => {
+        for (let index = range.first; index < range.last; index += 1) {
+          const point = this.points[index];
+          const x = interpolateLogicalCoordinate(point.logical, (logicalIndex) => scale.logicalToCoordinate(logicalIndex as Logical));
+          const y = this.series!.priceToCoordinate(point.value);
           if (x == null || y == null || x < -2 || x > mediaSize.width + 2 || y < -2 || y > mediaSize.height + 2) {
             previous = point;
             pathOpen = false;
-            return;
+            continue;
           }
           if (!pathOpen || startsNewVwapPath(previous, point)) context.moveTo(x, y);
           else context.lineTo(x, y);
           pathOpen = true;
           previous = point;
-        });
+        }
         context.stroke();
       });
     },
@@ -120,10 +151,27 @@ export class NySessionVwapPrimitive implements ISeriesPrimitive<Time> {
   }
 
   setData(sourceBars: Bar[], chartTimes: number[], color: string, timeframe: Timeframe) {
-    this.points = nySessionVwapPoints(sourceBars);
+    const finalBarSeconds = ({ "1m": 60, "5m": 300, "15m": 900, "30m": 1_800, "1h": 3_600, "4h": 14_400 } as Partial<Record<Timeframe, number>>)[timeframe] ?? 0;
+    if (this.sourceBars === sourceBars
+      && this.sourceChartTimes === chartTimes
+      && this.color === color
+      && this.finalBarSeconds === finalBarSeconds) return;
+    if (!sourceBars.length && !this.points.length && this.color === color) {
+      this.sourceBars = sourceBars;
+      this.sourceChartTimes = chartTimes;
+      this.chartTimes = chartTimes;
+      this.finalBarSeconds = finalBarSeconds;
+      return;
+    }
+    this.sourceBars = sourceBars;
+    this.sourceChartTimes = chartTimes;
     this.chartTimes = chartTimes;
     this.color = color;
-    this.finalBarSeconds = ({ "1m": 60, "5m": 300, "15m": 900, "30m": 1_800, "1h": 3_600, "4h": 14_400 } as Partial<Record<Timeframe, number>>)[timeframe] ?? 0;
+    this.finalBarSeconds = finalBarSeconds;
+    this.points = nySessionVwapPoints(sourceBars).flatMap((point) => {
+      const logical = vwapLogicalPosition(chartTimes, point.time, this.finalBarSeconds);
+      return logical == null ? [] : [{ ...point, logical }];
+    });
     this.requestUpdate?.();
   }
 }
