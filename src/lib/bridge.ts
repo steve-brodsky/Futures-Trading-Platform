@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalSyncStatus, JournalTrade, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
 import { cloudPreferenceProfile } from "./cloudPreferences";
-import { daySummary, demoJournalTrades, monthSummary } from "./journal";
+import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
 import { demoAccounts, demoBalance, demoBodBalance, demoOptionChain, demoOptionExpirations, demoOrders, demoPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -200,6 +200,11 @@ export const api = {
   },
   async journalDay(scope: JournalScope, date: string): Promise<JournalDaySummary> {
     return isTauri ? native("get_journal_day", { scope, date }) : daySummary(scope, date, demoJournalTrades());
+  },
+  async journalStatsTrades(scope: JournalScope, startDate?: string, endDate?: string): Promise<JournalStatsRange> {
+    return isTauri
+      ? native("get_journal_stats_trades", { scope, startDate, endDate })
+      : journalStatsRange(scope, demoJournalTrades(), startDate, endDate);
   },
   async journalTrade(tradeId: string): Promise<JournalTrade> {
     if (isTauri) return native("get_journal_trade", { tradeId });

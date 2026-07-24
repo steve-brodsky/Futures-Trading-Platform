@@ -2,10 +2,19 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, BookOpen, CalendarDays, ChevronLeft, ChevronRight, Cloud, CloudOff, Expand, Image as ImageIcon, RefreshCw, Save, ShieldCheck, Tag, TrendingUp, X } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { availableMonitors, getCurrentWindow, primaryMonitor, type Window as TauriWindow } from "@tauri-apps/api/window";
 import { api } from "../lib/bridge";
-import { journalCalendarDates, journalProjectedTargetR, journalTimelineEvents } from "../lib/journal";
+import { journalCalendarDates, journalProjectedTargetR, journalStatsNeedsRefresh, journalTimelineEvents } from "../lib/journal";
+import {
+  JOURNAL_WINDOW_GEOMETRY_STORAGE_KEY,
+  LEGACY_JOURNAL_WINDOW_GEOMETRY_STORAGE_KEY,
+  defaultJournalWindowGeometry,
+  fitJournalWindowGeometry,
+  parseJournalWindowGeometry,
+  type JournalWindowGeometryV2,
+} from "../lib/journalWindowGeometry";
 import type { JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalSyncStatus, JournalTrade, PreferenceRealtimeStateEvent } from "../types";
+import { TradeJournalStats } from "./TradeJournalStats";
 
 const monthLabel = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric", timeZone: "UTC" });
 const dayHeading = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
@@ -33,6 +42,72 @@ function metricClass(value?: number): string {
 function maskAccount(value: string): string {
   if (value.includes("•") || value.length <= 4) return value;
   return `${value.slice(0, 3)} ··${value.slice(-4)}`;
+}
+
+function writeJournalWindowGeometry(geometry: JournalWindowGeometryV2): void {
+  localStorage.setItem(JOURNAL_WINDOW_GEOMETRY_STORAGE_KEY, JSON.stringify(geometry));
+}
+
+async function restoreJournalWindowGeometry(current: TauriWindow): Promise<void> {
+  const stored = parseJournalWindowGeometry(localStorage.getItem(JOURNAL_WINDOW_GEOMETRY_STORAGE_KEY));
+  localStorage.removeItem(LEGACY_JOURNAL_WINDOW_GEOMETRY_STORAGE_KEY);
+
+  const [innerSize, outerSize, monitors, preferredMonitor] = await Promise.all([
+    current.innerSize(),
+    current.outerSize(),
+    availableMonitors(),
+    primaryMonitor(),
+  ]);
+  const frame = {
+    width: Math.max(0, outerSize.width - innerSize.width),
+    height: Math.max(0, outerSize.height - innerSize.height),
+  };
+  const desired = stored
+    ? fitJournalWindowGeometry(stored, frame, monitors, preferredMonitor)
+    : defaultJournalWindowGeometry(monitors, preferredMonitor, frame);
+
+  await current.setSize(new PhysicalSize(desired.innerWidth, desired.innerHeight));
+  await current.setPosition(new PhysicalPosition(desired.x, desired.y));
+
+  const [movedInnerSize, movedOuterSize] = await Promise.all([current.innerSize(), current.outerSize()]);
+  const movedFrame = {
+    width: Math.max(0, movedOuterSize.width - movedInnerSize.width),
+    height: Math.max(0, movedOuterSize.height - movedInnerSize.height),
+  };
+  const fitted = fitJournalWindowGeometry(desired, movedFrame, monitors, preferredMonitor);
+  if (fitted.x !== desired.x
+    || fitted.y !== desired.y
+    || fitted.innerWidth !== desired.innerWidth
+    || fitted.innerHeight !== desired.innerHeight) {
+    await current.setSize(new PhysicalSize(fitted.innerWidth, fitted.innerHeight));
+    await current.setPosition(new PhysicalPosition(fitted.x, fitted.y));
+  }
+
+  const [position, appliedInnerSize] = await Promise.all([current.outerPosition(), current.innerSize()]);
+  writeJournalWindowGeometry({
+    version: 2,
+    x: Math.round(position.x),
+    y: Math.round(position.y),
+    innerWidth: Math.round(appliedInnerSize.width),
+    innerHeight: Math.round(appliedInnerSize.height),
+  });
+}
+
+async function readJournalWindowGeometry(current: TauriWindow): Promise<JournalWindowGeometryV2 | undefined> {
+  const [position, innerSize, maximized, minimized] = await Promise.all([
+    current.outerPosition(),
+    current.innerSize(),
+    current.isMaximized(),
+    current.isMinimized(),
+  ]);
+  if (maximized || minimized) return undefined;
+  return parseJournalWindowGeometry({
+    version: 2,
+    x: Math.round(position.x),
+    y: Math.round(position.y),
+    innerWidth: Math.round(innerSize.width),
+    innerHeight: Math.round(innerSize.height),
+  });
 }
 
 export function JournalCloudSettings({ compact = false, onConfigured, onConnectionChanged, preferenceSync, preferenceRealtime }: {
@@ -141,6 +216,9 @@ export function JournalCloudSettings({ compact = false, onConfigured, onConnecti
 export function TradeJournalWindow() {
   const now = new Date();
   const [cursor, setCursor] = useState({ year: now.getFullYear(), month: now.getMonth() + 1 });
+  const [page, setPage] = useState<"calendar" | "stats">(
+    new URLSearchParams(window.location.search).get("journalPage") === "stats" ? "stats" : "calendar",
+  );
   const [view, setView] = useState<{ kind: "month" } | { kind: "day"; date: string }>({ kind: "month" });
   const [mode, setMode] = useState<"pnl" | "r">("pnl");
   const [auth, setAuth] = useState<JournalAuthStatus>({ configured: !api.isNative, authenticated: !api.isNative });
@@ -153,7 +231,9 @@ export function TradeJournalWindow() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
   const [showSetup, setShowSetup] = useState(false);
+  const [journalRevision, setJournalRevision] = useState(0);
   const selectedTradeIdRef = useRef<string | undefined>(undefined);
+  const geometryInitializationRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => { selectedTradeIdRef.current = selectedTrade?.id; }, [selectedTrade?.id]);
 
@@ -169,17 +249,69 @@ export function TradeJournalWindow() {
 
   useEffect(() => {
     if (!api.isNative) return;
-    const current = getCurrentWindow(); let moved: (() => void) | undefined; let resized: (() => void) | undefined; let timer: number | undefined;
-    try { const saved = JSON.parse(localStorage.getItem("northstar-journal-geometry") ?? "null") as { x:number;y:number;width:number;height:number } | null; if (saved && saved.width >= 960 && saved.height >= 640) { void current.setSize(new PhysicalSize(saved.width,saved.height)); void current.setPosition(new PhysicalPosition(saved.x,saved.y)); } } catch { /* ignore invalid local geometry */ }
-    const remember = () => { window.clearTimeout(timer); timer=window.setTimeout(async()=>{const [position,size,maximized]=await Promise.all([current.outerPosition(),current.outerSize(),current.isMaximized()]);if(!maximized)localStorage.setItem("northstar-journal-geometry",JSON.stringify({x:position.x,y:position.y,width:size.width,height:size.height}));},180); };
-    current.onMoved(remember).then((cleanup)=>{moved=cleanup;}); current.onResized(remember).then((cleanup)=>{resized=cleanup;});
-    return()=>{window.clearTimeout(timer);moved?.();resized?.();};
+    const current = getCurrentWindow();
+    let active = true;
+    let moved: (() => void) | undefined;
+    let resized: (() => void) | undefined;
+    let timer: number | undefined;
+    let saveGeneration = 0;
+
+    geometryInitializationRef.current ??= restoreJournalWindowGeometry(current);
+    const remember = () => {
+      if (!active) return;
+      const generation = ++saveGeneration;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        void readJournalWindowGeometry(current).then((geometry) => {
+          if (active && generation === saveGeneration && geometry) writeJournalWindowGeometry(geometry);
+        }).catch(() => undefined);
+      }, 180);
+    };
+
+    void (async () => {
+      try {
+        await geometryInitializationRef.current;
+      } catch {
+        localStorage.removeItem(JOURNAL_WINDOW_GEOMETRY_STORAGE_KEY);
+        localStorage.removeItem(LEGACY_JOURNAL_WINDOW_GEOMETRY_STORAGE_KEY);
+      }
+      if (!active) return;
+
+      let nextMoved: (() => void) | undefined;
+      let nextResized: (() => void) | undefined;
+      try {
+        nextMoved = await current.onMoved(remember);
+        if (!active) { nextMoved(); return; }
+        nextResized = await current.onResized(remember);
+        if (!active) { nextMoved(); nextResized(); return; }
+        moved = nextMoved;
+        resized = nextResized;
+      } catch {
+        nextMoved?.();
+        nextResized?.();
+      }
+
+      try {
+        await current.show();
+        if (active) await current.setFocus();
+      } catch { /* the current native window may already be closing */ }
+      remember();
+    })();
+
+    return () => {
+      active = false;
+      saveGeneration += 1;
+      window.clearTimeout(timer);
+      moved?.();
+      resized?.();
+    };
   },[]);
 
   useEffect(() => {
     if (!api.isNative) return;
     let cleanup: (() => void) | undefined; let disposed = false;
-    listen("journal-updated", () => {
+    listen<{ reason?: string }>("journal-updated", ({ payload }) => {
+      if (journalStatsNeedsRefresh(payload.reason)) setJournalRevision((current) => current + 1);
       void loadScopes().catch(() => undefined);
       if (scope) api.journalMonth(scope, cursor.year, cursor.month).then(setMonth).catch(() => undefined);
       if (scope && view.kind === "day") api.journalDay(scope, view.date).then(setDay).catch(() => undefined);
@@ -222,6 +354,11 @@ export function TradeJournalWindow() {
     } catch { /* summary row remains useful */ }
   }
 
+  async function openStatsTrade(tradeId: string) {
+    try { setSelectedTrade(await api.journalTrade(tradeId)); }
+    catch { /* stats remain useful if a trade changed during refresh */ }
+  }
+
   const dates = useMemo(() => journalCalendarDates(cursor.year, cursor.month), [cursor]);
   const dayMap = useMemo(() => new Map(month?.days.map((item) => [item.date, item]) ?? []), [month]);
   const activeScopeValue = scope ? `${scope.environment}:${scope.accountId}` : "";
@@ -235,6 +372,10 @@ export function TradeJournalWindow() {
 
     <nav className="journal-nav">
       <div className="journal-nav-title"><BookOpen size={18} /><div><strong>Trade Journal</strong><span>Futures execution ledger</span></div></div>
+      <div className="journal-view-switch" aria-label="Journal page">
+        <button className={page === "calendar" ? "active" : ""} aria-pressed={page === "calendar"} onClick={() => { setPage("calendar"); setSelectedTrade(undefined); }}><CalendarDays size={14} />Calendar</button>
+        <button className={page === "stats" ? "active" : ""} aria-pressed={page === "stats"} onClick={() => { setPage("stats"); setSelectedTrade(undefined); }}><TrendingUp size={14} />Stats</button>
+      </div>
       <div className="journal-nav-controls">
         <select aria-label="Journal account and environment" value={activeScopeValue} onChange={(event) => setScope(scopes.find((item) => `${item.environment}:${item.accountId}` === event.target.value))}>
           {!scopes.length && <option value="">No journal accounts</option>}
@@ -245,8 +386,13 @@ export function TradeJournalWindow() {
       </div>
     </nav>
 
-    <section className={`journal-content ${view.kind}`}>
-      {view.kind === "month" ? <>
+    <section className={`journal-content ${page === "stats" ? "stats" : view.kind}`}>
+      {page === "stats" ? <TradeJournalStats
+        scope={scope}
+        refreshKey={journalRevision}
+        onDay={(date) => { setView({ kind: "day", date }); setPage("calendar"); setSelectedTrade(undefined); }}
+        onTrade={(tradeId) => { void openStatsTrade(tradeId); }}
+      /> : view.kind === "month" ? <>
         <div className="journal-month-heading"><div><span>Monthly performance</span><h1>{monthLabel.format(new Date(Date.UTC(cursor.year, cursor.month - 1, 1)))}</h1></div><div className="journal-month-actions"><div className="journal-mode-toggle"><button className={mode === "pnl" ? "active" : ""} onClick={() => setMode("pnl")}>$ P&amp;L</button><button className={mode === "r" ? "active" : ""} onClick={() => setMode("r")}>R</button></div><button aria-label="Previous month" onClick={() => moveMonth(-1)}><ChevronLeft size={18} /></button><button aria-label="Next month" onClick={() => moveMonth(1)}><ChevronRight size={18} /></button></div></div>
         <MetricStrip items={[
           ["Net P&L", money(month?.metrics.netPnl), metricClass(month?.metrics.netPnl)],
@@ -266,9 +412,9 @@ export function TradeJournalWindow() {
         </div>
       </> : <DayView day={day} date={view.date} loading={loading} onBack={() => { setView({ kind: "month" }); setSelectedTrade(undefined); }} onTrade={openTrade} />}
 
-      {loading && <div className="journal-state"><RefreshCw size={20} className="spin" /><span>Loading journal…</span></div>}
-      {!loading && error && <div className="journal-state error"><CloudOff size={20} /><span>{error}</span><button onClick={runSync}>Retry sync</button></div>}
-      {!loading && !error && !scope && <div className="journal-state empty"><CalendarDays size={22} /><strong>No journal data yet</strong><span>Connect Supabase and sync a TradeStation account, or place a new trade through Northstar.</span></div>}
+      {page === "calendar" && loading && <div className="journal-state"><RefreshCw size={20} className="spin" /><span>Loading journal…</span></div>}
+      {page === "calendar" && !loading && error && <div className="journal-state error"><CloudOff size={20} /><span>{error}</span><button onClick={runSync}>Retry sync</button></div>}
+      {page === "calendar" && !loading && !error && !scope && <div className="journal-state empty"><CalendarDays size={22} /><strong>No journal data yet</strong><span>Connect Supabase and sync a TradeStation account, or place a new trade through Northstar.</span></div>}
     </section>
 
     {selectedTrade && <TradeDrawer trade={selectedTrade} onClose={() => setSelectedTrade(undefined)} onSaved={(next) => setSelectedTrade(next)} />}

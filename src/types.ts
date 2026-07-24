@@ -634,3 +634,77 @@ export interface JournalDaySummary {
   metrics: JournalSummaryMetrics;
   trades: JournalTrade[];
 }
+
+export interface JournalStatsTrade {
+  id: string;
+  symbol: string;
+  direction: "Long" | "Short";
+  status: JournalTradeStatus;
+  openedAt: string;
+  closedAt?: string;
+  grossPnl: number;
+  fees: number;
+  netPnl: number;
+  rMultiple?: number;
+  tags: string[];
+}
+
+export interface JournalStatsRange {
+  scope: JournalScope;
+  startDate?: string;
+  endDate?: string;
+  trades: JournalStatsTrade[];
+}
+
+export interface JournalStatsDay {
+  date: string;
+  trades: number;
+  netPnl: number;
+  totalR?: number;
+  cumulativePnl: number;
+  cumulativeR?: number;
+  drawdownPnl: number;
+  drawdownR?: number;
+}
+
+export interface JournalStatsBreakdown {
+  key: string;
+  label: string;
+  trades: number;
+  netPnl: number;
+  totalR?: number;
+  winRate?: number;
+  averageTrade?: number;
+}
+
+export interface JournalStatsMetrics {
+  closedTrades: number;
+  openTrades: number;
+  netPnl: number;
+  grossPnl: number;
+  fees: number;
+  totalR?: number;
+  rTrades: number;
+  winRate?: number;
+  profitFactor?: number;
+  expectancy?: number;
+  averageWin?: number;
+  averageLoss?: number;
+  payoffRatio?: number;
+  averageHoldMinutes?: number;
+  longestWinStreak: number;
+  longestLossStreak: number;
+  maxDrawdown: number;
+  maxDrawdownR?: number;
+  largestWin?: JournalStatsTrade;
+  largestLoss?: JournalStatsTrade;
+}
+
+export interface JournalStatsResult {
+  metrics: JournalStatsMetrics;
+  days: JournalStatsDay[];
+  symbols: JournalStatsBreakdown[];
+  directions: JournalStatsBreakdown[];
+  tags: JournalStatsBreakdown[];
+  entryHours: JournalStatsBreakdown[];
+}

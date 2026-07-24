@@ -2165,6 +2165,16 @@ fn get_journal_day(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn get_journal_stats_trades(
+    scope: journal::JournalScope,
+    start_date: Option<String>,
+    end_date: Option<String>,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalStatsRange, AppError> {
+    journal::stats_range(&state.db_path, scope, start_date, end_date)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn get_journal_trade(
     trade_id: String,
     state: State<'_, NativeState>,
@@ -3549,6 +3559,7 @@ pub fn run() {
             get_journal_scopes,
             get_journal_month,
             get_journal_day,
+            get_journal_stats_trades,
             get_journal_trade,
             save_journal_entry_screenshot,
             get_journal_entry_screenshot,

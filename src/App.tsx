@@ -374,6 +374,7 @@ function TradingApp() {
   const awaitingDetachedGenerationRef = useRef(new Set<string>());
   const tabMarketEnvironmentRef = useRef(environment);
   const detachedWindowCreationsRef = useRef(new Set<string>());
+  const journalWindowOpeningRef = useRef(false);
   const ema200TabCacheRef = useRef(new Map<string, Ema200TabPositionCacheEntry>());
   const alertSubscriptionsRef = useRef(new Map<string, BarSubscription>());
   const alertBarsRef = useRef(new Map<string, Bar[]>());
@@ -2557,20 +2558,32 @@ function TradingApp() {
       window.open("/?view=journal", "northstar-trade-journal", "width=1280,height=800");
       return;
     }
+    if (journalWindowOpeningRef.current) return;
     try {
       const existing = await WebviewWindow.getByLabel("trade-journal");
       if (existing) {
+        const [visible, minimized] = await Promise.all([existing.isVisible(), existing.isMinimized()]);
+        if (!visible && !minimized) return;
+        if (minimized) await existing.unminimize();
         await existing.show();
-        await existing.unminimize();
         await existing.setFocus();
         return;
       }
+      journalWindowOpeningRef.current = true;
       const journal = new WebviewWindow("trade-journal", {
         url: "/?view=journal", title: "Northstar Trade Journal", width: 1280, height: 800,
-        minWidth: 960, minHeight: 640, center: true, resizable: true, decorations: true,
+        minWidth: 960, minHeight: 640, center: true, preventOverflow: true,
+        resizable: true, decorations: true, visible: false, focus: false,
       });
-      journal.once("tauri://error", (event) => showToast(`Could not open Trade Journal: ${String(event.payload)}`));
-    } catch (error) { showToast(`Could not open Trade Journal: ${String(error)}`); }
+      journal.once("tauri://created", () => { journalWindowOpeningRef.current = false; });
+      journal.once("tauri://error", (event) => {
+        journalWindowOpeningRef.current = false;
+        showToast(`Could not open Trade Journal: ${String(event.payload)}`);
+      });
+    } catch (error) {
+      journalWindowOpeningRef.current = false;
+      showToast(`Could not open Trade Journal: ${String(error)}`);
+    }
   }
 
   async function saveTradeStationCredentials() {

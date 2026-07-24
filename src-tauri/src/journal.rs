@@ -262,6 +262,31 @@ pub struct JournalDaySummary {
     pub trades: Vec<JournalTrade>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalStatsTrade {
+    pub id: String,
+    pub symbol: String,
+    pub direction: String,
+    pub status: String,
+    pub opened_at: String,
+    pub closed_at: Option<String>,
+    pub gross_pnl: f64,
+    pub fees: f64,
+    pub net_pnl: f64,
+    pub r_multiple: Option<f64>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalStatsRange {
+    pub scope: JournalScope,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub trades: Vec<JournalStatsTrade>,
+}
+
 #[derive(Debug, Clone)]
 struct CloudConfig {
     project_url: String,
@@ -1655,6 +1680,61 @@ pub fn day(path: &Path, scope: JournalScope, date: &str) -> Result<JournalDaySum
         scope,
         date: date.into(),
         metrics: metrics(&trades),
+        trades,
+    })
+}
+pub fn stats_range(
+    path: &Path,
+    scope: JournalScope,
+    start_date: Option<String>,
+    end_date: Option<String>,
+) -> Result<JournalStatsRange, AppError> {
+    if start_date
+        .as_deref()
+        .is_some_and(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err())
+        || end_date
+            .as_deref()
+            .is_some_and(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err())
+    {
+        return Err(AppError::Validation(
+            "Journal stats dates must use YYYY-MM-DD".into(),
+        ));
+    }
+    if start_date
+        .as_ref()
+        .zip(end_date.as_ref())
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err(AppError::Validation(
+            "Journal stats start date must not be after the end date".into(),
+        ));
+    }
+    let trades = load_trades(path, Some(&scope))?
+        .into_iter()
+        .filter(|trade| {
+            ny_date(&trade.opened_at).is_some_and(|date| {
+                start_date.as_ref().is_none_or(|start| date >= *start)
+                    && end_date.as_ref().is_none_or(|end| date <= *end)
+            })
+        })
+        .map(|trade| JournalStatsTrade {
+            id: trade.id,
+            symbol: trade.symbol,
+            direction: trade.direction,
+            status: trade.status,
+            opened_at: trade.opened_at,
+            closed_at: trade.closed_at,
+            gross_pnl: trade.gross_pnl,
+            fees: trade.fees,
+            net_pnl: trade.net_pnl,
+            r_multiple: trade.r_multiple,
+            tags: trade.tags,
+        })
+        .collect();
+    Ok(JournalStatsRange {
+        scope,
+        start_date,
+        end_date,
         trades,
     })
 }
@@ -4159,6 +4239,46 @@ mod tests {
             .iter()
             .any(|column| column.contains("data") || column.contains("blob")));
         drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn stats_range_is_inclusive_in_new_york_and_scope_isolated() {
+        let path = temp();
+        init(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
+        for (id, account, opened_at) in [
+            ("before", "A1", "2026-03-08T04:30:00Z"),
+            ("inside", "A1", "2026-03-08T07:30:00Z"),
+            ("end", "A1", "2026-03-09T03:59:00Z"),
+            ("other-account", "A2", "2026-03-08T18:00:00Z"),
+        ] {
+            db.execute(
+                "INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,gross_pnl,fees,net_pnl,risk_provenance,updated_at) VALUES(?1,'sim',?2,'MESU26','Long','closed',?3,?3,1,1,6250,6251,5,1,4,'exact',?3)",
+                params![id, account, opened_at],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let result = stats_range(
+            &path,
+            JournalScope {
+                environment: TradingEnvironment::Sim,
+                account_id: "A1".into(),
+                account_label: "A1".into(),
+            },
+            Some("2026-03-08".into()),
+            Some("2026-03-08".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            result
+                .trades
+                .iter()
+                .map(|trade| trade.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["inside", "end"]
+        );
         std::fs::remove_file(path).unwrap();
     }
 }

@@ -1,4 +1,8 @@
-import type { JournalCalendarDay, JournalDaySummary, JournalEvent, JournalMonthSummary, JournalScope, JournalSummaryMetrics, JournalTrade } from "../types";
+import type {
+  JournalCalendarDay, JournalDaySummary, JournalEvent, JournalMonthSummary, JournalScope,
+  JournalStatsBreakdown, JournalStatsRange, JournalStatsResult, JournalStatsTrade,
+  JournalSummaryMetrics, JournalTrade,
+} from "../types";
 
 export const JOURNAL_TIME_ZONE = "America/New_York";
 
@@ -101,6 +105,209 @@ export function daySummary(scope: JournalScope, date: string, trades: JournalTra
   return { scope, date, metrics: journalMetrics(dayTrades), trades: dayTrades };
 }
 
+function journalHour(iso: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: JOURNAL_TIME_ZONE,
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(iso));
+  return Number(parts.find((part) => part.type === "hour")?.value ?? 0);
+}
+
+export function journalStatsRange(
+  scope: JournalScope,
+  trades: JournalStatsTrade[],
+  startDate?: string,
+  endDate?: string,
+): JournalStatsRange {
+  return {
+    scope,
+    startDate,
+    endDate,
+    trades: trades.filter((trade) => {
+      const date = journalDate(trade.openedAt);
+      return (!startDate || date >= startDate) && (!endDate || date <= endDate);
+    }),
+  };
+}
+
+const JOURNAL_STATS_REFRESH_REASONS = new Set([
+  "stream-start-cloud-sync",
+  "entry-intent",
+  "cloud-configured",
+  "journal-reset-now",
+  "commission-updated",
+  "close-reconciled",
+  "broker-fill",
+  "cloud-sync",
+  "annotation",
+]);
+
+export function journalStatsNeedsRefresh(reason?: string): boolean {
+  return reason == null || JOURNAL_STATS_REFRESH_REASONS.has(reason);
+}
+
+function statsBreakdown(
+  groups: Map<string, { label: string; trades: JournalStatsTrade[] }>,
+): JournalStatsBreakdown[] {
+  return [...groups.entries()].map(([key, group]) => {
+    const wins = group.trades.filter((trade) => trade.netPnl > 0);
+    const knownR = group.trades
+      .map((trade) => trade.rMultiple)
+      .filter((value): value is number => value != null && Number.isFinite(value));
+    const netPnl = group.trades.reduce((sum, trade) => sum + trade.netPnl, 0);
+    return {
+      key,
+      label: group.label,
+      trades: group.trades.length,
+      netPnl,
+      totalR: knownR.length ? knownR.reduce((sum, value) => sum + value, 0) : undefined,
+      winRate: group.trades.length ? wins.length / group.trades.length : undefined,
+      averageTrade: group.trades.length ? netPnl / group.trades.length : undefined,
+    };
+  });
+}
+
+function addBreakdownTrade(
+  groups: Map<string, { label: string; trades: JournalStatsTrade[] }>,
+  key: string,
+  label: string,
+  trade: JournalStatsTrade,
+) {
+  const current = groups.get(key);
+  if (current) current.trades.push(trade);
+  else groups.set(key, { label, trades: [trade] });
+}
+
+function maximumDrawdown(values: number[]): number {
+  let peak = 0;
+  let cumulative = 0;
+  let maximum = 0;
+  values.forEach((value) => {
+    cumulative += value;
+    peak = Math.max(peak, cumulative);
+    maximum = Math.max(maximum, peak - cumulative);
+  });
+  return maximum;
+}
+
+export function journalStats(trades: JournalStatsTrade[]): JournalStatsResult {
+  const closed = trades
+    .filter((trade) => trade.status === "closed")
+    .sort((left, right) => (left.closedAt ?? left.openedAt).localeCompare(right.closedAt ?? right.openedAt));
+  const wins = closed.filter((trade) => trade.netPnl > 0);
+  const losses = closed.filter((trade) => trade.netPnl < 0);
+  const knownRTrades = closed.filter((trade) => trade.rMultiple != null && Number.isFinite(trade.rMultiple));
+  const positive = wins.reduce((sum, trade) => sum + trade.netPnl, 0);
+  const negative = Math.abs(losses.reduce((sum, trade) => sum + trade.netPnl, 0));
+  const netPnl = closed.reduce((sum, trade) => sum + trade.netPnl, 0);
+  const averageWin = wins.length ? positive / wins.length : undefined;
+  const averageLoss = losses.length ? losses.reduce((sum, trade) => sum + trade.netPnl, 0) / losses.length : undefined;
+  const holdDurations = closed
+    .map((trade) => trade.closedAt ? (Date.parse(trade.closedAt) - Date.parse(trade.openedAt)) / 60_000 : Number.NaN)
+    .filter((value) => Number.isFinite(value) && value >= 0);
+
+  let currentWinStreak = 0;
+  let currentLossStreak = 0;
+  let longestWinStreak = 0;
+  let longestLossStreak = 0;
+  closed.forEach((trade) => {
+    if (trade.netPnl > 0) {
+      currentWinStreak += 1;
+      currentLossStreak = 0;
+    } else if (trade.netPnl < 0) {
+      currentLossStreak += 1;
+      currentWinStreak = 0;
+    } else {
+      currentWinStreak = 0;
+      currentLossStreak = 0;
+    }
+    longestWinStreak = Math.max(longestWinStreak, currentWinStreak);
+    longestLossStreak = Math.max(longestLossStreak, currentLossStreak);
+  });
+
+  const dailyGroups = new Map<string, JournalStatsTrade[]>();
+  closed.forEach((trade) => {
+    const date = journalDate(trade.openedAt);
+    dailyGroups.set(date, [...(dailyGroups.get(date) ?? []), trade]);
+  });
+  let cumulativePnl = 0;
+  let cumulativeR = 0;
+  let pnlPeak = 0;
+  let rPeak = 0;
+  const days = [...dailyGroups.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([date, dayTrades]) => {
+    const dayR = dayTrades
+      .map((trade) => trade.rMultiple)
+      .filter((value): value is number => value != null && Number.isFinite(value));
+    const net = dayTrades.reduce((sum, trade) => sum + trade.netPnl, 0);
+    cumulativePnl += net;
+    pnlPeak = Math.max(pnlPeak, cumulativePnl);
+    const totalR = dayR.length ? dayR.reduce((sum, value) => sum + value, 0) : undefined;
+    if (totalR != null) cumulativeR += totalR;
+    rPeak = Math.max(rPeak, cumulativeR);
+    return {
+      date,
+      trades: dayTrades.length,
+      netPnl: net,
+      totalR,
+      cumulativePnl,
+      cumulativeR: knownRTrades.length ? cumulativeR : undefined,
+      drawdownPnl: pnlPeak - cumulativePnl,
+      drawdownR: knownRTrades.length ? rPeak - cumulativeR : undefined,
+    };
+  });
+
+  const symbolGroups = new Map<string, { label: string; trades: JournalStatsTrade[] }>();
+  const directionGroups = new Map<string, { label: string; trades: JournalStatsTrade[] }>();
+  const tagGroups = new Map<string, { label: string; trades: JournalStatsTrade[] }>();
+  const hourGroups = new Map<string, { label: string; trades: JournalStatsTrade[] }>();
+  closed.forEach((trade) => {
+    addBreakdownTrade(symbolGroups, trade.symbol.toUpperCase(), trade.symbol.toUpperCase(), trade);
+    addBreakdownTrade(directionGroups, trade.direction.toLowerCase(), trade.direction, trade);
+    const uniqueTags = new Map<string, string>();
+    trade.tags.forEach((tag) => {
+      const label = tag.trim();
+      if (label) uniqueTags.set(label.toLocaleLowerCase(), label);
+    });
+    if (!uniqueTags.size) uniqueTags.set("untagged", "Untagged");
+    uniqueTags.forEach((label, key) => addBreakdownTrade(tagGroups, key, label, trade));
+    const hour = journalHour(trade.openedAt);
+    const hourKey = String(hour).padStart(2, "0");
+    addBreakdownTrade(hourGroups, hourKey, `${hourKey}:00`, trade);
+  });
+  const performanceSort = (left: JournalStatsBreakdown, right: JournalStatsBreakdown) => right.netPnl - left.netPnl || right.trades - left.trades;
+
+  return {
+    metrics: {
+      closedTrades: closed.length,
+      openTrades: trades.length - closed.length,
+      netPnl,
+      grossPnl: closed.reduce((sum, trade) => sum + trade.grossPnl, 0),
+      fees: closed.reduce((sum, trade) => sum + trade.fees, 0),
+      totalR: knownRTrades.length ? knownRTrades.reduce((sum, trade) => sum + (trade.rMultiple ?? 0), 0) : undefined,
+      rTrades: knownRTrades.length,
+      winRate: closed.length ? wins.length / closed.length : undefined,
+      profitFactor: negative > 0 ? positive / negative : positive > 0 ? Infinity : undefined,
+      expectancy: closed.length ? netPnl / closed.length : undefined,
+      averageWin,
+      averageLoss,
+      payoffRatio: averageWin != null && averageLoss != null && averageLoss !== 0 ? averageWin / Math.abs(averageLoss) : undefined,
+      averageHoldMinutes: holdDurations.length ? holdDurations.reduce((sum, value) => sum + value, 0) / holdDurations.length : undefined,
+      longestWinStreak,
+      longestLossStreak,
+      maxDrawdown: maximumDrawdown(closed.map((trade) => trade.netPnl)),
+      maxDrawdownR: knownRTrades.length ? maximumDrawdown(knownRTrades.map((trade) => trade.rMultiple ?? 0)) : undefined,
+      largestWin: wins.length ? wins.reduce((best, trade) => trade.netPnl > best.netPnl ? trade : best) : undefined,
+      largestLoss: losses.length ? losses.reduce((worst, trade) => trade.netPnl < worst.netPnl ? trade : worst) : undefined,
+    },
+    days,
+    symbols: statsBreakdown(symbolGroups).sort(performanceSort),
+    directions: statsBreakdown(directionGroups).sort(performanceSort),
+    tags: statsBreakdown(tagGroups).sort(performanceSort),
+    entryHours: statsBreakdown(hourGroups).sort((left, right) => left.key.localeCompare(right.key)),
+  };
+}
+
 export function journalCalendarDates(year: number, month: number): Array<{ date: string; inMonth: boolean }> {
   const first = new Date(Date.UTC(year, month - 1, 1));
   const last = new Date(Date.UTC(year, month, 0));
@@ -125,33 +332,57 @@ export function journalCalendarDates(year: number, month: number): Array<{ date:
 
 export function demoJournalTrades(): JournalTrade[] {
   const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(Math.min(now.getDate(), 24)).padStart(2, "0");
-  const base = `${year}-${month}-${day}`;
-  return [
-    {
-      id: "demo-win", environment: "sim", accountId: "SIM-DEMO-4821", symbol: "MESU26", direction: "Long", status: "closed",
-      openedAt: `${base}T16:37:00Z`, closedAt: `${base}T17:05:00Z`, entryQuantity: 1, exitQuantity: 1,
-      averageEntry: 6252.5, averageExit: 6259.5, originalStop: 6248.25, originalTarget: 6259.5,
-      plannedRisk: 21.25, deployedRisk: 21.25, pointValue: 5, grossPnl: 35, fees: 1.9, netPnl: 33.1, rMultiple: 1.65,
-      riskProvenance: "exact", notes: "Waited for the reclaim and respected the bracket.", tags: ["opening-range", "A setup"],
-      events: [
-        { id: "e1", tradeId: "demo-win", eventType: "entry-intent", occurredAt: `${base}T16:37:00Z`, source: "northstar", status: "confirmed", price: 6252.5, quantity: 1 },
-        { id: "e2", tradeId: "demo-win", eventType: "stop-move", occurredAt: `${base}T16:52:00Z`, source: "northstar", status: "confirmed", oldPrice: 6248.25, newPrice: 6252.75 },
-        { id: "e3", tradeId: "demo-win", eventType: "fill", occurredAt: `${base}T17:05:00Z`, source: "broker-stream", status: "confirmed", price: 6259.5, quantity: 1 },
-      ],
-    },
-    {
-      id: "demo-loss", environment: "sim", accountId: "SIM-DEMO-4821", symbol: "MESU26", direction: "Long", status: "closed",
-      openedAt: `${base}T17:23:00Z`, closedAt: `${base}T18:49:00Z`, entryQuantity: 1, exitQuantity: 1,
-      averageEntry: 6257.25, averageExit: 6250.25, originalStop: 6250.25, originalTarget: 6267.75,
-      plannedRisk: 35, deployedRisk: 35, pointValue: 5, grossPnl: -35, fees: 1.9, netPnl: -36.9, rMultiple: -1,
-      riskProvenance: "exact", notes: "", tags: ["retest"],
-      events: [
-        { id: "e4", tradeId: "demo-loss", eventType: "entry-intent", occurredAt: `${base}T17:23:00Z`, source: "northstar", status: "confirmed", price: 6257.25, quantity: 1 },
-        { id: "e5", tradeId: "demo-loss", eventType: "fill", occurredAt: `${base}T18:49:00Z`, source: "broker-stream", status: "confirmed", price: 6250.25, quantity: 1 },
-      ],
-    },
+  const stamp = (daysAgo: number, hour: number, minute = 0) => new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo, hour, minute,
+  )).toISOString();
+  const closed = (
+    id: string,
+    daysAgo: number,
+    symbol: string,
+    direction: "Long" | "Short",
+    netPnl: number,
+    rMultiple: number | undefined,
+    tags: string[],
+    hour: number,
+    holdMinutes: number,
+  ): JournalTrade => {
+    const openedAt = stamp(daysAgo, hour);
+    const closedAt = new Date(Date.parse(openedAt) + holdMinutes * 60_000).toISOString();
+    const averageEntry = symbol.startsWith("MNQ") ? 23_200 : symbol.startsWith("MCL") ? 67.5 : symbol.startsWith("MGC") ? 2_420 : 6_250;
+    const priceMove = netPnl / (symbol.startsWith("MNQ") ? 2 : symbol.startsWith("MCL") ? 100 : symbol.startsWith("MGC") ? 10 : 5);
+    const averageExit = averageEntry + priceMove * (direction === "Long" ? 1 : -1);
+    return {
+      id, environment: "sim", accountId: "SIM-DEMO-4821", symbol, direction, status: "closed",
+      openedAt, closedAt, entryQuantity: 1, exitQuantity: 1, averageEntry, averageExit,
+      originalStop: averageEntry + (direction === "Long" ? -4 : 4),
+      originalTarget: averageEntry + (direction === "Long" ? 8 : -8),
+      plannedRisk: 24, deployedRisk: 24, pointValue: 5,
+      grossPnl: netPnl + 1.9, fees: 1.9, netPnl, rMultiple,
+      riskProvenance: rMultiple == null ? "unknown" : "exact", notes: "", tags, events: [],
+    };
+  };
+  const trades = [
+    closed("demo-win", 18, "MESU26", "Long", 84.1, 1.75, ["opening-range", "A setup"], 13, 28),
+    closed("demo-loss", 16, "MESU26", "Long", -46.9, -1, ["retest"], 14, 86),
+    closed("demo-mnq-win", 14, "MNQU26", "Short", 116.1, 2.2, ["failed-breakout", "A setup"], 15, 42),
+    closed("demo-mcl-loss", 12, "MCLU26", "Long", -31.9, -0.75, ["retest", "impulsive"], 16, 19),
+    closed("demo-mes-scratch", 10, "MESU26", "Short", -1.9, 0, ["opening-range"], 13, 11),
+    closed("demo-mgc-win", 8, "MGCQ26", "Long", 58.1, 1.25, ["trend", "B setup"], 17, 67),
+    closed("demo-mnq-loss", 6, "MNQU26", "Long", -72.9, -1.1, ["failed-breakout"], 18, 34),
+    closed("demo-mes-win-two", 4, "MESU26", "Short", 41.1, 0.9, ["retest", "B setup"], 14, 23),
+    closed("demo-mcl-win", 2, "MCLU26", "Short", 73.1, undefined, ["trend"], 20, 51),
+    closed("demo-mnq-win-two", 1, "MNQU26", "Long", 94.1, 1.6, ["opening-range", "A setup"], 13, 37),
   ];
+  trades[0].notes = "Waited for the reclaim and respected the bracket.";
+  trades[0].events = [
+    { id: "e1", tradeId: "demo-win", eventType: "entry-intent", occurredAt: trades[0].openedAt, source: "northstar", status: "confirmed", price: trades[0].averageEntry, quantity: 1 },
+    { id: "e2", tradeId: "demo-win", eventType: "stop-move", occurredAt: new Date(Date.parse(trades[0].openedAt) + 15 * 60_000).toISOString(), source: "northstar", status: "confirmed", oldPrice: trades[0].originalStop, newPrice: trades[0].averageEntry },
+    { id: "e3", tradeId: "demo-win", eventType: "fill", occurredAt: trades[0].closedAt!, source: "broker-stream", status: "confirmed", price: trades[0].averageExit, quantity: 1 },
+  ];
+  return [...trades, {
+    id: "demo-open", environment: "sim", accountId: "SIM-DEMO-4821", symbol: "MESU26", direction: "Long", status: "open",
+    openedAt: stamp(0, 15), entryQuantity: 1, exitQuantity: 0, averageEntry: 6258.25,
+    originalStop: 6254.25, originalTarget: 6266.25, plannedRisk: 20, deployedRisk: 20, pointValue: 5,
+    grossPnl: 0, fees: 0.4, netPnl: 0, rMultiple: undefined, riskProvenance: "exact", notes: "", tags: ["retest"], events: [],
+  }];
 }
