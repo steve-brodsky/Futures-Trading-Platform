@@ -385,6 +385,13 @@ export interface ChartLabelSettings {
   fontSize: number;
 }
 
+export interface ChartSessionSettings {
+  colorMode: "uniform" | "by-session";
+  overnightColor: string;
+  asiaColor: string;
+  londonColor: string;
+}
+
 export interface OrderTicketSettings {
   swingStopPivotBars: 2 | 3;
   swingStopOffsetTicks: number;
@@ -395,6 +402,7 @@ export interface OrderTicketSettings {
 
 export interface WorkspaceSettings {
   chartLabels: ChartLabelSettings;
+  chartSessions: ChartSessionSettings;
   orderTicket: OrderTicketSettings;
   journal: {
     commissionPerContractSide: number;

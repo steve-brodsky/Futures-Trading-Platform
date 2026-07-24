@@ -6,7 +6,7 @@ import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } fr
 import {
   Activity, BarChart3, Bell, BellRing, BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
   GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
-  Magnet, MousePointer2, PanelsTopLeft, Plus,
+  Magnet, MousePointer2, Palette, PanelsTopLeft, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingDown, TrendingUp,
   Wifi, X, Zap,
 } from "lucide-react";
@@ -41,7 +41,8 @@ import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameB
 import { activeDrawingAlerts, applyDrawingPatch, trackDrawingAlertTransitions, type ActiveDrawingAlert, type DrawingAlertTrackerState } from "./lib/drawingAlerts";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartTabState, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -76,7 +77,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -329,6 +330,7 @@ function TradingApp() {
   const [drawingAlertsOpen, setDrawingAlertsOpen] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chartSettingsOpen, setChartSettingsOpen] = useState(false);
   const [entryRulesOpen, setEntryRulesOpen] = useState(false);
   const [review, setReview] = useState<ReviewState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -2135,6 +2137,16 @@ function TradingApp() {
     }));
   }
 
+  function updateChartSessionSettings(patch: Partial<ChartSessionSettings>) {
+    commitWorkspace((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        chartSessions: { ...current.settings.chartSessions, ...patch },
+      },
+    }));
+  }
+
   function updateOrderTicketSettings(patch: Partial<OrderTicketSettings>) {
     commitWorkspace((current) => ({
       ...current,
@@ -2894,6 +2906,7 @@ function TradingApp() {
       currentPrice={tabTradeQuote.last}
       projectedEntryPrice={focused && activeOrderProjection ? projectedEntryPrice(activeOrderProjection) : undefined}
       chartLabelSettings={workspace.settings.chartLabels}
+      chartSessionSettings={workspace.settings.chartSessions}
       timeframe={tab.timeframe}
       indicators={tab.indicators}
       gexLevels={gexCalculation?.levels ?? []}
@@ -3022,6 +3035,17 @@ function TradingApp() {
         <span className="tool-label">Drawing Alerts</span>
         {activeLineAlerts.length > 0 && <span className="drawing-alert-count">{activeLineAlerts.length}</span>}
       </button>
+      <IconButton
+        label="Chart settings"
+        active={chartSettingsOpen}
+        onClick={() => {
+          setIndicatorOpen(false);
+          setChartStyleOpen(false);
+          setChartLayoutOpen(false);
+          setAlertOpen(false);
+          setChartSettingsOpen(true);
+        }}
+      ><Palette size={17} /></IconButton>
       <div className="divider" />
       <span className="toolbar-spacer" />
       {!isDetached && <><IconButton label="Trade journal" onClick={openTradeJournal}><BookOpen size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
@@ -3089,6 +3113,36 @@ function TradingApp() {
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
       <section className="settings-section settings-api-section" aria-labelledby="schwab-api-settings"><header><span>Connection</span><h3 id="schwab-api-settings">Schwab API</h3><p>Equity and ETF chart data. Credentials and the refresh token stay in the operating system credential vault.</p></header><SchwabCredentials clientId={schwabClientId} secret={schwabSecret} busy={busy} configured={schwabConfigured} connected={schwabAuthenticated} native={api.isNative} onClientIdChange={setSchwabClientId} onSecretChange={setSchwabSecret} onSave={saveSchwabApiCredentials} onConnect={connectSchwab} onDisconnect={disconnectSchwab} /></section>
     </div></Modal>}
+
+    {chartSettingsOpen && <Modal title="Chart settings" onClose={() => setChartSettingsOpen(false)} width={500}>
+      <div className="chart-session-settings">
+        <header>
+          <span>Session backgrounds</span>
+          <h3>Overnight session colors</h3>
+          <p>Keep overnight trading under one shade or distinguish the Asia and London sessions. Regular U.S. market hours stay unshaded.</p>
+        </header>
+        <div className="session-color-mode" role="group" aria-label="Overnight session color mode">
+          <button type="button" className={workspace.settings.chartSessions.colorMode === "uniform" ? "active" : ""} aria-pressed={workspace.settings.chartSessions.colorMode === "uniform"} onClick={() => updateChartSessionSettings({ colorMode: "uniform" })}>
+            <span className="session-mode-preview"><i style={{ background: workspace.settings.chartSessions.overnightColor }} /></span>
+            <span><strong>One color</strong><small>All overnight hours</small></span>
+          </button>
+          <button type="button" className={workspace.settings.chartSessions.colorMode === "by-session" ? "active" : ""} aria-pressed={workspace.settings.chartSessions.colorMode === "by-session"} onClick={() => updateChartSessionSettings({ colorMode: "by-session" })}>
+            <span className="session-mode-preview split"><i style={{ background: workspace.settings.chartSessions.asiaColor }} /><i style={{ background: workspace.settings.chartSessions.londonColor }} /><i style={{ background: workspace.settings.chartSessions.overnightColor }} /></span>
+            <span><strong>By session</strong><small>Asia and London colors</small></span>
+          </button>
+        </div>
+        <div className="session-color-list">
+          {workspace.settings.chartSessions.colorMode === "uniform"
+            ? <label className="session-color-row"><span><strong>All overnight sessions</strong><small>4:00 PM–9:30 AM ET</small></span><span className="session-color-control"><input type="color" aria-label="All overnight sessions color" value={workspace.settings.chartSessions.overnightColor} onChange={(event) => updateChartSessionSettings({ overnightColor: event.target.value })} /><output>{workspace.settings.chartSessions.overnightColor.toUpperCase()}</output></span></label>
+            : <>
+              <label className="session-color-row"><span><strong>Asia</strong><small>6:00 PM–2:00 AM ET</small></span><span className="session-color-control"><input type="color" aria-label="Asia session color" value={workspace.settings.chartSessions.asiaColor} onChange={(event) => updateChartSessionSettings({ asiaColor: event.target.value })} /><output>{workspace.settings.chartSessions.asiaColor.toUpperCase()}</output></span></label>
+              <label className="session-color-row"><span><strong>London</strong><small>2:00 AM–9:30 AM ET</small></span><span className="session-color-control"><input type="color" aria-label="London session color" value={workspace.settings.chartSessions.londonColor} onChange={(event) => updateChartSessionSettings({ londonColor: event.target.value })} /><output>{workspace.settings.chartSessions.londonColor.toUpperCase()}</output></span></label>
+              <label className="session-color-row"><span><strong>Other overnight</strong><small>4:00 PM–6:00 PM ET</small></span><span className="session-color-control"><input type="color" aria-label="Other overnight session color" value={workspace.settings.chartSessions.overnightColor} onChange={(event) => updateChartSessionSettings({ overnightColor: event.target.value })} /><output>{workspace.settings.chartSessions.overnightColor.toUpperCase()}</output></span></label>
+            </>}
+        </div>
+        <p className="session-settings-note">Colors use a low-opacity wash so price, drawings, and gridlines remain clear. Session times follow New York time.</p>
+      </div>
+    </Modal>}
 
     {envConfirm && <Modal title={`Switch to ${envConfirm.toUpperCase()}?`} onClose={() => setEnvConfirm(null)}><div className={`environment-confirm ${envConfirm}`}><Zap size={22} /><div><strong>{envConfirm === "live" ? "Real orders and real money" : "Simulated execution"}</strong><p>{envConfirm === "live" ? "Changing to LIVE clears SIM account data." : "SIM uses a separate account environment and simulated fills."}</p></div></div><div className="modal-actions"><button className="secondary-button" onClick={() => setEnvConfirm(null)}>Cancel</button><button className={envConfirm === "live" ? "danger-button" : "primary-button"} disabled={busy} onClick={confirmEnvironment}>Switch to {envConfirm.toUpperCase()}</button></div></Modal>}
 

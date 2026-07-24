@@ -68,7 +68,10 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
         instruments: workspace.watchlist.map((instrument) => ({ ...instrument })),
         symbols: workspace.watchlist.map((instrument) => instrument.symbol),
       },
-      chart_display: { ...workspace.settings.chartLabels },
+      chart_display: {
+        ...workspace.settings.chartLabels,
+        sessionShading: { ...workspace.settings.chartSessions },
+      },
       order_entry: {
         orderTicket: { ...workspace.settings.orderTicket },
         entryRules: workspace.entryRules,
@@ -143,6 +146,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
   const drawings = object(categories.drawings);
   const watchlist = object(categories.watchlist);
   const chartDisplay = object(categories.chart_display);
+  const sessionShading = object(chartDisplay?.sessionShading);
   const orderEntry = object(categories.order_entry);
   const journalFees = object(categories.journal_fees);
   const candidate: WorkspaceState = {
@@ -165,6 +169,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     entryRuleAlerts: normalizeEntryRuleAlerts(orderEntry?.entryRuleAlerts ?? alerts?.entryRules ?? current.entryRuleAlerts),
     settings: {
       chartLabels: { ...current.settings.chartLabels, ...chartDisplay },
+      chartSessions: { ...current.settings.chartSessions, ...sessionShading },
       orderTicket: { ...current.settings.orderTicket, ...object(orderEntry?.orderTicket) },
       journal: {
         commissionPerContractSide: typeof journalFees?.commissionPerContractSide === "number"

@@ -9,6 +9,7 @@ import { normalizeGexSelection, normalizeGexTabSettings } from "./gex";
 import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./priceBasedCharts";
 import { isValidPositionDrawing } from "./positionDrawing";
 import { normalizeDrawingAlert, sameDrawingAlert } from "./drawingAlerts";
+import { normalizeChartSessionSettings } from "./chartSessions";
 
 export const MAX_CHART_TABS = 12;
 export const MAIN_WINDOW_ID = "main";
@@ -324,6 +325,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     return normalizedSymbol ? [[normalizedSymbol, normalizeGexSelection(selection)]] : [];
   }));
   const savedChartLabels = value.settings?.chartLabels;
+  const savedChartSessions = value.settings?.chartSessions;
   const savedOrderTicket = value.settings?.orderTicket;
   const savedJournal = value.settings?.journal;
   const entryRules = normalizeEntryRules(value.entryRules);
@@ -377,6 +379,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
           ? Math.max(8, Math.min(16, Math.round(savedChartLabels.fontSize)))
           : fallback.settings.chartLabels.fontSize,
       },
+      chartSessions: normalizeChartSessionSettings(savedChartSessions, fallback.settings.chartSessions),
       orderTicket: {
         swingStopPivotBars: savedOrderTicket?.swingStopPivotBars === 2 || savedOrderTicket?.swingStopPivotBars === 3
           ? savedOrderTicket.swingStopPivotBars
@@ -497,6 +500,10 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
     && current.settings.chartLabels.showRMultiple === incoming.settings.chartLabels.showRMultiple
     && current.settings.chartLabels.fontSize === incoming.settings.chartLabels.fontSize
+    && current.settings.chartSessions.colorMode === incoming.settings.chartSessions.colorMode
+    && current.settings.chartSessions.overnightColor === incoming.settings.chartSessions.overnightColor
+    && current.settings.chartSessions.asiaColor === incoming.settings.chartSessions.asiaColor
+    && current.settings.chartSessions.londonColor === incoming.settings.chartSessions.londonColor
     && current.settings.orderTicket.swingStopPivotBars === incoming.settings.orderTicket.swingStopPivotBars
     && current.settings.orderTicket.swingStopOffsetTicks === incoming.settings.orderTicket.swingStopOffsetTicks
     && current.settings.orderTicket.sizingMode === incoming.settings.orderTicket.sizingMode

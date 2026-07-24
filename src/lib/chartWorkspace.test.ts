@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
 import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
+import { DEFAULT_CHART_SESSION_SETTINGS } from "./chartSessions";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAX_CHART_TABS, moveTab, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
@@ -14,7 +15,7 @@ const fallback: WorkspaceState = {
   drawings: {},
   gexSelections: {},
   watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
 describe("chart workspace", () => {
@@ -99,6 +100,20 @@ describe("chart workspace", () => {
       settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 50 } },
     }, fallback);
     expect(clamped.settings.chartLabels.fontSize).toBe(16);
+  });
+
+  it("defaults legacy session shading and preserves valid session colors", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, settings: { chartLabels: fallback.settings.chartLabels } }, fallback);
+    expect(legacy.settings.chartSessions).toEqual(DEFAULT_CHART_SESSION_SETTINGS);
+
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      settings: {
+        ...fallback.settings,
+        chartSessions: { colorMode: "by-session", overnightColor: "#111827", asiaColor: "#123456", londonColor: "#654321" },
+      },
+    }, fallback);
+    expect(saved.settings.chartSessions).toEqual({ colorMode: "by-session", overnightColor: "#111827", asiaColor: "#123456", londonColor: "#654321" });
   });
 
   it("normalizes saved watchlist symbols without changing their order", () => {

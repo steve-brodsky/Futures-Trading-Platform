@@ -5,6 +5,7 @@ import { defaultEntryRules } from "./entryRules";
 import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay } from "./cloudPreferences";
 import { defaultIndicators } from "./workspace";
+import { DEFAULT_CHART_SESSION_SETTINGS } from "./chartSessions";
 
 function workspace(): WorkspaceState {
   return {
@@ -39,6 +40,7 @@ function workspace(): WorkspaceState {
     entryRuleAlerts: defaultEntryRuleAlerts(),
     settings: {
       chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 12 },
+      chartSessions: DEFAULT_CHART_SESSION_SETTINGS,
       orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", riskAmount: 150 },
       journal: { commissionPerContractSide: 0.75 },
     },
@@ -53,6 +55,7 @@ describe("cloud preferences", () => {
     expect(serialized).toContain("MESU26");
     expect(profile.categories.chart_workspace.recentSymbols).toEqual(original.recentSymbols);
     expect(serialized).toContain("commissionPerContractSide");
+    expect(profile.categories.chart_display.sessionShading).toEqual(original.settings.chartSessions);
     expect(profile.categories.order_entry.entryRuleAlerts).toEqual(original.entryRuleAlerts);
     expect(profile.categories.alerts.entryRules).toBeUndefined();
     expect(serialized).not.toContain("secret-account-id");
@@ -88,12 +91,17 @@ describe("cloud preferences", () => {
       },
       entryRuleAlerts: { ...local.entryRuleAlerts, long: { enabled: true, sound: "bell", durationSeconds: 5 } },
       windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", splitRatios: { "two-columns": [0.7] }, detached: false, x: 999, y: 999 }],
-      settings: { ...local.settings, journal: { commissionPerContractSide: 1.25 } },
+      settings: {
+        ...local.settings,
+        chartSessions: { ...local.settings.chartSessions, colorMode: "by-session", asiaColor: "#112233" },
+        journal: { commissionPerContractSide: 1.25 },
+      },
     });
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.watchlist.map((item) => item.symbol)).toEqual(["MNQU26"]);
     expect(merged.recentSymbols.map((item) => item.symbol)).toEqual(["AAPL"]);
     expect(merged.settings.journal.commissionPerContractSide).toBe(1.25);
+    expect(merged.settings.chartSessions).toMatchObject({ colorMode: "by-session", asiaColor: "#112233" });
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "bell", durationSeconds: 5 });
     expect(merged.environment).toBe("live");
     expect(merged.selectedAccountId).toBe("secret-account-id");
@@ -106,6 +114,7 @@ describe("cloud preferences", () => {
     const local = workspace();
     const profile = cloudPreferenceProfile(local);
     profile.categories.chart_display.fontSize = 900;
+    profile.categories.chart_display.sessionShading = { colorMode: "invalid", asiaColor: "red" };
     profile.categories.journal_fees.commissionPerContractSide = -20;
     profile.categories.watchlist.symbols = ["mesu26", 123, "mesu26"];
     profile.categories.order_entry.entryRules = {
@@ -115,6 +124,7 @@ describe("cloud preferences", () => {
     profile.categories.order_entry.entryRuleAlerts = { long: { enabled: true, sound: "invalid", durationSeconds: 99 } };
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.settings.chartLabels.fontSize).toBe(16);
+    expect(merged.settings.chartSessions).toEqual(DEFAULT_CHART_SESSION_SETTINGS);
     expect(merged.settings.journal.commissionPerContractSide).toBe(0);
     expect(merged.watchlist.map((item) => [item.provider, item.symbol])).toEqual([["tradestation", "MESU26"]]);
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "chime", durationSeconds: 3 });

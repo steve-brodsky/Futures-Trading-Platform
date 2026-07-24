@@ -4,7 +4,7 @@ import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type Logical, type LogicalRange, type Time,
 } from "lightweight-charts";
-import type { AlertDurationSeconds, AlertSound, Bar, ChartKind, ChartLabelSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
+import type { AlertDurationSeconds, AlertSound, Bar, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme } from "../lib/crosshair";
@@ -40,6 +40,7 @@ interface Props {
   currentPrice: number;
   projectedEntryPrice?: number;
   chartLabelSettings: ChartLabelSettings;
+  chartSessionSettings: ChartSessionSettings;
   timeframe: Timeframe;
   timezone: ChartTimezone;
   indicators: IndicatorConfig[];
@@ -103,7 +104,7 @@ type PositionDragKind = "body" | "entry" | "stop" | "target" | "start" | "end";
 
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -357,7 +358,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     priceSeries.attachPrimitive(gexPrimitive);
     gexPrimitiveRef.current = gexPrimitive;
     if (intraday && !isSynthetic) {
-      const sessionShading = new SessionShading();
+      const sessionShading = new SessionShading(chartSessionSettings);
       priceSeries.attachPrimitive(sessionShading);
       sessionShadingRef.current = sessionShading;
       const vwapPrimitive = new NySessionVwapPrimitive();
@@ -495,6 +496,10 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null; gexPrimitiveRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone, renkoSettings.brickSizeTicks, renkoSettings.priceSource, renkoSettings.reversalBricks, pointAndFigureSettings.boxSizeTicks, pointAndFigureSettings.priceSource, pointAndFigureSettings.reversalBoxes]);
+
+  useEffect(() => {
+    sessionShadingRef.current?.setSettings(chartSessionSettings);
+  }, [chartSessionSettings.colorMode, chartSessionSettings.overnightColor, chartSessionSettings.asiaColor, chartSessionSettings.londonColor, chartGeneration]);
 
   useEffect(() => {
     if (isSynthetic) { setCandleCountdown(""); return; }
