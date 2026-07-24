@@ -639,6 +639,26 @@ pub fn load_workspace(path: &Path) -> Result<Option<serde_json::Value>, AppError
     }
 }
 
+pub fn load_json_setting(path: &Path, key: &str) -> Result<Option<serde_json::Value>, AppError> {
+    let db = connection(path)?;
+    let mut query = db.prepare("SELECT value FROM settings WHERE key=?1")?;
+    let value = query.query_row([key], |row| row.get::<_, String>(0));
+    match value {
+        Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn save_json_setting(path: &Path, key: &str, value: &serde_json::Value) -> Result<(), AppError> {
+    let db = connection(path)?;
+    db.execute(
+        "INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
+        params![key, serde_json::to_string(value)?],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,6 +5,7 @@ mod schwab_oauth;
 mod schwab_streamer;
 mod storage;
 mod tradestation;
+mod trading_today;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
@@ -1585,6 +1586,29 @@ fn save_workspace(
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
     storage::save_workspace(&state.db_path, &workspace, cloud_profile.as_ref())
+}
+
+#[tauri::command]
+fn get_trading_today_cache(
+    date: String,
+    state: State<'_, NativeState>,
+) -> Result<Option<trading_today::TradingTodaySnapshot>, AppError> {
+    trading_today::get_cache(&state.db_path, &date)
+}
+
+#[tauri::command]
+async fn refresh_trading_today(
+    date: String,
+    state: State<'_, NativeState>,
+) -> Result<trading_today::TradingTodaySnapshot, AppError> {
+    trading_today::refresh(&state.db_path, &date).await
+}
+
+#[tauri::command]
+fn open_trading_today_source(source: String) -> Result<(), AppError> {
+    let url = trading_today::source_url(&source)?;
+    open::that(url)
+        .map_err(|error| AppError::Api(format!("Could not open Trading Today source: {error}")))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3546,6 +3570,9 @@ pub fn run() {
             cancel_order,
             load_workspace,
             save_workspace,
+            get_trading_today_cache,
+            refresh_trading_today,
+            open_trading_today_source,
             sync_app_preferences,
             start_preference_realtime,
             stop_preference_realtime,

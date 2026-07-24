@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, WorkspaceState } from "../types";
+import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "../types";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
 import { demoAccounts, demoBalance, demoBodBalance, demoOptionChain, demoOptionExpirations, demoOrders, demoPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
+import { CME_HOURS_URL, demoTradingTodaySnapshot, NYSE_HOURS_URL, TRADING_ECONOMICS_CALENDAR_URL } from "./tradingToday";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -146,6 +147,31 @@ export const api = {
   async saveWorkspace(workspace: WorkspaceState): Promise<void> {
     if (isTauri) await native("save_workspace", { workspace, cloudProfile: cloudPreferenceProfile(workspace) });
     else localStorage.setItem("northstar-workspace", JSON.stringify(workspace));
+  },
+  async getTradingTodayCache(date: string): Promise<TradingTodaySnapshot | null> {
+    if (isTauri) return native("get_trading_today_cache", { date });
+    const raw = localStorage.getItem("northstar-trading-today");
+    if (!raw) return null;
+    try {
+      const snapshot = JSON.parse(raw) as TradingTodaySnapshot;
+      return snapshot.date === date ? snapshot : null;
+    } catch {
+      return null;
+    }
+  },
+  async refreshTradingToday(date: string): Promise<TradingTodaySnapshot> {
+    if (isTauri) return native("refresh_trading_today", { date });
+    const snapshot = demoTradingTodaySnapshot(date);
+    localStorage.setItem("northstar-trading-today", JSON.stringify(snapshot));
+    return snapshot;
+  },
+  async openTradingTodaySource(source: "calendar" | "nyse" | "cme"): Promise<void> {
+    if (isTauri) {
+      await native("open_trading_today_source", { source });
+      return;
+    }
+    const url = source === "nyse" ? NYSE_HOURS_URL : source === "cme" ? CME_HOURS_URL : TRADING_ECONOMICS_CALENDAR_URL;
+    window.open(url, "_blank", "noopener,noreferrer");
   },
   async syncPreferences(cloudProfile: CloudPreferenceProfile): Promise<PreferenceSyncResult> {
     if (!isTauri) return { state: "synced", records: [], replacedCategories: [], conflictedCategories: [], lastSyncedAt: new Date().toISOString(), message: "Browser preferences are local only" };

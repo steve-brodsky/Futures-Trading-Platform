@@ -23,6 +23,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+scraper = "0.24"
 thiserror = "2"
 open = "5"
 futures-util = "0.3"

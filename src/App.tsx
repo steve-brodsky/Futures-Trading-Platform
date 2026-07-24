@@ -4,7 +4,7 @@ import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Activity, BarChart3, Bell, BellRing, BookOpen, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
+  Activity, BarChart3, Bell, BellRing, BookOpen, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
   GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
   Magnet, MousePointer2, Palette, PanelsTopLeft, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingDown, TrendingUp,
@@ -14,6 +14,7 @@ import { TradingChart, type TradingChartCapture, type TradingChartHandle } from 
 import { ChartPaneGrid } from "./components/ChartPaneGrid";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
+import { TradingTodayModal, type TradingTodaySource } from "./components/TradingTodayModal";
 import { api } from "./lib/bridge";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
@@ -42,7 +43,8 @@ import { activeDrawingAlerts, applyDrawingPatch, trackDrawingAlertTransitions, t
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, WorkspaceState } from "./types";
+import { newYorkDateKey } from "./lib/tradingToday";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -332,6 +334,14 @@ function TradingApp() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chartSettingsOpen, setChartSettingsOpen] = useState(false);
   const [entryRulesOpen, setEntryRulesOpen] = useState(false);
+  const [tradingTodayOpen, setTradingTodayOpen] = useState(currentWindowId === MAIN_WINDOW_ID);
+  const [tradingTodayDate, setTradingTodayDate] = useState(() => newYorkDateKey());
+  const [tradingTodaySnapshot, setTradingTodaySnapshot] = useState<TradingTodaySnapshot | null>(null);
+  const tradingTodaySnapshotRef = useRef<TradingTodaySnapshot | null>(null);
+  const [tradingTodayLoading, setTradingTodayLoading] = useState(currentWindowId === MAIN_WINDOW_ID);
+  const [tradingTodayRefreshing, setTradingTodayRefreshing] = useState(false);
+  const [tradingTodayError, setTradingTodayError] = useState<string>();
+  const [tradingTodayWarning, setTradingTodayWarning] = useState<string>();
   const [review, setReview] = useState<ReviewState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [envConfirm, setEnvConfirm] = useState<TradingEnvironment | null>(null);
@@ -419,6 +429,62 @@ function TradingApp() {
   const activeTradeMeta = activeContinuous
     ? activeTradeSymbol ? tradeDetails[activeTradeSymbol] : undefined
     : activeTab.symbol;
+
+  useEffect(() => {
+    if (currentWindowId !== MAIN_WINDOW_ID) return;
+    const updateDate = () => setTradingTodayDate(newYorkDateKey());
+    const timer = window.setInterval(updateDate, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!tradingTodayOpen || currentWindowId !== MAIN_WINDOW_ID) return;
+    let cancelled = false;
+    let available = tradingTodaySnapshotRef.current?.date === tradingTodayDate ? tradingTodaySnapshotRef.current : null;
+    if (!available) {
+      tradingTodaySnapshotRef.current = null;
+      setTradingTodaySnapshot(null);
+      setTradingTodayLoading(true);
+    }
+    setTradingTodayError(undefined);
+    setTradingTodayWarning(undefined);
+
+    void (async () => {
+      try {
+        const cached = await api.getTradingTodayCache(tradingTodayDate);
+        if (cancelled) return;
+        if (cached) {
+          available = cached;
+          tradingTodaySnapshotRef.current = cached;
+          setTradingTodaySnapshot(cached);
+          setTradingTodayLoading(false);
+        }
+      } catch {
+        // Cache failure must not prevent a live refresh.
+      }
+      if (cancelled) return;
+      setTradingTodayRefreshing(true);
+      try {
+        const refreshed = await api.refreshTradingToday(tradingTodayDate);
+        if (cancelled) return;
+        available = refreshed;
+        tradingTodaySnapshotRef.current = refreshed;
+        setTradingTodaySnapshot(refreshed);
+      } catch (error) {
+        if (cancelled) return;
+        const message = `Could not refresh Trading Economics: ${String(error)}`;
+        if (available) setTradingTodayWarning(`${message}. Showing the latest same-day data.`);
+        else setTradingTodayError(message);
+      } finally {
+        if (!cancelled) {
+          setTradingTodayLoading(false);
+          setTradingTodayRefreshing(false);
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [tradingTodayOpen, tradingTodayDate]);
 
   useEffect(() => {
     if (!chartStyleOpen) return;
@@ -1979,6 +2045,31 @@ function TradingApp() {
     window.setTimeout(() => setToast(null), 3200);
   }
 
+  async function refreshTradingToday() {
+    setTradingTodayRefreshing(true);
+    setTradingTodayError(undefined);
+    setTradingTodayWarning(undefined);
+    try {
+      const refreshed = await api.refreshTradingToday(tradingTodayDate);
+      tradingTodaySnapshotRef.current = refreshed;
+      setTradingTodaySnapshot(refreshed);
+    } catch (error) {
+      const message = `Could not refresh Trading Economics: ${String(error)}`;
+      if (tradingTodaySnapshotRef.current?.date === tradingTodayDate) {
+        setTradingTodayWarning(`${message}. Showing the latest same-day data.`);
+      } else {
+        setTradingTodayError(message);
+      }
+    } finally {
+      setTradingTodayLoading(false);
+      setTradingTodayRefreshing(false);
+    }
+  }
+
+  function openTradingTodaySource(source: TradingTodaySource) {
+    void api.openTradingTodaySource(source).catch((error) => showToast(`Could not open source: ${String(error)}`));
+  }
+
   function screenshotNotification(title: string, text: string, level: ActivityNotification["level"] = "warning", symbol?: string) {
     setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), symbol, title, text, level }, ...current].slice(0, 250));
   }
@@ -3061,7 +3152,7 @@ function TradingApp() {
       ><Palette size={17} /></IconButton>
       <div className="divider" />
       <span className="toolbar-spacer" />
-      {!isDetached && <><IconButton label="Trade journal" onClick={openTradeJournal}><BookOpen size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
+      {!isDetached && <><IconButton label="Trading today" active={tradingTodayOpen} onClick={() => setTradingTodayOpen(true)}><CalendarDays size={17} /></IconButton><IconButton label="Trade journal" onClick={openTradeJournal}><BookOpen size={17} /></IconButton><IconButton label="Entry rules" active={entryRulesOpen || hasConfiguredEntryRules(workspace.entryRules)} onClick={() => setEntryRulesOpen(true)}><ListChecks size={17} /></IconButton><IconButton label="Settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></IconButton></>}
       <IconButton label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} active={isFullscreen} onClick={toggleFullscreen}>{isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}</IconButton>
     </nav>
 
@@ -3105,6 +3196,18 @@ function TradingApp() {
 
       {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
     </section>
+
+    {tradingTodayOpen && !isDetached && <TradingTodayModal
+      date={tradingTodayDate}
+      snapshot={tradingTodaySnapshot}
+      loading={tradingTodayLoading}
+      refreshing={tradingTodayRefreshing}
+      error={tradingTodayError}
+      warning={tradingTodayWarning}
+      onRefresh={() => { void refreshTradingToday(); }}
+      onOpenSource={openTradingTodaySource}
+      onClose={() => setTradingTodayOpen(false)}
+    />}
 
     {searchOpen && <Modal title="Select symbol" onClose={() => { setSearchOpen(false); setSearch(""); }} width={620}>
       <div className="search-box"><Search size={17} /><input autoFocus placeholder="Search equity, ETF, or futures contract" value={search} onChange={(e) => setSearch(e.target.value)} /></div>

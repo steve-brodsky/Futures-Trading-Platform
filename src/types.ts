@@ -39,6 +39,48 @@ export interface Quote {
   receivedAt?: number;
 }
 
+export type TradingTodaySnapshotStatus = "live" | "cache" | "demo";
+export type EconomicEventImportance = 1 | 2 | 3 | null;
+export type MarketHolidayVenue = "NYSE" | "CME";
+export type MarketHolidayStatus = "closed" | "early-close" | "modified-hours";
+
+export interface EconomicEvent {
+  id: string;
+  occursAt: string;
+  title: string;
+  reference?: string;
+  importance: EconomicEventImportance;
+  actual?: string;
+  consensus?: string;
+  previous?: string;
+  forecast?: string;
+  url?: string;
+}
+
+export interface MarketHolidayVenueStatus {
+  venue: MarketHolidayVenue;
+  status: MarketHolidayStatus;
+  detail: string;
+  sourceUrl: string;
+}
+
+export interface MarketHoliday {
+  date: string;
+  name: string;
+  venues: MarketHolidayVenueStatus[];
+}
+
+export interface TradingTodaySnapshot {
+  date: string;
+  timezone: "America/New_York";
+  fetchedAt: string;
+  status: TradingTodaySnapshotStatus;
+  events: EconomicEvent[];
+  holidays: MarketHoliday[];
+  sourceUrl: string;
+  holidayVerifiedThrough: string;
+}
+
 export interface OptionExpiration {
   expirationDate: string;
   daysToExpiration: number;
