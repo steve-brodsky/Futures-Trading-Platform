@@ -1,4 +1,4 @@
-import type { ChartTimezone } from "../types";
+import type { ChartTimezone, EntryRuleTimezone } from "../types";
 
 const exchangeZones: Record<string, string> = {
   CME: "America/Chicago",
@@ -36,9 +36,7 @@ export function formatChartTime(epochSeconds: number, timezone: string, detailed
   } : { timeZone: timezone, hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
 }
 
-export const timezoneOptions: Array<{ value: ChartTimezone; label: string }> = [
-  { value: "exchange", label: "Exchange time" },
-  { value: "local", label: "Computer local" },
+export const entryRuleTimezoneOptions: Array<{ value: EntryRuleTimezone; label: string }> = [
   { value: "UTC", label: "UTC" },
   { value: "America/New_York", label: "New York" },
   { value: "America/Chicago", label: "Chicago" },
@@ -46,4 +44,10 @@ export const timezoneOptions: Array<{ value: ChartTimezone; label: string }> = [
   { value: "America/Los_Angeles", label: "Los Angeles" },
   { value: "Europe/London", label: "London" },
   { value: "Asia/Tokyo", label: "Tokyo" },
+];
+
+export const timezoneOptions: Array<{ value: ChartTimezone; label: string }> = [
+  { value: "exchange", label: "Exchange time" },
+  { value: "local", label: "Computer local" },
+  ...entryRuleTimezoneOptions,
 ];

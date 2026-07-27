@@ -418,6 +418,10 @@ function sameEntryRuleNode(left: EntryRuleNode, right: EntryRuleNode): boolean {
   if (left.kind === "emaCross" && right.kind === "emaCross") {
     return left.direction === right.direction && left.period === right.period && left.lookback === right.lookback;
   }
+  if (left.kind === "timeWindow" && right.kind === "timeWindow") {
+    return left.startTime === right.startTime && left.endTime === right.endTime
+      && left.timezone === right.timezone && sameArray(left.weekdays, right.weekdays, (a, b) => a === b);
+  }
   if (left.kind !== "condition" || right.kind !== "condition" || left.operator !== right.operator) return false;
   const sameOperand = (a: typeof left.left, b: typeof right.left) => a.kind === b.kind
     && (a.kind === "marketPrice" || (b.kind === "movingAverage" && a.average === b.average && a.period === b.period));

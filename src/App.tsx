@@ -381,6 +381,7 @@ function TradingApp() {
   const closingPositionTimersRef = useRef(new Map<string, number>());
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
   const [currentTime, setCurrentTime] = useState(() => Date.now());
+  const entryRuleMinute = Math.floor(currentTime / 60_000) * 60_000;
   const subscriptionsRef = useRef(new Map<string, BarSubscription>());
   const latestDetachedGenerationRef = useRef(new Map<string, number>());
   const awaitingDetachedGenerationRef = useRef(new Set<string>());
@@ -514,8 +515,8 @@ function TradingApp() {
     ? { provider: activeTab.symbol.provider, symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
     : quoteFor(activeTab.symbol.symbol, 0, activeTab.symbol.provider));
   const activeEntryEligibility = useMemo(
-    () => evaluateEntryRules(workspace.entryRules, bars, activeQuote),
-    [workspace.entryRules, bars, activeQuote],
+    () => evaluateEntryRules(workspace.entryRules, bars, activeQuote, entryRuleMinute),
+    [workspace.entryRules, bars, activeQuote, entryRuleMinute],
   );
   const tabStreamKey = workspace.tabs.map((tab) => `${tab.id}:${tab.symbol.provider}:${tab.symbol.symbol}:${tab.timeframe}`).join("|");
   const alertOwnershipKey = workspace.tabs.flatMap((tab) => ALERT_TIMEFRAMES.filter((timeframe) => tab.ema200Alert[timeframe].enabled).map((timeframe) => `${tab.id}:${tab.symbol.symbol}:${timeframe}`)).join("|");
@@ -1428,6 +1429,7 @@ function TradingApp() {
       workspace.entryRules,
       workspace.entryRuleAlerts,
       inputs,
+      entryRuleMinute,
     );
     entryRuleAlertTrackerRef.current = tracked.state;
     if (!tracked.transitions.length) return;
@@ -1468,7 +1470,7 @@ function TradingApp() {
     showToast(tracked.transitions.map((transition) => (
       `${transition.symbol} ${transition.timeframe} ${transition.side === "long" ? "Long" : "Short"} entry allowed: ${transition.reason}`
     )).join(" · "));
-  }, [workspaceLoaded, entryRulePositionScope, entryRulePositionsReady, tabStreamKey, workspace.entryRules, workspace.entryRuleAlerts, tabMarkets, quotes, positions]);
+  }, [workspaceLoaded, entryRulePositionScope, entryRulePositionsReady, tabStreamKey, workspace.entryRules, workspace.entryRuleAlerts, tabMarkets, quotes, positions, entryRuleMinute]);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
@@ -3268,7 +3270,7 @@ function TradingApp() {
 
     {envConfirm && <Modal title={`Switch to ${envConfirm.toUpperCase()}?`} onClose={() => setEnvConfirm(null)}><div className={`environment-confirm ${envConfirm}`}><Zap size={22} /><div><strong>{envConfirm === "live" ? "Real orders and real money" : "Simulated execution"}</strong><p>{envConfirm === "live" ? "Changing to LIVE clears SIM account data." : "SIM uses a separate account environment and simulated fills."}</p></div></div><div className="modal-actions"><button className="secondary-button" onClick={() => setEnvConfirm(null)}>Cancel</button><button className={envConfirm === "live" ? "danger-button" : "primary-button"} disabled={busy} onClick={confirmEnvironment}>Switch to {envConfirm.toUpperCase()}</button></div></Modal>}
 
-    {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder rules={workspace.entryRules} alerts={workspace.entryRuleAlerts} bars={bars} quote={activeQuote} onClose={() => setEntryRulesOpen(false)} onSave={(entryRules, entryRuleAlerts) => { updateWorkspace({ entryRules, entryRuleAlerts }); setEntryRulesOpen(false); showToast("Entry rules and alerts saved."); }} /></Modal>}
+    {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder rules={workspace.entryRules} alerts={workspace.entryRuleAlerts} bars={bars} quote={activeQuote} evaluatedAt={entryRuleMinute} onClose={() => setEntryRulesOpen(false)} onSave={(entryRules, entryRuleAlerts) => { updateWorkspace({ entryRules, entryRuleAlerts }); setEntryRulesOpen(false); showToast("Entry rules and alerts saved."); }} /></Modal>}
 
     {drawingAlertsOpen && <Modal title="Active drawing alerts" onClose={() => setDrawingAlertsOpen(false)} width={920}>
       <DrawingAlertsManager

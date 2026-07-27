@@ -71,6 +71,7 @@ export function trackEntryRuleAlertTransitions(
   rules: EntryRules,
   alerts: EntryRuleAlertConfig,
   inputs: EntryRuleAlertMarketInput[],
+  evaluatedAt: number | Date = Date.now(),
 ): { state: EntryRuleAlertTrackerState; transitions: EntryRuleAlertTransition[] } {
   const markets = new Map<string, EntryRuleAlertMarketInput & { tabIds: string[] }>();
   inputs.forEach((input) => {
@@ -88,7 +89,7 @@ export function trackEntryRuleAlertTransitions(
   const transitions: EntryRuleAlertTransition[] = [];
   const canTrigger = previous?.epoch === epoch;
   markets.forEach((market, marketKey) => {
-    const evaluation = evaluateEntryRules(rules, market.bars, market.quote);
+    const evaluation = evaluateEntryRules(rules, market.bars, market.quote, evaluatedAt);
     (["long", "short"] as const).forEach((side) => {
       if (!alerts[side].enabled || rules[side].children.length === 0) return;
       const key = `${marketKey}\u0000${side}`;

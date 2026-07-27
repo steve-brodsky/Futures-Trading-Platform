@@ -1,8 +1,10 @@
 import type {
   Bar, EntryRuleCondition, EntryRuleEmaCrossCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand,
-  EntryRuleResult, EntryRules, EntryRuleSide, Quote,
+  EntryRuleResult, EntryRules, EntryRuleSide, EntryRuleTimeWindowCondition, EntryRuleTimezone,
+  EntryRuleWeekday, Quote,
 } from "../types";
 import { ema, sma } from "./indicators";
+import { entryRuleTimezoneOptions } from "./timezone";
 
 export const MAX_ENTRY_RULE_DEPTH = 4;
 export const MAX_ENTRY_RULE_NODES = 100;
@@ -12,6 +14,12 @@ export const MIN_EMA_CROSS_PERIOD = 2;
 export const MAX_EMA_CROSS_PERIOD = 1000;
 export const MIN_EMA_CROSS_LOOKBACK = 1;
 export const MAX_EMA_CROSS_LOOKBACK = 1000;
+export const ALL_ENTRY_RULE_WEEKDAYS: EntryRuleWeekday[] = [0, 1, 2, 3, 4, 5, 6];
+export const ENTRY_RULE_WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+
+const entryRuleTimezones = new Set<EntryRuleTimezone>(entryRuleTimezoneOptions.map((option) => option.value));
+const timePattern = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const timeFormatters = new Map<EntryRuleTimezone, Intl.DateTimeFormat>();
 
 export function emptyEntryRuleGroup(side: EntryRuleSide): EntryRuleGroup {
   return { id: `${side}-root`, kind: "group", combinator: "and", children: [] };
@@ -77,6 +85,25 @@ function normalizeSide(value: unknown, side: EntryRuleSide): EntryRuleGroup {
       };
     }
 
+    if (node.kind === "timeWindow") {
+      const weekdays = Array.isArray(node.weekdays) ? node.weekdays : [];
+      if (!validEntryRuleTime(node.startTime) || !validEntryRuleTime(node.endTime)
+        || node.startTime === node.endTime || !entryRuleTimezones.has(node.timezone as EntryRuleTimezone)
+        || weekdays.length === 0 || new Set(weekdays).size !== weekdays.length
+        || weekdays.some((weekday) => !Number.isInteger(weekday) || Number(weekday) < 0 || Number(weekday) > 6)) {
+        invalid = true;
+        return null;
+      }
+      return {
+        id: node.id,
+        kind: "timeWindow",
+        startTime: node.startTime,
+        endTime: node.endTime,
+        weekdays: [...weekdays].sort((left, right) => Number(left) - Number(right)) as EntryRuleWeekday[],
+        timezone: node.timezone as EntryRuleTimezone,
+      };
+    }
+
     if (node.kind !== "group" || !["and", "or"].includes(String(node.combinator))
       || !Array.isArray(node.children) || groupDepth > MAX_ENTRY_RULE_DEPTH || (!root && node.children.length === 0)) {
       invalid = true;
@@ -111,7 +138,58 @@ function operandLabel(operand: EntryRuleOperand, side: EntryRuleSide): string {
 interface OperandValue { value: number | null; reason?: string }
 interface NodeEvaluation { status: EntryRuleResult["status"]; reason: string }
 
-function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], quote: Quote): EntryRuleResult {
+export function validEntryRuleTime(value: unknown): value is string {
+  return typeof value === "string" && timePattern.test(value);
+}
+
+export function validEntryRuleTimezone(value: unknown): value is EntryRuleTimezone {
+  return entryRuleTimezones.has(value as EntryRuleTimezone);
+}
+
+function timeMinutes(value: string): number {
+  const [hours, minutes] = value.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function zonedEntryRuleTime(timestamp: number, timezone: EntryRuleTimezone): {
+  weekday: EntryRuleWeekday;
+  minuteOfDay: number;
+  display: string;
+} {
+  let formatter = timeFormatters.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZoneName: "short",
+    });
+    timeFormatters.set(timezone, formatter);
+  }
+  const parts = Object.fromEntries(formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]));
+  const weekday = ENTRY_RULE_WEEKDAY_LABELS.indexOf(parts.weekday as typeof ENTRY_RULE_WEEKDAY_LABELS[number]);
+  const hour = Number(parts.hour) % 24;
+  const minute = Number(parts.minute);
+  return {
+    weekday: weekday as EntryRuleWeekday,
+    minuteOfDay: hour * 60 + minute,
+    display: `${parts.weekday} ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ${parts.timeZoneName}`,
+  };
+}
+
+function weekdaySummary(weekdays: EntryRuleWeekday[]): string {
+  if (weekdays.length === 7) return "every day";
+  if (weekdays.length === 5 && [1, 2, 3, 4, 5].every((day) => weekdays.includes(day as EntryRuleWeekday))) return "Mon–Fri";
+  return weekdays.map((day) => ENTRY_RULE_WEEKDAY_LABELS[day]).join(", ");
+}
+
+export function formatEntryRuleCurrentTime(timestamp: number | Date, timezone: EntryRuleTimezone): string {
+  return zonedEntryRuleTime(timestamp instanceof Date ? timestamp.getTime() : timestamp, timezone).display;
+}
+
+function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], quote: Quote, timestamp: number): EntryRuleResult {
   const nodeResults: Record<string, boolean | null> = {};
   const closes = bars.map((bar) => bar.close);
   // TradeStation's IsRealtime flag describes bars delivered by the live stream;
@@ -191,13 +269,45 @@ function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], qu
     };
   }
 
+  function timeWindow(node: EntryRuleTimeWindowCondition): NodeEvaluation {
+    if (!validEntryRuleTime(node.startTime) || !validEntryRuleTime(node.endTime)
+      || node.startTime === node.endTime || !validEntryRuleTimezone(node.timezone) || node.weekdays.length === 0) {
+      nodeResults[node.id] = null;
+      return { status: "waiting", reason: "Complete the time window, weekdays, and timezone." };
+    }
+    const now = zonedEntryRuleTime(timestamp, node.timezone);
+    const start = timeMinutes(node.startTime);
+    const end = timeMinutes(node.endTime);
+    let sessionWeekday: EntryRuleWeekday | null = null;
+    let withinClockWindow = false;
+
+    if (start < end) {
+      withinClockWindow = now.minuteOfDay >= start && now.minuteOfDay < end;
+      sessionWeekday = now.weekday;
+    } else if (now.minuteOfDay >= start) {
+      withinClockWindow = true;
+      sessionWeekday = now.weekday;
+    } else if (now.minuteOfDay < end) {
+      withinClockWindow = true;
+      sessionWeekday = ((now.weekday + 6) % 7) as EntryRuleWeekday;
+    }
+
+    const passed = withinClockWindow && sessionWeekday != null && node.weekdays.includes(sessionWeekday);
+    nodeResults[node.id] = passed;
+    const window = `${weekdaySummary(node.weekdays)} ${node.startTime}–${node.endTime} ${node.timezone}`;
+    return passed
+      ? { status: "allowed", reason: `${window} passes (${now.display}).` }
+      : { status: "blocked", reason: `${window} blocks entries (${now.display}).` };
+  }
+
   function group(node: EntryRuleGroup, rootGroup = false): NodeEvaluation {
     if (rootGroup && node.children.length === 0) {
       nodeResults[node.id] = true;
       return { status: "allowed", reason: `No ${side === "long" ? "Long" : "Short"} entry rules configured.` };
     }
     const results = node.children.map((child) => child.kind === "group" ? group(child)
-      : child.kind === "emaCross" ? emaCross(child) : condition(child));
+      : child.kind === "emaCross" ? emaCross(child)
+        : child.kind === "timeWindow" ? timeWindow(child) : condition(child));
     let status: EntryRuleResult["status"];
     if (node.combinator === "and") {
       status = results.some((result) => result.status === "blocked") ? "blocked"
@@ -217,9 +327,15 @@ function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], qu
   return { allowed: result.status === "allowed", status: result.status, reason: result.reason, nodeResults };
 }
 
-export function evaluateEntryRules(rules: EntryRules, bars: Bar[], quote: Quote): Record<EntryRuleSide, EntryRuleResult> {
+export function evaluateEntryRules(
+  rules: EntryRules,
+  bars: Bar[],
+  quote: Quote,
+  evaluatedAt: number | Date = Date.now(),
+): Record<EntryRuleSide, EntryRuleResult> {
+  const timestamp = evaluatedAt instanceof Date ? evaluatedAt.getTime() : evaluatedAt;
   return {
-    long: evaluateSide(rules.long, "long", bars, quote),
-    short: evaluateSide(rules.short, "short", bars, quote),
+    long: evaluateSide(rules.long, "long", bars, quote, timestamp),
+    short: evaluateSide(rules.short, "short", bars, quote, timestamp),
   };
 }

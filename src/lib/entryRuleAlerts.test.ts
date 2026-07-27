@@ -122,4 +122,31 @@ describe("entry rule alerts", () => {
     expect(triggered.transitions).toHaveLength(1);
     expect(triggered.transitions[0].tabIds).toEqual(["chart-1", "chart-2"]);
   });
+
+  it("fires when the clock enters a configured time window", () => {
+    const timeRules: EntryRules = {
+      long: {
+        id: "long-root", kind: "group", combinator: "and", children: [{
+          id: "time", kind: "timeWindow", startTime: "09:30", endTime: "16:00",
+          weekdays: [0, 1, 2, 3, 4, 5, 6], timezone: "UTC",
+        }],
+      },
+      short: { id: "short-root", kind: "group", combinator: "and", children: [] },
+    };
+    const config = enabled();
+    const epoch = entryRuleAlertEpoch("sim", timeRules, config);
+    const primed = trackEntryRuleAlertTransitions(
+      undefined, epoch, timeRules, config, [input(101)], Date.parse("2026-07-27T09:29:00Z"),
+    );
+    expect(primed.state.statuses["MES\u00001m\u0000long"]).toBe("blocked");
+
+    const triggered = trackEntryRuleAlertTransitions(
+      primed.state, epoch, timeRules, config, [input(101)], Date.parse("2026-07-27T09:30:00Z"),
+    );
+    expect(triggered.transitions).toHaveLength(1);
+    expect(triggered.transitions[0].reason).toContain("09:30–16:00 UTC passes");
+    expect(trackEntryRuleAlertTransitions(
+      triggered.state, epoch, timeRules, config, [input(101)], Date.parse("2026-07-27T09:31:00Z"),
+    ).transitions).toEqual([]);
+  });
 });

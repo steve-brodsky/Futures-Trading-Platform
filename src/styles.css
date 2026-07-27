@@ -733,6 +733,17 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .entry-rule-ema-cross-editor { min-width: 0; display: flex; align-items: center; gap: 6px; color: #8f9baa; font: 500 9px DM Mono, monospace; white-space: nowrap; }
 .entry-rule-ema-cross-editor select { width: 132px; }
 .entry-rule-ema-cross-editor input { width: 62px; }
+.entry-rule-condition.entry-rule-time-window { grid-template-columns: 20px minmax(0,1fr) 26px; }
+.entry-rule-time-editor { min-width: 0; display: grid; gap: 5px; padding: 2px 0; }
+.entry-rule-time-primary { min-width: 0; display: flex; align-items: center; gap: 6px; color: #8f9baa; font: 500 9px DM Mono, monospace; white-space: nowrap; }
+.entry-rule-time-primary input { width: 90px; color-scheme: dark; }
+.entry-rule-time-primary select { min-width: 190px; flex: 1; }
+.entry-rule-weekdays { display: flex; align-items: center; gap: 4px; min-width: 0; color: #697789; font: 600 7px DM Mono, monospace; text-transform: uppercase; letter-spacing: .05em; }
+.entry-rule-weekdays > span { margin-right: 2px; }
+.entry-rule-weekdays button { width: 22px; height: 20px; display: grid; place-items: center; padding: 0; border: 1px solid #293442; border-radius: 3px; color: #647184; background: #111820; font: 650 7px DM Mono, monospace; cursor: pointer; transition: color .14s, border-color .14s, background .14s; }
+.entry-rule-weekdays button:hover { color: #bac5d1; border-color: #445367; }
+.entry-rule-weekdays button[aria-pressed="true"] { color: var(--cyan); border-color: rgba(55,213,232,.34); background: rgba(55,213,232,.08); }
+.entry-rule-weekdays small { min-width: 0; margin-left: auto; overflow: hidden; color: #748194; font-size: 7px; font-weight: 500; text-overflow: ellipsis; text-transform: none; letter-spacing: 0; white-space: nowrap; }
 .entry-rule-icon { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #738093; background: transparent; cursor: pointer; }
 .entry-rule-icon:hover { color: #e9edf3; background: #222b37; }
 .entry-rule-icon.danger:hover { color: var(--red); background: rgba(239,70,111,.1); }
@@ -784,6 +795,12 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
   .entry-rule-ema-cross .entry-rule-condition-state { grid-row: auto; }
   .entry-rule-ema-cross-editor { flex-wrap: wrap; white-space: normal; }
   .entry-rule-ema-cross-editor select { width: 132px; }
+  .entry-rule-time-window .entry-rule-condition-state { grid-row: auto; }
+  .entry-rule-time-primary { flex-wrap: wrap; white-space: normal; }
+  .entry-rule-time-primary select { min-width: 180px; }
+  .entry-rule-weekdays { flex-wrap: wrap; }
+  .entry-rule-weekdays small { width: 100%; margin: 2px 0 0; }
+  .entry-rule-add-row { flex-wrap: wrap; }
   .entry-rule-side > header { grid-template-columns: minmax(0,1fr) auto; }
   .entry-rule-side > header .entry-rule-clear { grid-column: 2; }
 }

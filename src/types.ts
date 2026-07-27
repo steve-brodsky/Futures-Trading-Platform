@@ -290,6 +290,18 @@ export interface EntryRuleEmaCrossCondition {
   lookback: number;
 }
 
+export type EntryRuleWeekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+export type EntryRuleTimezone = Exclude<ChartTimezone, "exchange" | "local">;
+
+export interface EntryRuleTimeWindowCondition {
+  id: string;
+  kind: "timeWindow";
+  startTime: string;
+  endTime: string;
+  weekdays: EntryRuleWeekday[];
+  timezone: EntryRuleTimezone | "";
+}
+
 export interface EntryRuleGroup {
   id: string;
   kind: "group";
@@ -297,7 +309,7 @@ export interface EntryRuleGroup {
   children: EntryRuleNode[];
 }
 
-export type EntryRuleNode = EntryRuleCondition | EntryRuleEmaCrossCondition | EntryRuleGroup;
+export type EntryRuleNode = EntryRuleCondition | EntryRuleEmaCrossCondition | EntryRuleTimeWindowCondition | EntryRuleGroup;
 
 export interface EntryRules {
   long: EntryRuleGroup;

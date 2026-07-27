@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Bar, EntryRules, Quote } from "../types";
+import type { Bar, EntryRules, EntryRuleTimezone, EntryRuleWeekday, Quote } from "../types";
 import {
   defaultEntryRules, evaluateEntryRules, MAX_ENTRY_RULE_DEPTH, normalizeEntryRules,
 } from "./entryRules";
@@ -43,6 +43,22 @@ function emaCrossRules(direction: "above" | "below" | "either", lookback: number
     long: {
       id: "long-root", kind: "group", combinator: "and", children: [
         { id: "ema-cross", kind: "emaCross", direction, period, lookback },
+      ],
+    },
+    short: { id: "short-root", kind: "group", combinator: "and", children: [] },
+  };
+}
+
+function timeWindowRules(
+  startTime = "09:30",
+  endTime = "16:00",
+  weekdays: EntryRuleWeekday[] = [0, 1, 2, 3, 4, 5, 6],
+  timezone: EntryRuleTimezone | "" = "UTC",
+): EntryRules {
+  return {
+    long: {
+      id: "long-root", kind: "group", combinator: "and", children: [
+        { id: "time-window", kind: "timeWindow", startTime, endTime, weekdays, timezone },
       ],
     },
     short: { id: "short-root", kind: "group", combinator: "and", children: [] },
@@ -157,6 +173,72 @@ describe("entry rules", () => {
       { ...valid.long.children[0], direction: "sideways" },
       { ...valid.long.children[0], period: 1 },
       { ...valid.long.children[0], lookback: 1001 },
+    ]) {
+      expect(normalizeEntryRules({ ...valid, long: { ...valid.long, children: [invalid] } }).long.children).toEqual([]);
+    }
+  });
+
+  it("uses inclusive starts and exclusive ends for same-day time windows", () => {
+    const rules = timeWindowRules();
+    expect(evaluateEntryRules(rules, [], quote, Date.parse("2026-07-27T09:29:00Z")).long.status).toBe("blocked");
+    expect(evaluateEntryRules(rules, [], quote, Date.parse("2026-07-27T09:30:00Z")).long.status).toBe("allowed");
+    expect(evaluateEntryRules(rules, [], quote, Date.parse("2026-07-27T15:59:59Z")).long.status).toBe("allowed");
+    expect(evaluateEntryRules(rules, [], quote, Date.parse("2026-07-27T16:00:00Z")).long.status).toBe("blocked");
+  });
+
+  it("filters by session start weekday", () => {
+    const mondayOnly = timeWindowRules("09:30", "16:00", [1]);
+    expect(evaluateEntryRules(mondayOnly, [], quote, Date.parse("2026-07-27T10:00:00Z")).long.allowed).toBe(true);
+    expect(evaluateEntryRules(mondayOnly, [], quote, Date.parse("2026-07-28T10:00:00Z")).long.allowed).toBe(false);
+  });
+
+  it("carries an overnight window into the next day using the start weekday", () => {
+    const sundaySession = timeWindowRules("18:00", "05:00", [0]);
+    expect(evaluateEntryRules(sundaySession, [], quote, Date.parse("2026-07-26T18:00:00Z")).long.allowed).toBe(true);
+    expect(evaluateEntryRules(sundaySession, [], quote, Date.parse("2026-07-27T04:59:59Z")).long.allowed).toBe(true);
+    expect(evaluateEntryRules(sundaySession, [], quote, Date.parse("2026-07-27T05:00:00Z")).long.allowed).toBe(false);
+    expect(evaluateEntryRules(sundaySession, [], quote, Date.parse("2026-07-27T18:00:00Z")).long.allowed).toBe(false);
+  });
+
+  it("evaluates named zones across daylight-saving transitions", () => {
+    const spring = timeWindowRules("01:30", "03:30", [0], "America/New_York");
+    expect(evaluateEntryRules(spring, [], quote, Date.parse("2026-03-08T06:45:00Z")).long.allowed).toBe(true);
+    expect(evaluateEntryRules(spring, [], quote, Date.parse("2026-03-08T07:15:00Z")).long.allowed).toBe(true);
+    expect(evaluateEntryRules(spring, [], quote, Date.parse("2026-03-08T07:30:00Z")).long.allowed).toBe(false);
+
+    const fall = timeWindowRules("01:00", "02:00", [0], "America/New_York");
+    expect(evaluateEntryRules(fall, [], quote, Date.parse("2026-11-01T05:30:00Z")).long.allowed).toBe(true);
+    expect(evaluateEntryRules(fall, [], quote, Date.parse("2026-11-01T06:30:00Z")).long.allowed).toBe(true);
+    expect(evaluateEntryRules(fall, [], quote, Date.parse("2026-11-01T07:00:00Z")).long.allowed).toBe(false);
+  });
+
+  it("combines time windows with market rules in nested logic", () => {
+    const rules = timeWindowRules();
+    rules.long.combinator = "or";
+    rules.long.children.push({
+      id: "price",
+      kind: "condition",
+      left: { kind: "marketPrice" },
+      operator: "above",
+      right: { kind: "movingAverage", average: "SMA", period: 1 },
+    });
+    const marketBars = barsFromCloses([100]);
+    expect(evaluateEntryRules(rules, marketBars, { ...quote, ask: 99 }, Date.parse("2026-07-27T10:00:00Z")).long.allowed).toBe(true);
+    expect(evaluateEntryRules(rules, marketBars, { ...quote, ask: 99 }, Date.parse("2026-07-27T17:00:00Z")).long.allowed).toBe(false);
+  });
+
+  it("normalizes valid time windows and rejects malformed schedules", () => {
+    const valid = timeWindowRules("18:00", "05:00", [0, 1, 2, 3, 4], "America/Chicago");
+    expect(normalizeEntryRules(valid)).toEqual(valid);
+
+    const base = valid.long.children[0];
+    for (const invalid of [
+      { ...base, startTime: "24:00" },
+      { ...base, endTime: "18:00" },
+      { ...base, weekdays: [] },
+      { ...base, weekdays: [1, 1] },
+      { ...base, timezone: "" },
+      { ...base, timezone: "US/Central" },
     ]) {
       expect(normalizeEntryRules({ ...valid, long: { ...valid.long, children: [invalid] } }).long.children).toEqual([]);
     }
