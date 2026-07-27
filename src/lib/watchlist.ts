@@ -31,7 +31,7 @@ export function normalizeSymbolMeta(value: unknown): SymbolMeta | undefined {
   if (!symbol) return undefined;
   if (!record) return legacyWatchlistInstrument(symbol);
   const assetType = typeof record.assetType === "string" && record.assetType.trim() ? record.assetType.trim().toUpperCase() : "FUTURE";
-  const provider: MarketDataProvider = record.provider === "schwab" || (!record.provider && (assetType === "EQUITY" || assetType === "ETF")) ? "schwab" : "tradestation";
+  const provider: MarketDataProvider = record.provider === "schwab" || (!record.provider && ["EQUITY", "ETF", "INDEX"].includes(assetType)) ? "schwab" : "tradestation";
   return {
     provider,
     symbol,

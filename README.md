@@ -1,6 +1,6 @@
 # Northstar Trader
 
-Northstar Trader is a private multi-provider trading workspace. TradeStation supplies futures charting and order entry, while Schwab supplies equity and ETF history, quotes, and live candles. It combines a React workspace with a Rust/Tauri native layer for OAuth, live market and brokerage data, order execution, secure credential storage, and local persistence.
+Northstar Trader is a private multi-provider trading workspace. TradeStation supplies futures charting and order entry, while Schwab supplies equity, ETF, and index history, quotes, and live candles. It combines a React workspace with a Rust/Tauri native layer for OAuth, live market and brokerage data, order execution, secure credential storage, and local persistence.
 
 > [!CAUTION]
 > This project can submit real orders when it is connected to TradeStation LIVE. It is early-stage, private software—not financial advice or a finished commercial trading system. Develop and validate against SIM before using LIVE.
@@ -13,8 +13,8 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 - Per-tab Renko and Point & Figure construction settings, including close or deterministic high/low input and configurable reversal thresholds.
 - `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, daily, weekly, and monthly timeframes.
 - Shared streaming bars across matching charts, EMA alerts, and VWAP consumers, plus a deduplicated quote stream for charts, contracts, and the watchlist.
-- Provider-aware symbol search and mixed futures/equity watchlists, with TradeStation routing futures and Schwab routing equities and ETFs.
-- One shared Schwab Streamer connection for equity candles and quotes, including extended-hours history and local `1h`/`4h` aggregation on New York calendar boundaries.
+- Provider-aware symbol search and mixed futures/equity/index watchlists, with TradeStation routing futures and Schwab routing equities, ETFs, and indexes.
+- One shared Schwab Streamer connection for equity, ETF, and index candles and quotes, including extended-hours history and local `1h`/`4h` aggregation on New York calendar boundaries.
 - Real-time Schwab gamma-exposure heatmaps for equity and ETF charts, bootstrapped from the current option chain and updated through the shared streamer with selectable expirations and Net or Calls/Puts views.
 - SQLite-backed candle caching, initial history, and lazy backfill when the chart approaches its oldest loaded bar.
 - Quota-aware TradeStation request scheduling with response-header reconciliation, historical-credit pacing, trading reserves, and reset-aware reconnects.
@@ -165,7 +165,7 @@ The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes,
 2. Start the native app and open **Settings → Schwab API**.
 3. Enter the Schwab App Key and App Secret, then choose **Save**.
 4. Choose **Connect** and complete authorization in the dedicated in-app window.
-5. Select an equity or ETF from the combined symbol picker. Open **Indicators** to enable GEX and choose the included expirations. Equity order entry remains disabled; Schwab is currently chart data only.
+5. Select an equity, ETF, or index from the combined symbol picker. Open **Indicators** on equity and ETF charts to enable GEX and choose the included expirations. Schwab instruments are currently chart data only; indexes are not tradable.
 
 Schwab and TradeStation connections are independent. Changing the TradeStation SIM/LIVE environment does not affect Schwab charts or streams.
 

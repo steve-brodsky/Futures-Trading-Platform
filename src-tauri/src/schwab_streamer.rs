@@ -633,14 +633,17 @@ mod tests {
 
     #[test]
     fn desired_symbols_are_uppercase_and_deduplicated() {
-        let symbols = normalize_symbols([" aapl ".into(), "AAPL".into(), "spy".into()]);
-        assert_eq!(symbols.into_iter().collect::<Vec<_>>(), vec!["AAPL", "SPY"]);
+        let symbols = normalize_symbols([" aapl ".into(), "AAPL".into(), "spy".into(), "$vix".into()]);
+        assert_eq!(
+            symbols.into_iter().collect::<Vec<_>>(),
+            vec!["$VIX", "AAPL", "SPY"]
+        );
     }
 
     #[test]
     fn chart_symbols_are_always_included_in_level_one_equities() {
         let desired = DesiredSubscriptions {
-            charts: BTreeSet::from(["SPY".into(), "QQQ".into()]),
+            charts: BTreeSet::from(["$VIX".into(), "SPY".into(), "QQQ".into()]),
             quotes: BTreeSet::from(["AAPL".into(), "SPY".into()]),
             options: BTreeSet::new(),
         };
@@ -648,7 +651,7 @@ mod tests {
             equity_subscription_symbols(&desired)
                 .into_iter()
                 .collect::<Vec<_>>(),
-            vec!["AAPL", "QQQ", "SPY"],
+            vec!["$VIX", "AAPL", "QQQ", "SPY"],
         );
     }
 
@@ -663,7 +666,7 @@ mod tests {
         };
         let previous = DesiredSubscriptions::default();
         let next = DesiredSubscriptions {
-            charts: BTreeSet::from(["SPY".into()]),
+            charts: BTreeSet::from(["$VIX".into(), "SPY".into()]),
             quotes: BTreeSet::from(["AAPL".into()]),
             options: BTreeSet::from(["SPY   260724C00750000".into()]),
         };
@@ -678,7 +681,7 @@ mod tests {
         let requests = payload["requests"].as_array().unwrap();
         assert_eq!(requests.len(), 3);
         let equities = requests.iter().find(|item| item["service"] == "LEVELONE_EQUITIES").unwrap();
-        assert_eq!(equities["parameters"]["keys"], "AAPL,SPY");
+        assert_eq!(equities["parameters"]["keys"], "$VIX,AAPL,SPY");
         assert!(equities["parameters"]["fields"].as_str().unwrap().split(',').any(|field| field == "35"));
     }
 

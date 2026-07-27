@@ -220,7 +220,7 @@ impl Schwab {
             .await?
             .into_iter()
             .find(|item| item.symbol.eq_ignore_ascii_case(symbol))
-            .ok_or_else(|| AppError::Api(format!("Schwab equity symbol not found: {symbol}")))
+            .ok_or_else(|| AppError::Api(format!("Schwab market-data symbol not found: {symbol}")))
     }
 
     pub async fn quotes(&self, symbols: &[String]) -> Result<Vec<Quote>, AppError> {
@@ -604,7 +604,10 @@ fn instrument_from_value(value: &Value) -> Option<SymbolMeta> {
     if asset_type.is_empty() {
         asset_type = text(value, "assetMainType");
     }
-    if !asset_type.eq_ignore_ascii_case("EQUITY") && !asset_type.eq_ignore_ascii_case("ETF") {
+    if !["EQUITY", "ETF", "INDEX"]
+        .iter()
+        .any(|supported| asset_type.eq_ignore_ascii_case(supported))
+    {
         return None;
     }
     let symbol = text(value, "symbol").trim().to_uppercase();
@@ -996,6 +999,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_index_rest_quotes_without_changing_the_api_symbol() {
+        let quote = quote_from_value(
+            "$VIX",
+            &serde_json::json!({
+                "assetMainType":"INDEX",
+                "realtime":true,
+                "quote":{
+                    "lastPrice":17.25,
+                    "bidPrice":17.24,
+                    "askPrice":17.26,
+                    "closePrice":16.75,
+                    "netChange":0.5,
+                    "netPercentChange":2.985,
+                    "quoteTime":1_784_592_000_000_i64,
+                    "securityStatus":"Normal"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(quote.provider, MarketDataProvider::Schwab);
+        assert_eq!(quote.symbol, "$VIX");
+        assert_eq!(quote.last, 17.25);
+        assert!(!quote.delayed);
+        assert!(!quote.halted);
+    }
+
+    #[test]
     fn parses_production_chart_equity_sequence_before_ohlcv() {
         let bar = chart_bar_from_value(&serde_json::json!({
             "key":"AAPL", "1":779, "2":324.35, "3":324.50,
@@ -1027,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_equities_and_etfs_but_rejects_other_instruments() {
+    fn accepts_equities_etfs_and_indexes_but_rejects_other_instruments() {
         let equity = instrument_from_value(&serde_json::json!({
             "symbol":"AAPL", "description":"Apple Inc", "assetType":"EQUITY", "exchange":"Q"
         }))
@@ -1036,12 +1066,23 @@ mod tests {
             "symbol":"SPY", "description":"SPDR S&P 500 ETF", "assetType":"ETF", "exchange":"P"
         }))
         .unwrap();
+        let index = instrument_from_value(&serde_json::json!({
+            "symbol":"$VIX", "description":"CBOE Volatility Index", "assetType":"INDEX", "exchange":"CBOE"
+        }))
+        .unwrap();
         assert_eq!(equity.symbol, "AAPL");
         assert_eq!(etf.symbol, "SPY");
         assert_eq!(etf.asset_type, "ETF");
         assert_eq!(etf.exchange, "ARCA");
+        assert_eq!(index.symbol, "$VIX");
+        assert_eq!(index.asset_type, "INDEX");
+        assert_eq!(index.exchange, "CBOE");
         assert!(instrument_from_value(&serde_json::json!({
             "symbol":"SPY  260821C00600000", "assetType":"OPTION"
+        }))
+        .is_none());
+        assert!(instrument_from_value(&serde_json::json!({
+            "symbol":"/VX", "assetType":"FUTURE"
         }))
         .is_none());
     }

@@ -110,6 +110,15 @@ describe("cloud preferences", () => {
     expect(merged.windows[0].splitRatios?.["two-columns"]).toEqual([0.42]);
   });
 
+  it("round-trips Schwab index metadata through cloud preferences", () => {
+    const local = workspace();
+    const vix = { provider: "schwab" as const, symbol: "$VIX", description: "CBOE Volatility Index", exchange: "CBOE", assetType: "INDEX", minMove: 0.01, pointValue: 1 };
+    const profile = cloudPreferenceProfile({ ...local, watchlist: [vix], recentSymbols: [vix] });
+    const merged = applyCloudPreferenceProfile({ ...local, watchlist: [], recentSymbols: [] }, profile);
+    expect(merged.watchlist).toEqual([vix]);
+    expect(merged.recentSymbols).toEqual([vix]);
+  });
+
   it("normalizes malformed downloaded values", () => {
     const local = workspace();
     const profile = cloudPreferenceProfile(local);

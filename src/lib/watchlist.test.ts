@@ -29,7 +29,26 @@ describe("watchlist helpers", () => {
     expect(updated).toHaveLength(MAX_RECENT_SYMBOLS);
   });
 
-  it("migrates provider-less ETF recent entries to Schwab", () => {
+  it("migrates provider-less ETF and index entries to Schwab", () => {
     expect(normalizeRecentSymbols([{ symbol: "spy", assetType: "ETF" }])[0]).toMatchObject({ provider: "schwab", symbol: "SPY" });
+    expect(normalizeRecentSymbols([{ symbol: "$vix", assetType: "index" }])[0]).toMatchObject({
+      provider: "schwab",
+      symbol: "$VIX",
+      assetType: "INDEX",
+    });
+  });
+
+  it("preserves and deduplicates Schwab indexes in the watchlist", () => {
+    const normalized = normalizeWatchlist([
+      { symbol: "$vix", assetType: "INDEX", description: "CBOE Volatility Index" },
+      { provider: "schwab", symbol: "$VIX", assetType: "INDEX", description: "Duplicate" },
+    ]);
+    expect(normalized).toHaveLength(1);
+    expect(normalized[0]).toMatchObject({
+      provider: "schwab",
+      symbol: "$VIX",
+      assetType: "INDEX",
+      description: "CBOE Volatility Index",
+    });
   });
 });

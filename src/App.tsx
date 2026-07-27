@@ -173,6 +173,18 @@ function supportsGex(symbol: SymbolMeta): boolean {
   return symbol.provider === "schwab" && ["EQUITY", "ETF"].includes(symbol.assetType.toUpperCase());
 }
 
+function instrumentGlyph(symbol: SymbolMeta): "E" | "F" | "I" {
+  if (symbol.provider !== "schwab") return "F";
+  return symbol.assetType.toUpperCase() === "INDEX" ? "I" : "E";
+}
+
+function schwabAssetLabel(symbol: SymbolMeta): "Equity" | "ETF" | "Index" {
+  const assetType = symbol.assetType.toUpperCase();
+  if (assetType === "INDEX") return "Index";
+  if (assetType === "ETF") return "ETF";
+  return "Equity";
+}
+
 function gexStatusLabel(status: GexMarketStatus): string {
   return ({ loading: "Loading", live: "Live", hybrid: "Hybrid", "rest-only": "REST only", delayed: "Delayed", stale: "Stale", error: "Error" })[status];
 }
@@ -3193,7 +3205,7 @@ function TradingApp() {
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>
         {workspace.rightPanelOpen && <div id="order-panel-content" className="right-panel-content">
           {activeTab.symbol.provider === "schwab"
-            ? <div className="equity-order-disabled"><span>Schwab</span><strong>Chart data only</strong><p>Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available.</p></div>
+            ? <div className="equity-order-disabled"><span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p></div>
             : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}
         </div>}
       </aside>}
@@ -3218,10 +3230,10 @@ function TradingApp() {
     />}
 
     {searchOpen && <Modal title="Select symbol" onClose={() => { setSearchOpen(false); setSearch(""); }} width={620}>
-      <div className="search-box"><Search size={17} /><input autoFocus placeholder="Search equity, ETF, or futures contract" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
+      <div className="search-box"><Search size={17} /><input autoFocus placeholder="Search equity, ETF, index, or futures contract" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
       <div className="symbol-results">
         {!search.trim() && symbolPickerResults.length > 0 && <div className="symbol-results-label">Recent symbols</div>}
-        {symbolPickerResults.map((result) => <button key={instrumentKey(result)} onClick={() => { selectSymbol(result); setSearchOpen(false); setSearch(""); }}><span className={`instrument-icon ${result.provider}`}>{result.provider === "schwab" ? "E" : "F"}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? "Schwab" : `TradeStation${result.expiration ? ` · ${result.expiration}` : ""}`}</small></span></button>)}
+        {symbolPickerResults.map((result) => <button key={instrumentKey(result)} onClick={() => { selectSymbol(result); setSearchOpen(false); setSearch(""); }}><span className={`instrument-icon ${result.provider}`}>{instrumentGlyph(result)}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? `Schwab · ${schwabAssetLabel(result)}` : `TradeStation${result.expiration ? ` · ${result.expiration}` : ""}`}</small></span></button>)}
         {!symbolPickerResults.length && <div className="empty-state">{search.trim() ? <>No supported symbols matched “{search}”.</> : "No recent symbols yet."}</div>}
       </div>
     </Modal>}
@@ -3527,7 +3539,7 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   };
 
   return <section className="settings-section watchlist-settings" aria-labelledby="watchlist-settings-title">
-    <header><span>Market data</span><h3 id="watchlist-settings-title">Top bar watchlist</h3><p>Search equities, ETFs, and futures, then drag them into the order shown beside the Northstar logo.</p></header>
+    <header><span>Market data</span><h3 id="watchlist-settings-title">Top bar watchlist</h3><p>Search equities, ETFs, indexes, and futures, then drag them into the order shown beside the Northstar logo.</p></header>
     <div className="watchlist-search-box"><Search size={15} /><input aria-label="Search symbols for watchlist" placeholder="Search symbol or instrument name" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
     {query.trim() && <div className="watchlist-search-results" aria-live="polite">
       {loading && <div className="watchlist-search-state">Searching…</div>}
@@ -3535,7 +3547,7 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
       {!loading && !error && results.map((result) => {
         const added = workspace.watchlist.some((item) => instrumentKey(item) === instrumentKey(result));
         const available = canAddWatchlistSymbol(workspace, result);
-        return <div className="watchlist-search-result" key={instrumentKey(result)}><span className={`instrument-icon ${result.provider}`}>{result.provider === "schwab" ? "E" : "F"}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? "Schwab · Equity" : `TradeStation · ${formatContractExpiration(result.expiration)}`}</small></span><button type="button" disabled={added || !available} title={!available && !added ? "100-instrument quote stream limit reached" : undefined} onClick={() => add(result)}>{added ? "Added" : !available ? "Limit" : "Add"}</button></div>;
+        return <div className="watchlist-search-result" key={instrumentKey(result)}><span className={`instrument-icon ${result.provider}`}>{instrumentGlyph(result)}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? `Schwab · ${schwabAssetLabel(result)}` : `TradeStation · ${formatContractExpiration(result.expiration)}`}</small></span><button type="button" disabled={added || !available} title={!available && !added ? "100-instrument quote stream limit reached" : undefined} onClick={() => add(result)}>{added ? "Added" : !available ? "Limit" : "Add"}</button></div>;
       })}
       {!loading && !error && !results.length && <div className="watchlist-search-state">No supported symbols matched “{query}”.</div>}
     </div>}
