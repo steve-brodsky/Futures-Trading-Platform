@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { AlertTriangle, CalendarDays, ExternalLink, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, CalendarDays, ExternalLink, RefreshCw, Sunrise, X } from "lucide-react";
 import type { EconomicEventImportance, TradingTodaySnapshot } from "../types";
 import { eventState, formatEventTime, formatHolidayDate, newYorkDateHeading } from "../lib/tradingToday";
 
 export type TradingTodaySource = "calendar" | "nyse" | "cme";
 
 interface TradingTodayModalProps {
-  date: string;
+  displayDate: string;
+  economicDate: string;
+  sundayPreview: boolean;
   snapshot: TradingTodaySnapshot | null;
   loading: boolean;
   refreshing: boolean;
@@ -26,7 +28,9 @@ function statusLabel(status: "closed" | "early-close" | "modified-hours"): strin
 }
 
 export function TradingTodayModal({
-  date,
+  displayDate,
+  economicDate,
+  sundayPreview,
   snapshot,
   loading,
   refreshing,
@@ -42,7 +46,8 @@ export function TradingTodayModal({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const [now, setNow] = useState(Date.now());
-  const heading = newYorkDateHeading(new Date(`${date}T12:00:00Z`));
+  const heading = newYorkDateHeading(new Date(`${displayDate}T12:00:00Z`));
+  const economicHeading = newYorkDateHeading(new Date(`${economicDate}T12:00:00Z`));
   const comma = heading.indexOf(",");
   const weekday = heading.slice(0, comma);
   const calendarDate = heading.slice(comma + 1).trim();
@@ -90,13 +95,13 @@ export function TradingTodayModal({
     : snapshot?.status === "cache"
       ? "Cached"
       : "Live";
-  const verifiedRangeExpired = Boolean(snapshot && date > snapshot.holidayVerifiedThrough);
+  const verifiedRangeExpired = Boolean(snapshot && economicDate > snapshot.holidayVerifiedThrough);
 
   return (
     <div className="trading-today-backdrop" role="presentation">
-      <section ref={dialogRef} className="trading-today-modal" role="dialog" aria-modal="true" aria-labelledby="trading-today-title" tabIndex={-1}>
+      <section ref={dialogRef} className={`trading-today-modal${sundayPreview ? " sunday-preview" : ""}`} role="dialog" aria-modal="true" aria-labelledby="trading-today-title" tabIndex={-1}>
         <header className="trading-today-header">
-          <div className="trading-today-kicker"><CalendarDays size={14} /><span>Trading Today</span></div>
+          <div className="trading-today-kicker">{sundayPreview ? <Sunrise size={14} /> : <CalendarDays size={14} />}<span>{sundayPreview ? "Sunday outlook" : "Trading Today"}</span></div>
           <button ref={closeRef} type="button" className="trading-today-close" aria-label="Close Trading Today" onClick={onClose}><X size={18} /></button>
         </header>
 
@@ -104,7 +109,13 @@ export function TradingTodayModal({
           <div className="trading-today-date">
             <span>{weekday}</span>
             <h1 id="trading-today-title">{calendarDate}</h1>
-            <p>New York time · U.S. economic calendar</p>
+            <p>{sundayPreview ? "New York time · Week-ahead preparation" : "New York time · U.S. economic calendar"}</p>
+            {sundayPreview && (
+              <div className="trading-today-sunday-note">
+                <i />
+                <div><strong>No Sunday economic releases</strong><span>Monday’s calendar is previewed below.</span></div>
+              </div>
+            )}
           </div>
           <section className="trading-today-holidays" aria-labelledby="trading-today-holidays-title">
             <header>
@@ -145,16 +156,20 @@ export function TradingTodayModal({
 
         <section className="trading-today-events" aria-labelledby="trading-today-events-title">
           <header>
-            <div><span>United States</span><h2 id="trading-today-events-title">Economic events</h2></div>
+            <div>
+              <span>{sundayPreview ? "Next trading day · United States" : "United States"}</span>
+              <h2 id="trading-today-events-title">{sundayPreview ? "Monday economic preview" : "Economic events"}</h2>
+              {sundayPreview && <p>{economicHeading} · New York time</p>}
+            </div>
             <div className="trading-today-data-state"><i className={snapshot?.status ?? "loading"} />{snapshot ? cacheStatus : "Loading"}</div>
           </header>
 
           {loading && !snapshot ? (
-            <div className="trading-today-loading" role="status"><i /><strong>Loading today’s calendar</strong><span>Checking Trading Economics and venue schedules…</span></div>
+            <div className="trading-today-loading" role="status"><i /><strong>{sundayPreview ? "Loading Monday’s calendar" : "Loading today’s calendar"}</strong><span>{sundayPreview ? "Checking Monday releases and venue schedules…" : "Checking Trading Economics and venue schedules…"}</span></div>
           ) : error && !snapshot ? (
             <div className="trading-today-error" role="alert">
               <AlertTriangle size={22} />
-              <strong>Today’s events are unavailable</strong>
+              <strong>{sundayPreview ? "Monday’s preview is unavailable" : "Today’s events are unavailable"}</strong>
               <p>{error}</p>
               <div><button type="button" onClick={onRefresh}><RefreshCw size={13} />Retry</button><button type="button" onClick={() => onOpenSource("calendar")}><ExternalLink size={13} />Open source</button></div>
             </div>
@@ -177,13 +192,13 @@ export function TradingTodayModal({
               </table>
             </div>
           ) : (
-            <div className="trading-today-empty"><CalendarDays size={21} /><strong>No U.S. events scheduled today</strong><span>The calendar is clear for this New York trading day.</span></div>
+            <div className="trading-today-empty"><CalendarDays size={21} /><strong>{sundayPreview ? "No U.S. events scheduled Monday" : "No U.S. events scheduled today"}</strong><span>{sundayPreview ? "The Monday calendar is clear. Venue schedule changes are shown above." : "The calendar is clear for this New York trading day."}</span></div>
           )}
         </section>
 
         <footer className="trading-today-footer">
           <div>
-            <button type="button" onClick={() => onOpenSource("calendar")}>Data: Trading Economics <ExternalLink size={11} /></button>
+            <button type="button" onClick={() => onOpenSource("calendar")}>{sundayPreview ? "Monday preview: Trading Economics" : "Data: Trading Economics"} <ExternalLink size={11} /></button>
             <span>{snapshot ? `Updated ${new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" }).format(new Date(snapshot.fetchedAt))} ET` : "Not updated"}</span>
           </div>
           <button type="button" className="trading-today-refresh" disabled={refreshing} onClick={onRefresh}><RefreshCw size={14} className={refreshing ? "rotating" : ""} />{refreshing ? "Refreshing" : "Refresh"}</button>

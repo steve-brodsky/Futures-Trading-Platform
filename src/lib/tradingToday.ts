@@ -5,6 +5,12 @@ export const TRADING_ECONOMICS_CALENDAR_URL = "https://tradingeconomics.com/unit
 export const NYSE_HOURS_URL = "https://www.nyse.com/markets/hours-calendars";
 export const CME_HOURS_URL = "https://www.cmegroup.com/trading-hours.html";
 
+export interface TradingTodayView {
+  mode: "today" | "sunday-preview";
+  displayDate: string;
+  economicDate: string;
+}
+
 const dateKeyFormatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: TRADING_TODAY_TIMEZONE,
   year: "numeric",
@@ -28,6 +34,24 @@ export function newYorkDateKey(value: Date | number = new Date()): string {
 
 export function newYorkDateHeading(value: Date | number = new Date()): string {
   return headingFormatter.format(value);
+}
+
+function utcDateKey(value: Date): string {
+  return [
+    value.getUTCFullYear(),
+    String(value.getUTCMonth() + 1).padStart(2, "0"),
+    String(value.getUTCDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+export function tradingTodayView(displayDate: string): TradingTodayView {
+  const [year, month, day] = displayDate.split("-").map(Number);
+  const value = new Date(Date.UTC(year, month - 1, day, 12));
+  if (value.getUTCDay() !== 0) {
+    return { mode: "today", displayDate, economicDate: displayDate };
+  }
+  value.setUTCDate(value.getUTCDate() + 1);
+  return { mode: "sunday-preview", displayDate, economicDate: utcDateKey(value) };
 }
 
 export function eventState(events: EconomicEvent[], now = Date.now()): Record<string, "past" | "next" | "upcoming"> {

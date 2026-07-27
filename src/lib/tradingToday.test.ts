@@ -1,11 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { eventState, formatEventTime, isSameDaySnapshot, newYorkDateHeading, newYorkDateKey } from "./tradingToday";
+import { eventState, formatEventTime, isSameDaySnapshot, newYorkDateHeading, newYorkDateKey, tradingTodayView } from "./tradingToday";
 import type { EconomicEvent, TradingTodaySnapshot } from "../types";
 
 describe("Trading Today date handling", () => {
   it("uses the New York date even when the local/UTC day differs", () => {
     expect(newYorkDateKey(new Date("2026-07-25T01:30:00Z"))).toBe("2026-07-24");
     expect(newYorkDateHeading(new Date("2026-07-25T01:30:00Z"))).toBe("Friday, July 24, 2026");
+  });
+
+  it("uses the following Monday for a Sunday preview", () => {
+    expect(tradingTodayView("2026-07-26")).toEqual({
+      mode: "sunday-preview",
+      displayDate: "2026-07-26",
+      economicDate: "2026-07-27",
+    });
+    expect(tradingTodayView("2028-12-31").economicDate).toBe("2029-01-01");
+  });
+
+  it("keeps the same economic date across the Sunday-to-Monday rollover", () => {
+    expect(tradingTodayView("2026-07-26").economicDate).toBe(tradingTodayView("2026-07-27").economicDate);
+    expect(tradingTodayView("2026-07-27").mode).toBe("today");
+    expect(tradingTodayView("2026-07-25")).toEqual({
+      mode: "today",
+      displayDate: "2026-07-25",
+      economicDate: "2026-07-25",
+    });
   });
 
   it("formats release times in New York", () => {

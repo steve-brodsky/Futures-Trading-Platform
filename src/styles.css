@@ -842,7 +842,15 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .trading-today-date > span { color: var(--cyan); font: 650 10px DM Mono,monospace; letter-spacing: .16em; text-transform: uppercase; }
 .trading-today-date h1 { margin: 8px 0 7px; color: #f3f7fa; font-size: clamp(27px,3vw,38px); font-weight: 650; line-height: 1.03; letter-spacing: -.045em; }
 .trading-today-date p { margin: 0; color: #94a3b5; font: 500 10px DM Mono,monospace; }
+.trading-today-modal.sunday-preview .trading-today-summary { min-height: 212px; grid-template-columns: minmax(290px,.76fr) minmax(0,1.65fr); }
+.trading-today-modal.sunday-preview .trading-today-date { background: radial-gradient(circle at 12% 0,rgba(55,213,232,.1),transparent 58%); }
+.trading-today-sunday-note { display: flex; align-items: center; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid #2a3642; }
+.trading-today-sunday-note > i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 9px rgba(55,213,232,.42); }
+.trading-today-sunday-note > div { display: grid; gap: 3px; }
+.trading-today-sunday-note strong { color: #e4ebf1; font-size: 10px; font-weight: 650; }
+.trading-today-sunday-note span { color: #7f8ea1; font: 500 8px DM Mono,monospace; }
 .trading-today-holidays { min-width: 0; padding: 15px 20px 12px; }
+.trading-today-modal.sunday-preview .trading-today-holidays { background: #0f161e; }
 .trading-today-holidays > header { height: 26px; display: flex; align-items: start; justify-content: space-between; color: #a2afbf; font: 650 9px DM Mono,monospace; letter-spacing: .09em; text-transform: uppercase; }
 .trading-today-holidays > header small { color: #7c8a9b; font: inherit; letter-spacing: .03em; }
 .holiday-coverage-warning { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; color: #d8a75f; background: none; font: inherit; letter-spacing: .02em; text-transform: uppercase; cursor: pointer; }
@@ -866,6 +874,8 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .trading-today-events > header { min-height: 58px; flex: 0 0 58px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; border-bottom: 1px solid #27313d; }
 .trading-today-events > header > div:first-child span { color: var(--cyan); font: 650 8px DM Mono,monospace; letter-spacing: .14em; text-transform: uppercase; }
 .trading-today-events h2 { margin: 4px 0 0; color: #f1f5f8; font-size: 15px; font-weight: 650; }
+.trading-today-events > header > div:first-child p { margin: 4px 0 0; color: #7f8ea0; font: 500 8px DM Mono,monospace; }
+.trading-today-modal.sunday-preview .trading-today-events > header { min-height: 70px; flex-basis: 70px; }
 .trading-today-data-state { display: flex; align-items: center; gap: 6px; color: #93a1b2; font: 600 9px DM Mono,monospace; }
 .trading-today-data-state i { width: 6px; height: 6px; border-radius: 50%; background: #59687b; }.trading-today-data-state i.live { background: var(--green); box-shadow: 0 0 7px rgba(22,199,154,.5); }.trading-today-data-state i.demo { background: var(--cyan); }.trading-today-data-state i.cache { background: var(--amber); }
 .trading-today-table-wrap { min-height: 0; flex: 1 1 auto; overflow: auto; scrollbar-gutter: stable; }
@@ -899,10 +909,12 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 @keyframes trading-today-row-in { from { opacity: 0; transform: translateY(3px); } }
 @media (max-width: 900px) {
   .trading-today-summary { grid-template-columns: 230px minmax(0,1fr); }.trading-today-date { padding: 22px; }.trading-today-holidays { padding-right: 14px; padding-left: 14px; }
+  .trading-today-modal.sunday-preview .trading-today-summary { grid-template-columns: 250px minmax(0,1fr); }
   .venue-status span { display: none; }.venue-status { width: 39px; justify-content: center; }.trading-today-holidays article { grid-template-columns: 65px minmax(110px,1fr) auto; }
 }
 @media (max-height: 720px) {
   .trading-today-summary { min-height: 162px; }.trading-today-date { padding-top: 18px; padding-bottom: 18px; }.trading-today-holidays article { min-height: 29px; }.trading-today-events > header { min-height: 50px; flex-basis: 50px; }
+  .trading-today-modal.sunday-preview .trading-today-summary { min-height: 180px; }.trading-today-sunday-note { margin-top: 12px; padding-top: 10px; }.trading-today-modal.sunday-preview .trading-today-events > header { min-height: 62px; flex-basis: 62px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .trading-today-backdrop,.trading-today-modal,.trading-today-holidays article,.trading-today-table-wrap tbody tr,.trading-today-loading > i,.rotating { animation: none !important; transition: none !important; }

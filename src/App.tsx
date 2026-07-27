@@ -43,7 +43,7 @@ import { activeDrawingAlerts, applyDrawingPatch, trackDrawingAlertTransitions, t
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
-import { newYorkDateKey } from "./lib/tradingToday";
+import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
@@ -342,6 +342,7 @@ function TradingApp() {
   const [tradingTodayRefreshing, setTradingTodayRefreshing] = useState(false);
   const [tradingTodayError, setTradingTodayError] = useState<string>();
   const [tradingTodayWarning, setTradingTodayWarning] = useState<string>();
+  const tradingTodayPresentation = useMemo(() => tradingTodayView(tradingTodayDate), [tradingTodayDate]);
   const [review, setReview] = useState<ReviewState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [envConfirm, setEnvConfirm] = useState<TradingEnvironment | null>(null);
@@ -440,7 +441,7 @@ function TradingApp() {
   useEffect(() => {
     if (!tradingTodayOpen || currentWindowId !== MAIN_WINDOW_ID) return;
     let cancelled = false;
-    let available = tradingTodaySnapshotRef.current?.date === tradingTodayDate ? tradingTodaySnapshotRef.current : null;
+    let available = tradingTodaySnapshotRef.current?.date === tradingTodayPresentation.economicDate ? tradingTodaySnapshotRef.current : null;
     if (!available) {
       tradingTodaySnapshotRef.current = null;
       setTradingTodaySnapshot(null);
@@ -451,7 +452,7 @@ function TradingApp() {
 
     void (async () => {
       try {
-        const cached = await api.getTradingTodayCache(tradingTodayDate);
+        const cached = await api.getTradingTodayCache(tradingTodayPresentation.economicDate);
         if (cancelled) return;
         if (cached) {
           available = cached;
@@ -465,7 +466,7 @@ function TradingApp() {
       if (cancelled) return;
       setTradingTodayRefreshing(true);
       try {
-        const refreshed = await api.refreshTradingToday(tradingTodayDate);
+        const refreshed = await api.refreshTradingToday(tradingTodayPresentation.economicDate);
         if (cancelled) return;
         available = refreshed;
         tradingTodaySnapshotRef.current = refreshed;
@@ -473,7 +474,7 @@ function TradingApp() {
       } catch (error) {
         if (cancelled) return;
         const message = `Could not refresh Trading Economics: ${String(error)}`;
-        if (available) setTradingTodayWarning(`${message}. Showing the latest same-day data.`);
+        if (available) setTradingTodayWarning(`${message}. Showing the latest available data.`);
         else setTradingTodayError(message);
       } finally {
         if (!cancelled) {
@@ -484,7 +485,7 @@ function TradingApp() {
     })();
 
     return () => { cancelled = true; };
-  }, [tradingTodayOpen, tradingTodayDate]);
+  }, [tradingTodayOpen, tradingTodayPresentation.economicDate]);
 
   useEffect(() => {
     if (!chartStyleOpen) return;
@@ -2050,13 +2051,13 @@ function TradingApp() {
     setTradingTodayError(undefined);
     setTradingTodayWarning(undefined);
     try {
-      const refreshed = await api.refreshTradingToday(tradingTodayDate);
+      const refreshed = await api.refreshTradingToday(tradingTodayPresentation.economicDate);
       tradingTodaySnapshotRef.current = refreshed;
       setTradingTodaySnapshot(refreshed);
     } catch (error) {
       const message = `Could not refresh Trading Economics: ${String(error)}`;
-      if (tradingTodaySnapshotRef.current?.date === tradingTodayDate) {
-        setTradingTodayWarning(`${message}. Showing the latest same-day data.`);
+      if (tradingTodaySnapshotRef.current?.date === tradingTodayPresentation.economicDate) {
+        setTradingTodayWarning(`${message}. Showing the latest available data.`);
       } else {
         setTradingTodayError(message);
       }
@@ -3198,7 +3199,9 @@ function TradingApp() {
     </section>
 
     {tradingTodayOpen && !isDetached && <TradingTodayModal
-      date={tradingTodayDate}
+      displayDate={tradingTodayPresentation.displayDate}
+      economicDate={tradingTodayPresentation.economicDate}
+      sundayPreview={tradingTodayPresentation.mode === "sunday-preview"}
       snapshot={tradingTodaySnapshot}
       loading={tradingTodayLoading}
       refreshing={tradingTodayRefreshing}
