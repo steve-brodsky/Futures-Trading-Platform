@@ -44,7 +44,7 @@ import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, 
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -342,6 +342,7 @@ function TradingApp() {
   const [tradingTodayRefreshing, setTradingTodayRefreshing] = useState(false);
   const [tradingTodayError, setTradingTodayError] = useState<string>();
   const [tradingTodayWarning, setTradingTodayWarning] = useState<string>();
+  const [tradingTodayTimezone, setTradingTodayTimezone] = useState<ChartTimezone>("America/New_York");
   const tradingTodayPresentation = useMemo(() => tradingTodayView(tradingTodayDate), [tradingTodayDate]);
   const [review, setReview] = useState<ReviewState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -3202,11 +3203,13 @@ function TradingApp() {
       displayDate={tradingTodayPresentation.displayDate}
       economicDate={tradingTodayPresentation.economicDate}
       sundayPreview={tradingTodayPresentation.mode === "sunday-preview"}
+      timezone={tradingTodayTimezone}
       snapshot={tradingTodaySnapshot}
       loading={tradingTodayLoading}
       refreshing={tradingTodayRefreshing}
       error={tradingTodayError}
       warning={tradingTodayWarning}
+      onTimezoneChange={setTradingTodayTimezone}
       onRefresh={() => { void refreshTradingToday(); }}
       onOpenSource={openTradingTodaySource}
       onClose={() => setTradingTodayOpen(false)}

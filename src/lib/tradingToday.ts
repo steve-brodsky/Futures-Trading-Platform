@@ -63,9 +63,9 @@ export function eventState(events: EconomicEvent[], now = Date.now()): Record<st
   ]));
 }
 
-export function formatEventTime(occursAt: string): string {
+export function formatEventTime(occursAt: string, timeZone = TRADING_TODAY_TIMEZONE): string {
   return new Intl.DateTimeFormat("en-US", {
-    timeZone: TRADING_TODAY_TIMEZONE,
+    timeZone,
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(occursAt));

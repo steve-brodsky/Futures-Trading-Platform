@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { AlertTriangle, CalendarDays, ExternalLink, RefreshCw, Sunrise, X } from "lucide-react";
-import type { EconomicEventImportance, TradingTodaySnapshot } from "../types";
+import type { ChartTimezone, EconomicEventImportance, TradingTodaySnapshot } from "../types";
 import { eventState, formatEventTime, formatHolidayDate, newYorkDateHeading } from "../lib/tradingToday";
+import { resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 
 export type TradingTodaySource = "calendar" | "nyse" | "cme";
 
@@ -9,11 +10,13 @@ interface TradingTodayModalProps {
   displayDate: string;
   economicDate: string;
   sundayPreview: boolean;
+  timezone: ChartTimezone;
   snapshot: TradingTodaySnapshot | null;
   loading: boolean;
   refreshing: boolean;
   error?: string;
   warning?: string;
+  onTimezoneChange: (timezone: ChartTimezone) => void;
   onRefresh: () => void;
   onOpenSource: (source: TradingTodaySource) => void;
   onClose: () => void;
@@ -31,11 +34,13 @@ export function TradingTodayModal({
   displayDate,
   economicDate,
   sundayPreview,
+  timezone,
   snapshot,
   loading,
   refreshing,
   error,
   warning,
+  onTimezoneChange,
   onRefresh,
   onOpenSource,
   onClose,
@@ -48,6 +53,8 @@ export function TradingTodayModal({
   const [now, setNow] = useState(Date.now());
   const heading = newYorkDateHeading(new Date(`${displayDate}T12:00:00Z`));
   const economicHeading = newYorkDateHeading(new Date(`${economicDate}T12:00:00Z`));
+  const resolvedTimezone = resolveTimezone(timezone, "CME");
+  const selectedTimezoneLabel = timezoneLabel(timezone, "CME");
   const comma = heading.indexOf(",");
   const weekday = heading.slice(0, comma);
   const calendarDate = heading.slice(comma + 1).trim();
@@ -69,7 +76,7 @@ export function TradingTodayModal({
       }
       if (event.key !== "Tab" || !dialogRef.current) return;
       const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+        'button:not(:disabled), select:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
       ));
       if (!focusable.length) return;
       const first = focusable[0];
@@ -159,9 +166,22 @@ export function TradingTodayModal({
             <div>
               <span>{sundayPreview ? "Next trading day · United States" : "United States"}</span>
               <h2 id="trading-today-events-title">{sundayPreview ? "Monday economic preview" : "Economic events"}</h2>
-              {sundayPreview && <p>{economicHeading} · New York time</p>}
+              {sundayPreview && <p>{economicHeading} · U.S. calendar date</p>}
             </div>
-            <div className="trading-today-data-state"><i className={snapshot?.status ?? "loading"} />{snapshot ? cacheStatus : "Loading"}</div>
+            <div className="trading-today-event-controls">
+              <label className="trading-today-timezone">
+                <span>Event times</span>
+                <select
+                  aria-label="Economic event timezone"
+                  value={timezone}
+                  title={`Economic event timezone: ${resolvedTimezone}`}
+                  onChange={(event) => onTimezoneChange(event.target.value as ChartTimezone)}
+                >
+                  {timezoneOptions.map((option) => <option key={option.value} value={option.value}>{option.value === timezone ? timezoneLabel(timezone, "CME") : option.label}</option>)}
+                </select>
+              </label>
+              <div className="trading-today-data-state"><i className={snapshot?.status ?? "loading"} />{snapshot ? cacheStatus : "Loading"}</div>
+            </div>
           </header>
 
           {loading && !snapshot ? (
@@ -180,7 +200,7 @@ export function TradingTodayModal({
                 <tbody>
                   {events.map((event, index) => (
                     <tr key={event.id} className={states[event.id]} style={{ "--event-index": index } as CSSProperties}>
-                      <td><time dateTime={event.occursAt}>{formatEventTime(event.occursAt)}</time><i className={`impact impact-${event.importance ?? "unknown"}`} title={impactLabel(event.importance)} aria-label={impactLabel(event.importance)} /></td>
+                      <td><time dateTime={event.occursAt} title={`${selectedTimezoneLabel} · ${resolvedTimezone}`}>{formatEventTime(event.occursAt, resolvedTimezone)}</time><i className={`impact impact-${event.importance ?? "unknown"}`} title={impactLabel(event.importance)} aria-label={impactLabel(event.importance)} /></td>
                       <td><strong>{event.title}</strong>{event.reference && <small>{event.reference}</small>}</td>
                       <td className={event.actual ? "has-value" : ""}>{event.actual || "—"}</td>
                       <td>{event.consensus || "—"}</td>

@@ -876,6 +876,11 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .trading-today-events h2 { margin: 4px 0 0; color: #f1f5f8; font-size: 15px; font-weight: 650; }
 .trading-today-events > header > div:first-child p { margin: 4px 0 0; color: #7f8ea0; font: 500 8px DM Mono,monospace; }
 .trading-today-modal.sunday-preview .trading-today-events > header { min-height: 70px; flex-basis: 70px; }
+.trading-today-event-controls { display: flex; align-items: center; gap: 15px; }
+.trading-today-timezone { display: flex; align-items: center; gap: 8px; color: #7d8b9d; font: 600 8px DM Mono,monospace; letter-spacing: .08em; text-transform: uppercase; }
+.trading-today-timezone select { width: 116px; height: 30px; padding: 0 26px 0 9px; border: 1px solid #344252; border-radius: 5px; outline: none; appearance: auto; color: #c6d0da; background: #121b24; font: 600 9px DM Mono,monospace; letter-spacing: 0; text-transform: none; cursor: pointer; transition: color .15s,border-color .15s,background .15s; }
+.trading-today-timezone select:hover { color: #edf8fb; border-color: #4a5d70; background: #17222c; }
+.trading-today-timezone select:focus-visible { color: #eaffff; border-color: rgba(55,213,232,.65); box-shadow: 0 0 0 2px rgba(55,213,232,.1); }
 .trading-today-data-state { display: flex; align-items: center; gap: 6px; color: #93a1b2; font: 600 9px DM Mono,monospace; }
 .trading-today-data-state i { width: 6px; height: 6px; border-radius: 50%; background: #59687b; }.trading-today-data-state i.live { background: var(--green); box-shadow: 0 0 7px rgba(22,199,154,.5); }.trading-today-data-state i.demo { background: var(--cyan); }.trading-today-data-state i.cache { background: var(--amber); }
 .trading-today-table-wrap { min-height: 0; flex: 1 1 auto; overflow: auto; scrollbar-gutter: stable; }
@@ -910,6 +915,7 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 @media (max-width: 900px) {
   .trading-today-summary { grid-template-columns: 230px minmax(0,1fr); }.trading-today-date { padding: 22px; }.trading-today-holidays { padding-right: 14px; padding-left: 14px; }
   .trading-today-modal.sunday-preview .trading-today-summary { grid-template-columns: 250px minmax(0,1fr); }
+  .trading-today-timezone > span { display: none; }.trading-today-event-controls { gap: 10px; }
   .venue-status span { display: none; }.venue-status { width: 39px; justify-content: center; }.trading-today-holidays article { grid-template-columns: 65px minmax(110px,1fr) auto; }
 }
 @media (max-height: 720px) {

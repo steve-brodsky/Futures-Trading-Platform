@@ -31,6 +31,12 @@ describe("Trading Today date handling", () => {
     expect(formatEventTime("2026-07-24T13:45:00Z")).toBe("9:45 AM");
   });
 
+  it("formats release times in the selected timezone", () => {
+    expect(formatEventTime("2026-07-24T13:45:00Z", "America/Chicago")).toBe("8:45 AM");
+    expect(formatEventTime("2026-07-24T13:45:00Z", "America/Los_Angeles")).toBe("6:45 AM");
+    expect(formatEventTime("2026-07-24T13:45:00Z", "UTC")).toBe("1:45 PM");
+  });
+
   it("marks only the first non-past event as next", () => {
     const events: EconomicEvent[] = [
       { id: "past", occursAt: "2026-07-24T12:00:00Z", title: "Past", importance: 1 },
