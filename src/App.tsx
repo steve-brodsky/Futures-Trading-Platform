@@ -34,6 +34,7 @@ import { calculateSwingStop } from "./lib/swingStop";
 import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, shouldRetryEntryScreenshots, ENTRY_SCREENSHOT_QUEUE_LIMIT } from "./lib/entryScreenshot";
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
 import { isTargetOutside } from "./lib/menuFocus";
+import { autocompleteKeyAction, useSymbolSuggestions } from "./lib/symbolSearch";
 import { defaultIndicators } from "./lib/workspace";
 import { allocateGexStreamBudgets, calculateGexLevels, defaultGexSelection, gexExpirationDisplayGroups, normalizeGexSelection, prioritizeOptionContracts, resolveGexExpirations } from "./lib/gex";
 import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndFigureSettings, normalizeRenkoSettings } from "./lib/priceBasedCharts";
@@ -336,7 +337,8 @@ function TradingApp() {
   const [contractLookupErrors, setContractLookupErrors] = useState<Record<string, string>>({});
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
-  const [searchResults, setSearchResults] = useState<SymbolMeta[]>(futures);
+  const [searchActiveIndex, setSearchActiveIndex] = useState(-1);
+  const searchSuggestions = useSymbolSuggestions(search, api.symbolSearch, searchOpen);
   const [indicatorOpen, setIndicatorOpen] = useState(false);
   const [chartStyleOpen, setChartStyleOpen] = useState(false);
   const [chartLayoutOpen, setChartLayoutOpen] = useState(false);
@@ -1888,17 +1890,21 @@ function TradingApp() {
   }, [workspaceLoaded, preferenceSyncEpoch, preferenceRealtime.state]);
 
   useEffect(() => {
-    if (!searchOpen) return;
-    if (!search.trim()) {
-      setSearchResults([]);
+    if (!searchOpen) {
+      setSearchActiveIndex(-1);
       return;
     }
-    let active = true;
-    const timer = window.setTimeout(() => api.symbolSearch(search)
-      .then((results) => { if (active) setSearchResults(results); })
-      .catch(() => { if (active) setSearchResults([]); }), 300);
-    return () => { active = false; clearTimeout(timer); };
-  }, [search, searchOpen]);
+    const itemCount = search.trim()
+      ? searchSuggestions.results.length
+      : workspace.recentSymbols.length;
+    setSearchActiveIndex(itemCount ? 0 : -1);
+  }, [searchOpen, search, searchSuggestions.results, workspace.recentSymbols]);
+
+  useEffect(() => {
+    if (!searchOpen || searchActiveIndex < 0) return;
+    document.getElementById(`chart-symbol-option-${searchActiveIndex}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [searchOpen, searchActiveIndex]);
 
   useEffect(() => {
     setTradeDetails({});
@@ -2950,7 +2956,27 @@ function TradingApp() {
   const activeProviderConnected = activeTab.symbol.provider === "schwab" ? schwabAuthenticated : authenticated;
   const providerLabel = activeTab.symbol.provider === "schwab" ? "SCHWAB" : "TRADESTATION";
   const connectionLabel = api.isNative ? (activeProviderConnected ? `${providerLabel} ${market.streamState === "rate-limited" ? "PAUSED" : market.streamState.toUpperCase()}` : `${providerLabel} OFFLINE`) : `${providerLabel} DEMO`;
-  const symbolPickerResults = search.trim() ? searchResults : workspace.recentSymbols;
+  const symbolPickerResults = search.trim() ? searchSuggestions.results : workspace.recentSymbols;
+  const closeSymbolPicker = () => {
+    setSearchOpen(false);
+    setSearch("");
+    setSearchActiveIndex(-1);
+  };
+  const chooseSymbolPickerResult = (result: SymbolMeta) => {
+    selectSymbol(result);
+    closeSymbolPicker();
+  };
+  const handleSymbolPickerKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    const action = autocompleteKeyAction(event.key, searchActiveIndex, symbolPickerResults.length);
+    if (!action.handled) return;
+    event.preventDefault();
+    if (action.escape) {
+      closeSymbolPicker();
+      return;
+    }
+    setSearchActiveIndex(action.activeIndex);
+    if (action.selectIndex != null) chooseSymbolPickerResult(symbolPickerResults[action.selectIndex]);
+  };
   const brokerageConnectionState = brokerageDisplayState(brokerageStreamStates);
   const marketTime = newYorkClock.format(new Date(currentTime));
   const reviewEntryEligibility = review?.kind === "entry"
@@ -3229,12 +3255,35 @@ function TradingApp() {
       onClose={() => setTradingTodayOpen(false)}
     />}
 
-    {searchOpen && <Modal title="Select symbol" onClose={() => { setSearchOpen(false); setSearch(""); }} width={620}>
-      <div className="search-box"><Search size={17} /><input autoFocus placeholder="Search equity, ETF, index, or futures contract" value={search} onChange={(e) => setSearch(e.target.value)} /></div>
-      <div className="symbol-results">
+    {searchOpen && <Modal title="Select symbol" onClose={closeSymbolPicker} width={620}>
+      <div className="search-box"><Search size={17} /><input
+        autoFocus
+        role="combobox"
+        aria-label="Search chart symbols"
+        aria-autocomplete="list"
+        aria-controls="chart-symbol-suggestions"
+        aria-expanded={Boolean(symbolPickerResults.length || searchSuggestions.loading || searchSuggestions.error)}
+        aria-activedescendant={searchActiveIndex >= 0 ? `chart-symbol-option-${searchActiveIndex}` : undefined}
+        placeholder="Search equity, ETF, index, or futures contract"
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+        onKeyDown={handleSymbolPickerKeyDown}
+      /></div>
+      <div id="chart-symbol-suggestions" className="symbol-results" role="listbox" aria-label={search.trim() ? "Symbol suggestions" : "Recent symbols"} aria-busy={searchSuggestions.loading} aria-live="polite">
         {!search.trim() && symbolPickerResults.length > 0 && <div className="symbol-results-label">Recent symbols</div>}
-        {symbolPickerResults.map((result) => <button key={instrumentKey(result)} onClick={() => { selectSymbol(result); setSearchOpen(false); setSearch(""); }}><span className={`instrument-icon ${result.provider}`}>{instrumentGlyph(result)}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? `Schwab · ${schwabAssetLabel(result)}` : `TradeStation${result.expiration ? ` · ${result.expiration}` : ""}`}</small></span></button>)}
-        {!symbolPickerResults.length && <div className="empty-state">{search.trim() ? <>No supported symbols matched “{search}”.</> : "No recent symbols yet."}</div>}
+        {search.trim() && searchSuggestions.loading && <div className="symbol-results-state" role="status">Searching…</div>}
+        {search.trim() && !searchSuggestions.loading && searchSuggestions.error && <div className="symbol-results-state negative" role="status">{searchSuggestions.error}</div>}
+        {!searchSuggestions.loading && !searchSuggestions.error && symbolPickerResults.map((result, index) => <button
+          id={`chart-symbol-option-${index}`}
+          key={instrumentKey(result)}
+          type="button"
+          role="option"
+          aria-selected={searchActiveIndex === index}
+          className={searchActiveIndex === index ? "active" : ""}
+          onMouseEnter={() => setSearchActiveIndex(index)}
+          onClick={() => chooseSymbolPickerResult(result)}
+        ><span className={`instrument-icon ${result.provider}`}>{instrumentGlyph(result)}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? `Schwab · ${schwabAssetLabel(result)}` : `TradeStation · ${formatContractExpiration(result.expiration)}`}</small></span></button>)}
+        {!searchSuggestions.loading && !searchSuggestions.error && !symbolPickerResults.length && <div className="empty-state">{search.trim() ? <>No supported symbols matched “{search}”.</> : "No recent symbols yet."}</div>}
       </div>
     </Modal>}
 
@@ -3451,9 +3500,8 @@ function ChartLayoutGlyph({ layout }: { layout: ChartLayout }) {
 
 function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: WorkspaceState; onChange: (symbols: SymbolMeta[]) => void; onNotify: (message: string) => void }) {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<SymbolMeta[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>();
+  const [activeResultIndex, setActiveResultIndex] = useState(-1);
+  const suggestions = useSymbolSuggestions(query, api.symbolSearch);
   const [draggedSymbol, setDraggedSymbol] = useState<string>();
   const [dropSymbol, setDropSymbol] = useState<string>();
   const watchlistRef = useRef(workspace.watchlist);
@@ -3461,31 +3509,14 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   watchlistRef.current = workspace.watchlist;
 
   useEffect(() => {
-    const value = query.trim();
-    if (!value) {
-      setResults([]);
-      setLoading(false);
-      setError(undefined);
-      return;
-    }
-    let active = true;
-    setLoading(true);
-    setError(undefined);
-    const timer = window.setTimeout(() => api.symbolSearch(value).then((items) => {
-      if (active) setResults(items);
-    }).catch(() => {
-      if (active) {
-        setResults([]);
-        setError("Symbol search is unavailable. Try again in a moment.");
-      }
-    }).finally(() => {
-      if (active) setLoading(false);
-    }), 300);
-    return () => {
-      active = false;
-      window.clearTimeout(timer);
-    };
-  }, [query]);
+    setActiveResultIndex(suggestions.results.length ? 0 : -1);
+  }, [suggestions.query, suggestions.results]);
+
+  useEffect(() => {
+    if (activeResultIndex < 0) return;
+    document.getElementById(`watchlist-symbol-option-${activeResultIndex}`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeResultIndex]);
 
   const move = (fromIndex: number, toIndex: number) => {
     const current = watchlistRef.current;
@@ -3538,18 +3569,57 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
     onChange([...workspace.watchlist, result]);
   };
 
+  const handleSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    const action = autocompleteKeyAction(event.key, activeResultIndex, suggestions.results.length);
+    if (!action.handled) return;
+    event.preventDefault();
+    if (action.escape) {
+      setQuery("");
+      setActiveResultIndex(-1);
+      return;
+    }
+    setActiveResultIndex(action.activeIndex);
+    if (action.selectIndex != null) {
+      const result = suggestions.results[action.selectIndex];
+      const added = workspace.watchlist.some((item) => instrumentKey(item) === instrumentKey(result));
+      if (!added && canAddWatchlistSymbol(workspace, result)) add(result);
+    }
+  };
+
   return <section className="settings-section watchlist-settings" aria-labelledby="watchlist-settings-title">
     <header><span>Market data</span><h3 id="watchlist-settings-title">Top bar watchlist</h3><p>Search equities, ETFs, indexes, and futures, then drag them into the order shown beside the Northstar logo.</p></header>
-    <div className="watchlist-search-box"><Search size={15} /><input aria-label="Search symbols for watchlist" placeholder="Search symbol or instrument name" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-    {query.trim() && <div className="watchlist-search-results" aria-live="polite">
-      {loading && <div className="watchlist-search-state">Searching…</div>}
-      {!loading && error && <div className="watchlist-search-state negative">{error}</div>}
-      {!loading && !error && results.map((result) => {
+    <div className="watchlist-search-box"><Search size={15} /><input
+      role="combobox"
+      aria-label="Search symbols for watchlist"
+      aria-autocomplete="list"
+      aria-controls="watchlist-symbol-suggestions"
+      aria-expanded={Boolean(query.trim())}
+      aria-activedescendant={activeResultIndex >= 0 ? `watchlist-symbol-option-${activeResultIndex}` : undefined}
+      placeholder="Search symbol or instrument name"
+      value={query}
+      onChange={(event) => setQuery(event.target.value)}
+      onKeyDown={handleSearchKeyDown}
+    /></div>
+    {query.trim() && <div id="watchlist-symbol-suggestions" className="watchlist-search-results" role="listbox" aria-label="Watchlist symbol suggestions" aria-busy={suggestions.loading} aria-live="polite">
+      {suggestions.loading && <div className="watchlist-search-state" role="status">Searching…</div>}
+      {!suggestions.loading && suggestions.error && <div className="watchlist-search-state negative" role="status">{suggestions.error}</div>}
+      {!suggestions.loading && !suggestions.error && suggestions.results.map((result, index) => {
         const added = workspace.watchlist.some((item) => instrumentKey(item) === instrumentKey(result));
         const available = canAddWatchlistSymbol(workspace, result);
-        return <div className="watchlist-search-result" key={instrumentKey(result)}><span className={`instrument-icon ${result.provider}`}>{instrumentGlyph(result)}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? `Schwab · ${schwabAssetLabel(result)}` : `TradeStation · ${formatContractExpiration(result.expiration)}`}</small></span><button type="button" disabled={added || !available} title={!available && !added ? "100-instrument quote stream limit reached" : undefined} onClick={() => add(result)}>{added ? "Added" : !available ? "Limit" : "Add"}</button></div>;
+        const disabled = added || !available;
+        return <div
+          id={`watchlist-symbol-option-${index}`}
+          className={`watchlist-search-result ${activeResultIndex === index ? "active" : ""} ${disabled ? "disabled" : ""}`}
+          key={instrumentKey(result)}
+          role="option"
+          aria-selected={activeResultIndex === index}
+          aria-disabled={disabled}
+          title={!available && !added ? "100-instrument quote stream limit reached" : undefined}
+          onMouseEnter={() => setActiveResultIndex(index)}
+          onClick={() => { if (!disabled) add(result); }}
+        ><span className={`instrument-icon ${result.provider}`}>{instrumentGlyph(result)}</span><span><strong>{result.symbol}</strong><small>{result.description}</small></span><span className="result-meta">{result.exchange}<small>{result.provider === "schwab" ? `Schwab · ${schwabAssetLabel(result)}` : `TradeStation · ${formatContractExpiration(result.expiration)}`}</small></span><span className="watchlist-result-action">{added ? "Added" : !available ? "Limit" : "Add"}</span></div>;
       })}
-      {!loading && !error && !results.length && <div className="watchlist-search-state">No supported symbols matched “{query}”.</div>}
+      {!suggestions.loading && !suggestions.error && !suggestions.results.length && <div className="watchlist-search-state">No supported symbols matched “{query}”.</div>}
     </div>}
     <div className={`watchlist-editor ${draggedSymbol ? "dragging" : ""}`} aria-label="Saved watchlist">
       {workspace.watchlist.map((instrument, index) => {

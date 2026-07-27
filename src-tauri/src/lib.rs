@@ -14,7 +14,7 @@ use schwab::Schwab;
 use schwab_streamer::{SchwabStreamEvent, SchwabStreamer};
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, RwLock},
 };
@@ -304,15 +304,28 @@ async fn search_symbols(
     let tradestation = state.api.search_symbols(query.trim());
     let schwab = state.schwab.search_symbols(query.trim());
     let (tradestation, schwab) = tokio::join!(tradestation, schwab);
-    Ok(merge_symbol_search_results(
-        tradestation.unwrap_or_default(),
-        schwab.unwrap_or_default(),
-        query.trim(),
-    ))
+    combine_symbol_search_responses(tradestation, schwab, query.trim())
+}
+
+fn combine_symbol_search_responses(
+    tradestation: Result<Vec<SymbolMeta>, AppError>,
+    schwab: Result<Vec<SymbolMeta>, AppError>,
+    query: &str,
+) -> Result<Vec<SymbolMeta>, AppError> {
+    match (tradestation, schwab) {
+        (Ok(tradestation), Ok(schwab)) => {
+            Ok(merge_symbol_search_results(tradestation, schwab, query))
+        }
+        (Ok(tradestation), Err(_)) => Ok(merge_symbol_search_results(tradestation, vec![], query)),
+        (Err(_), Ok(schwab)) => Ok(merge_symbol_search_results(vec![], schwab, query)),
+        (Err(tradestation), Err(schwab)) => Err(AppError::Api(format!(
+            "Symbol search unavailable. TradeStation: {tradestation}. Schwab: {schwab}"
+        ))),
+    }
 }
 
 fn merge_symbol_search_results(
-    mut tradestation: Vec<SymbolMeta>,
+    tradestation: Vec<SymbolMeta>,
     schwab: Vec<SymbolMeta>,
     query: &str,
 ) -> Vec<SymbolMeta> {
@@ -320,16 +333,52 @@ fn merge_symbol_search_results(
     // Its v2 suggestion payload is inconsistent about category spelling and
     // sometimes omits it, so a second exact client-side filter can hide valid
     // futures returned by that endpoint.
-    tradestation.extend(schwab);
-    let mut results = tradestation;
+    const MAX_RESULTS: usize = 20;
+    let query = query.trim().to_uppercase();
+    let mut results: Vec<_> = tradestation
+        .into_iter()
+        .chain(schwab)
+        .filter_map(normalize_symbol_search_result)
+        .collect();
     results.sort_by(|left, right| {
-        let left_exact = !left.symbol.eq_ignore_ascii_case(query);
-        let right_exact = !right.symbol.eq_ignore_ascii_case(query);
-        left_exact
-            .cmp(&right_exact)
+        symbol_search_rank(left, &query)
+            .cmp(&symbol_search_rank(right, &query))
             .then_with(|| left.symbol.cmp(&right.symbol))
+            .then_with(|| left.provider.key().cmp(right.provider.key()))
     });
+    let mut seen = HashSet::new();
+    results.retain(|item| seen.insert((item.provider.clone(), item.symbol.clone())));
+    results.truncate(MAX_RESULTS);
     results
+}
+
+fn normalize_symbol_search_result(mut result: SymbolMeta) -> Option<SymbolMeta> {
+    result.symbol = result.symbol.trim().to_uppercase();
+    if result.symbol.is_empty() {
+        return None;
+    }
+    result.description = result.description.trim().to_owned();
+    result.exchange = result.exchange.trim().to_owned();
+    result.asset_type = result.asset_type.trim().to_uppercase();
+    Some(result)
+}
+
+fn symbol_search_rank(result: &SymbolMeta, query: &str) -> u8 {
+    let symbol = result.symbol.to_uppercase();
+    let description = result.description.to_uppercase();
+    if symbol == query {
+        0
+    } else if symbol.starts_with(query) {
+        1
+    } else if symbol.contains(query) {
+        2
+    } else if description.starts_with(query) {
+        3
+    } else if description.contains(query) {
+        4
+    } else {
+        5
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3625,6 +3674,63 @@ mod stream_tests {
         assert!(results.iter().any(|item| {
             item.provider == MarketDataProvider::Tradestation && item.symbol == "@MES"
         }));
+    }
+
+    #[test]
+    fn combined_search_normalizes_ranks_deduplicates_and_limits_results() {
+        let exact = search_symbol(MarketDataProvider::Schwab, " aapl ", " equity ");
+        let mut description_match = search_symbol(MarketDataProvider::Schwab, "APC", "EQUITY");
+        description_match.description = "Apple supplier".into();
+        let prefix = search_symbol(MarketDataProvider::Schwab, "AAPLX", "EQUITY");
+        let duplicate = search_symbol(MarketDataProvider::Schwab, "AAPLX", "EQUITY");
+        let same_symbol_other_provider =
+            search_symbol(MarketDataProvider::Tradestation, "AAPLX", "FUTURE");
+        let extras = (0..24)
+            .map(|index| {
+                search_symbol(
+                    MarketDataProvider::Schwab,
+                    &format!("ZZ{index:02}"),
+                    "EQUITY",
+                )
+            })
+            .collect();
+
+        let results = merge_symbol_search_results(
+            vec![same_symbol_other_provider],
+            [vec![description_match, prefix, duplicate, exact], extras].concat(),
+            "aapl",
+        );
+
+        assert_eq!(results.len(), 20);
+        assert_eq!(results[0].symbol, "AAPL");
+        assert_eq!(results[0].asset_type, "EQUITY");
+        assert_eq!(results[1].symbol, "AAPLX");
+        assert_eq!(results[2].symbol, "AAPLX");
+        assert_ne!(results[1].provider, results[2].provider);
+        assert_eq!(results[3].symbol, "APC");
+    }
+
+    #[test]
+    fn combined_search_uses_partial_results_and_errors_only_when_both_providers_fail() {
+        let future = search_symbol(MarketDataProvider::Tradestation, "MES", "FUTURE");
+        let partial = combine_symbol_search_responses(
+            Ok(vec![future]),
+            Err(AppError::AuthenticationRequired),
+            "MES",
+        )
+        .unwrap();
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].symbol, "MES");
+
+        let unavailable = combine_symbol_search_responses(
+            Err(AppError::Api("TradeStation offline".into())),
+            Err(AppError::AuthenticationRequired),
+            "MES",
+        )
+        .unwrap_err();
+        assert!(unavailable
+            .to_string()
+            .contains("Symbol search unavailable"));
     }
 
     #[test]

@@ -192,10 +192,7 @@ impl Schwab {
     }
 
     pub async fn search_symbols(&self, query: &str) -> Result<Vec<SymbolMeta>, AppError> {
-        let mut url = url::Url::parse(&format!("{MARKET_URL}/instruments"))?;
-        url.query_pairs_mut()
-            .append_pair("symbol", query.trim())
-            .append_pair("projection", "symbol-search");
+        let url = instrument_search_url(query)?;
         let body = self.get_json(url.as_str()).await?;
         let mut result: Vec<_> = body
             .get("instruments")
@@ -392,6 +389,14 @@ impl Schwab {
         bars.dedup_by_key(|bar| bar.time);
         Ok(bars)
     }
+}
+
+fn instrument_search_url(query: &str) -> Result<url::Url, AppError> {
+    let mut url = url::Url::parse(&format!("{MARKET_URL}/instruments"))?;
+    url.query_pairs_mut()
+        .append_pair("symbol", query.trim())
+        .append_pair("projection", "search");
+    Ok(url)
 }
 
 pub fn aggregate_bars(source: &[Bar], timeframe: &str) -> Vec<Bar> {
@@ -897,6 +902,21 @@ fn truncate(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instrument_search_matches_symbols_and_descriptions() {
+        let url = instrument_search_url(" Apple ").unwrap();
+        assert_eq!(url.path(), "/marketdata/v1/instruments");
+        let query = url.query_pairs().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            query.get("symbol").map(|value| value.as_ref()),
+            Some("Apple")
+        );
+        assert_eq!(
+            query.get("projection").map(|value| value.as_ref()),
+            Some("search")
+        );
+    }
 
     #[test]
     fn parses_and_sorts_option_expirations() {
