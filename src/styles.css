@@ -314,10 +314,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .risk-sizing-control input { padding-left: 23px; }
 .risk-sizing-control output { max-width: 122px; color: #8f9bab; font: 550 8px/1.35 DM Mono, monospace; text-align: right; }
 .risk-sizing-control output.insufficient, .risk-sizing-control output.over-risk { color: var(--amber); }
-.take-profit-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
-.stop-loss-control { display: grid; grid-template-columns: minmax(0, 1fr) 62px; gap: 6px; }
-.stop-loss-control button { height: 36px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 5px; color: #8d98a8; background: #151b23; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
-.stop-loss-control button:not(:disabled):hover { color: var(--cyan); border-color: rgba(55,213,232,.52); background: rgba(55,213,232,.08); }
+.take-profit-control, .stop-loss-control { display: grid; grid-template-columns: minmax(0, 1fr) 22px 62px; gap: 5px; }
+.exit-price-clear { width: 22px; height: 36px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #667386; background: transparent; cursor: pointer; opacity: 0; visibility: hidden; transition: color .15s, background .15s, opacity .15s; }
+.exit-price-clear.visible { opacity: 1; visibility: visible; }
+.exit-price-clear.visible:hover { color: #dce3eb; background: #1a222d; }
+.exit-price-clear.visible:active { color: var(--cyan); }
+.exit-price-clear:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1px; }
+.stop-loss-control > button:not(.exit-price-clear) { height: 36px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 5px; color: #8d98a8; background: #151b23; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
+.stop-loss-control > button:not(.exit-price-clear):not(:disabled):hover { color: var(--cyan); border-color: rgba(55,213,232,.52); background: rgba(55,213,232,.08); }
 .r-selector { position: relative; min-width: 0; }
 .r-selector-button { width: 100%; height: 36px; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 0 7px; border: 1px solid #2a3442; border-radius: 5px; color: #8d98a8; background: #151b23; font: 650 9px DM Mono, monospace; cursor: pointer; transition: color .15s, border-color .15s, background .15s; }
 .r-selector-button:not(:disabled):hover, .r-selector-button.active { color: var(--cyan); border-color: rgba(55,213,232,.52); background: rgba(55,213,232,.08); }
