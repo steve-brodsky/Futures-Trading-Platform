@@ -9,7 +9,13 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::{models::{OptionContract, Quote}, schwab, schwab::Schwab, AppError};
+use crate::{
+    audit::AuditRecord,
+    models::{OptionContract, Quote},
+    schwab,
+    schwab::Schwab,
+    AppError,
+};
 
 const EQUITY_FIELDS: &str = "0,1,2,3,8,12,18,32,33,34,35,42";
 const CHART_FIELDS: &str = "0,1,2,3,4,5,6,7,8";
@@ -104,8 +110,9 @@ impl SchwabStreamer {
         let next = normalize_symbols(symbols);
         let mut desired = self.inner.desired.write().await;
         if desired.charts != next {
-            desired.charts = next;
+            desired.charts = next.clone();
             drop(desired);
+            record_subscription(&self.inner, "charts", &next);
             self.ensure_running().await;
             self.inner.changed.notify_one();
         }
@@ -115,8 +122,9 @@ impl SchwabStreamer {
         let next = normalize_symbols(symbols);
         let mut desired = self.inner.desired.write().await;
         if desired.quotes != next {
-            desired.quotes = next;
+            desired.quotes = next.clone();
             drop(desired);
+            record_subscription(&self.inner, "quotes", &next);
             self.ensure_running().await;
             self.inner.changed.notify_one();
         }
@@ -126,8 +134,9 @@ impl SchwabStreamer {
         let next = normalize_symbols(symbols);
         let mut desired = self.inner.desired.write().await;
         if desired.options != next {
-            desired.options = next;
+            desired.options = next.clone();
             drop(desired);
+            record_subscription(&self.inner, "options", &next);
             self.ensure_running().await;
             self.inner.changed.notify_one();
         }
@@ -158,11 +167,54 @@ impl SchwabStreamer {
     }
 }
 
+fn record_subscription(inner: &Inner, kind: &str, symbols: &BTreeSet<String>) {
+    if let Some(audit) = inner.api.audit() {
+        let mut record = AuditRecord::completed(
+            "stream",
+            "schwab",
+            "update-subscription",
+            "success",
+            format!(
+                "Schwab {kind} subscription now tracks {} symbol{}",
+                symbols.len(),
+                if symbols.len() == 1 { "" } else { "s" }
+            ),
+        );
+        record.entity_type = Some("stream-subscription".into());
+        record.entity_id = Some(kind.into());
+        record.record_count = Some(symbols.len() as i64);
+        record.changes = Some(json!({"symbols": symbols}));
+        audit.record(record);
+    }
+}
+
 async fn publish_state(inner: &Inner, state: &str, message: Option<String>) {
+    let previous = inner.connection_state.read().await.clone();
     *inner.connection_state.write().await = SchwabConnectionState {
         state: state.into(),
         message: message.clone(),
     };
+    if previous.state != state || previous.message != message {
+        if let Some(audit) = inner.api.audit() {
+            let mut record = AuditRecord::completed(
+                "stream",
+                "schwab",
+                "stream-state",
+                if state == "reconnecting" || state == "disconnected" && message.is_some() {
+                    "warning"
+                } else {
+                    "success"
+                },
+                message
+                    .clone()
+                    .unwrap_or_else(|| format!("Schwab stream is {state}")),
+            );
+            record.entity_type = Some("market-stream".into());
+            record.entity_id = Some("schwab-shared".into());
+            record.changes = Some(json!({"before": previous.state, "after": state}));
+            audit.record(record);
+        }
+    }
     let event = SchwabStreamEvent::State {
         state: state.into(),
         message,
@@ -232,9 +284,32 @@ async fn run(inner: Arc<Inner>) {
 async fn connect_once(inner: Arc<Inner>) -> Result<(), AppError> {
     let info = inner.api.streamer_info().await?;
     let token = inner.api.access_token(false).await?;
-    let (socket, _) = connect_async(&info.streamer_socket_url)
-        .await
-        .map_err(|error| AppError::Api(format!("Schwab Streamer connection failed: {error}")))?;
+    let span = inner.api.audit().map(|audit| {
+        audit.begin_api(
+            "schwab",
+            "stream-connect",
+            "WEBSOCKET",
+            &info.streamer_socket_url,
+            None,
+            Some(uuid::Uuid::new_v4().to_string()),
+        )
+    });
+    let (socket, _) = match connect_async(&info.streamer_socket_url).await {
+        Ok(socket) => {
+            if let Some(span) = span {
+                span.success(Some(101), None);
+            }
+            socket
+        }
+        Err(error) => {
+            if let Some(span) = span {
+                span.error(None, error.to_string());
+            }
+            return Err(AppError::Api(format!(
+                "Schwab Streamer connection failed: {error}"
+            )));
+        }
+    };
     let (mut write, mut read) = socket.split();
     let mut request_id = 1_u64;
     write
@@ -287,9 +362,36 @@ async fn connect_once(inner: Arc<Inner>) -> Result<(), AppError> {
     tokio::pin!(timeout);
     let mut quote_state = HashMap::new();
     let mut option_state = HashMap::new();
+    let mut counts = StreamCounts::default();
+    let mut summary_tick = tokio::time::interval(Duration::from_secs(60));
+    summary_tick.tick().await;
     loop {
         tokio::select! {
             _ = &mut timeout => return Err(AppError::Api("Schwab Streamer heartbeat timed out".into())),
+            _ = summary_tick.tick() => {
+                let total = counts.quotes + counts.charts + counts.options;
+                if total > 0 {
+                    if let Some(audit) = inner.api.audit() {
+                        let mut record = AuditRecord::completed(
+                            "stream",
+                            "schwab",
+                            "market-update-batch",
+                            "success",
+                            format!("Received {total} Schwab market updates"),
+                        );
+                        record.entity_type = Some("market-update-batch".into());
+                        record.entity_id = Some("schwab-shared".into());
+                        record.record_count = Some(total as i64);
+                        record.response = Some(json!({
+                            "quotes": counts.quotes,
+                            "bars": counts.charts,
+                            "options": counts.options,
+                        }));
+                        audit.record(record);
+                    }
+                    counts = StreamCounts::default();
+                }
+            }
             _ = inner.changed.notified() => {
                 let desired = inner.desired.read().await.clone();
                 update_subscriptions(&mut write, &info, &mut request_id, &subscribed, &desired).await?;
@@ -300,7 +402,7 @@ async fn connect_once(inner: Arc<Inner>) -> Result<(), AppError> {
                     .map_err(|error| AppError::Api(format!("Schwab Streamer error: {error}")))?;
                 timeout.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(60));
                 match message {
-                    Message::Text(text) => process_message(&inner, text.as_ref(), &mut quote_state, &mut option_state)?,
+                    Message::Text(text) => process_message(&inner, text.as_ref(), &mut quote_state, &mut option_state, &mut counts)?,
                     Message::Ping(payload) => write.send(Message::Pong(payload)).await.map_err(|error| AppError::Api(error.to_string()))?,
                     Message::Close(_) => return Err(AppError::Api("Schwab Streamer closed".into())),
                     _ => {}
@@ -308,6 +410,13 @@ async fn connect_once(inner: Arc<Inner>) -> Result<(), AppError> {
             }
         }
     }
+}
+
+#[derive(Default)]
+struct StreamCounts {
+    quotes: usize,
+    charts: usize,
+    options: usize,
 }
 
 async fn update_subscriptions<S>(
@@ -345,10 +454,7 @@ where
     if previous_equities != next_equities {
         *request_id += 1;
         let (command, keys) = if next_equities.is_empty() {
-            (
-                "UNSUBS",
-                previous_equities.into_iter().collect::<Vec<_>>(),
-            )
+            ("UNSUBS", previous_equities.into_iter().collect::<Vec<_>>())
         } else {
             ("SUBS", next_equities.into_iter().collect::<Vec<_>>())
         };
@@ -380,7 +486,9 @@ where
     }
     if !requests.is_empty() {
         write
-            .send(Message::Text(json!({"requests": requests}).to_string().into()))
+            .send(Message::Text(
+                json!({"requests": requests}).to_string().into(),
+            ))
             .await
             .map_err(|error| AppError::Api(error.to_string()))?;
     }
@@ -392,6 +500,7 @@ fn process_message(
     text: &str,
     quote_state: &mut HashMap<String, Value>,
     option_state: &mut HashMap<String, Value>,
+    counts: &mut StreamCounts,
 ) -> Result<(), AppError> {
     let value: Value = serde_json::from_str(text)?;
     for response in value
@@ -403,13 +512,23 @@ fn process_message(
         if response.get("service").and_then(Value::as_str) != Some("LEVELONE_OPTIONS") {
             continue;
         }
-        let code = response.pointer("/content/code").and_then(Value::as_i64).unwrap_or(-1);
+        let code = response
+            .pointer("/content/code")
+            .and_then(Value::as_i64)
+            .unwrap_or(-1);
         let message = response
             .pointer("/content/msg")
             .and_then(Value::as_str)
             .map(str::to_string);
         let _ = inner.events.send(SchwabStreamEvent::OptionState {
-            state: if code == 0 { "streaming" } else if code == 19 { "rest-only" } else { "error" }.into(),
+            state: if code == 0 {
+                "streaming"
+            } else if code == 19 {
+                "rest-only"
+            } else {
+                "error"
+            }
+            .into(),
             message,
         });
     }
@@ -432,6 +551,7 @@ fn process_message(
             match service {
                 "LEVELONE_EQUITIES" => {
                     if let Some(update) = merge_sparse_quote(quote_state, content) {
+                        counts.quotes += 1;
                         let _ = inner.events.send(SchwabStreamEvent::Quote(update.quote));
                         if let Some((price, cumulative_volume, time)) = update.tick {
                             let _ = inner.chart_events.send(SchwabStreamEvent::EquityTick {
@@ -452,6 +572,7 @@ fn process_message(
                     if let (Some(symbol), Some(bar)) =
                         (symbol, schwab::chart_bar_from_value(content))
                     {
+                        counts.charts += 1;
                         let _ = inner
                             .chart_events
                             .send(SchwabStreamEvent::Chart { symbol, bar });
@@ -459,6 +580,7 @@ fn process_message(
                 }
                 "LEVELONE_OPTIONS" => {
                     if let Some(option) = merge_sparse_option(option_state, content) {
+                        counts.options += 1;
                         let _ = inner.events.send(SchwabStreamEvent::Option(option));
                     }
                 }
@@ -517,10 +639,7 @@ fn merge_sparse_quote(
     let tick = trade_changed
         .then(|| {
             let price = fields.get("3")?.as_f64()?;
-            let cumulative_volume = fields
-                .get("8")
-                .and_then(Value::as_f64)
-                .unwrap_or_default();
+            let cumulative_volume = fields.get("8").and_then(Value::as_f64).unwrap_or_default();
             let time_ms = fields
                 .get("35")
                 .or_else(|| fields.get("34"))
@@ -595,7 +714,10 @@ fn request_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{pin::Pin, task::{Context, Poll}};
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
 
     #[derive(Default)]
     struct CaptureSink(Vec<Message>);
@@ -603,7 +725,10 @@ mod tests {
     impl futures_util::Sink<Message> for CaptureSink {
         type Error = std::convert::Infallible;
 
-        fn poll_ready(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
 
@@ -612,11 +737,17 @@ mod tests {
             Ok(())
         }
 
-        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
 
-        fn poll_close(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
     }
@@ -633,7 +764,8 @@ mod tests {
 
     #[test]
     fn desired_symbols_are_uppercase_and_deduplicated() {
-        let symbols = normalize_symbols([" aapl ".into(), "AAPL".into(), "spy".into(), "$vix".into()]);
+        let symbols =
+            normalize_symbols([" aapl ".into(), "AAPL".into(), "spy".into(), "$vix".into()]);
         assert_eq!(
             symbols.into_iter().collect::<Vec<_>>(),
             vec!["$VIX", "AAPL", "SPY"]
@@ -676,25 +808,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sink.0.len(), 1);
-        let Message::Text(text) = &sink.0[0] else { panic!("expected text subscription request") };
+        let Message::Text(text) = &sink.0[0] else {
+            panic!("expected text subscription request")
+        };
         let payload: Value = serde_json::from_str(text.as_ref()).unwrap();
         let requests = payload["requests"].as_array().unwrap();
         assert_eq!(requests.len(), 3);
-        let equities = requests.iter().find(|item| item["service"] == "LEVELONE_EQUITIES").unwrap();
+        let equities = requests
+            .iter()
+            .find(|item| item["service"] == "LEVELONE_EQUITIES")
+            .unwrap();
         assert_eq!(equities["parameters"]["keys"], "$VIX,AAPL,SPY");
-        assert!(equities["parameters"]["fields"].as_str().unwrap().split(',').any(|field| field == "35"));
+        assert!(equities["parameters"]["fields"]
+            .as_str()
+            .unwrap()
+            .split(',')
+            .any(|field| field == "35"));
     }
 
     #[test]
     fn sparse_option_updates_merge_into_a_complete_contract() {
         let mut state = HashMap::new();
-        assert!(merge_sparse_option(&mut state, &json!({
-            "key":"AAPL  260821C00200000","12":2026,"23":8,"26":21,"20":200.0,
-            "21":"C","22":"AAPL","13":100.0,"29":0.02,"9":1200,"35":205.0
-        })).is_some());
-        let option = merge_sparse_option(&mut state, &json!({
-            "key":"AAPL  260821C00200000","29":0.025,"38":123456
-        })).unwrap();
+        assert!(merge_sparse_option(
+            &mut state,
+            &json!({
+                "key":"AAPL  260821C00200000","12":2026,"23":8,"26":21,"20":200.0,
+                "21":"C","22":"AAPL","13":100.0,"29":0.02,"9":1200,"35":205.0
+            })
+        )
+        .is_some());
+        let option = merge_sparse_option(
+            &mut state,
+            &json!({
+                "key":"AAPL  260821C00200000","29":0.025,"38":123456
+            }),
+        )
+        .unwrap();
         assert_eq!(option.underlying, "AAPL");
         assert_eq!(option.gamma, 0.025);
         assert_eq!(option.open_interest, 1200.0);
@@ -714,11 +863,20 @@ mod tests {
             ]}"#,
             &mut HashMap::new(),
             &mut HashMap::new(),
+            &mut StreamCounts::default(),
         )
         .unwrap();
-        assert!(matches!(general.try_recv(), Ok(SchwabStreamEvent::Option(_))));
-        assert!(matches!(charts.try_recv(), Ok(SchwabStreamEvent::Chart { symbol, .. }) if symbol == "AAPL"));
-        assert!(matches!(charts.try_recv(), Err(broadcast::error::TryRecvError::Empty)));
+        assert!(matches!(
+            general.try_recv(),
+            Ok(SchwabStreamEvent::Option(_))
+        ));
+        assert!(
+            matches!(charts.try_recv(), Ok(SchwabStreamEvent::Chart { symbol, .. }) if symbol == "AAPL")
+        );
+        assert!(matches!(
+            charts.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
@@ -730,6 +888,7 @@ mod tests {
             r#"{"response":[{"service":"LEVELONE_OPTIONS","command":"SUBS","content":{"code":19,"msg":"subscription limit exceeded"}}]}"#,
             &mut HashMap::new(),
             &mut HashMap::new(),
+            &mut StreamCounts::default(),
         )
         .unwrap();
         match receiver.recv().await.unwrap() {
@@ -784,6 +943,7 @@ mod tests {
             r#"{"data":[{"service":"LEVELONE_EQUITIES","content":[{"key":"SPY","3":748.1,"8":1000000,"12":745.0,"35":1784762475000}]}]}"#,
             &mut HashMap::new(),
             &mut HashMap::new(),
+            &mut StreamCounts::default(),
         )
         .unwrap();
         assert!(matches!(

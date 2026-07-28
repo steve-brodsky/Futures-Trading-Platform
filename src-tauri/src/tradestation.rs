@@ -1,4 +1,4 @@
-use crate::{models::*, storage, AppError};
+use crate::{audit::AuditService, models::*, storage, AppError};
 use chrono::{DateTime, Utc};
 use reqwest::{header::HeaderMap, Method, StatusCode};
 use serde_json::{json, Value};
@@ -402,6 +402,7 @@ pub struct TradeStation {
     inflight_gets: Arc<Mutex<HashMap<String, Vec<oneshot::Sender<Result<Value, String>>>>>>,
     brokerage_cache: Arc<Mutex<BrokerageCache>>,
     brokerage_revision: watch::Sender<u64>,
+    audit: Option<AuditService>,
 }
 
 #[derive(Default)]
@@ -442,7 +443,13 @@ impl TradeStation {
             inflight_gets: Arc::new(Mutex::new(HashMap::new())),
             brokerage_cache: Arc::new(Mutex::new(BrokerageCache::default())),
             brokerage_revision,
+            audit: None,
         })
+    }
+
+    pub fn with_audit(mut self, audit: AuditService) -> Self {
+        self.audit = Some(audit);
+        self
     }
 
     pub async fn set_environment(&self, environment: TradingEnvironment) {
@@ -678,25 +685,57 @@ impl TradeStation {
             .await?;
         let token = self.token().await?;
         let url = format!("{}{}", self.base().await, path);
-        let response = self
-            .stream_client
-            .get(url)
-            .bearer_auth(token)
-            .send()
-            .await?;
+        let span = self.audit.as_ref().map(|audit| {
+            audit.begin_api(
+                "tradestation",
+                "open-stream",
+                "GET",
+                &url,
+                None,
+                Some(uuid::Uuid::new_v4().to_string()),
+            )
+        });
+        let response = match self.stream_client.get(&url).bearer_auth(token).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(span) = span {
+                    span.error(None, error.to_string());
+                }
+                return Err(error.into());
+            }
+        };
         self.quota.observe(resource, response.headers()).await;
         if response.status() == StatusCode::UNAUTHORIZED {
+            if let Some(span) = span {
+                span.error(Some(response.status().as_u16()), "Authentication required");
+            }
             self.clear_token().await;
             return Err(AppError::AuthenticationRequired);
         }
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            if let Some(span) = span {
+                span.warning(
+                    Some(response.status().as_u16()),
+                    None,
+                    "TradeStation rate limit",
+                );
+            }
             return Err(rate_limit_error(response.headers(), resource));
         }
         if !response.status().is_success() {
+            if let Some(span) = span {
+                span.error(
+                    Some(response.status().as_u16()),
+                    format!("TradeStation stream returned HTTP {}", response.status()),
+                );
+            }
             return Err(AppError::Api(format!(
                 "TradeStation stream returned HTTP {}",
                 response.status()
             )));
+        }
+        if let Some(span) = span {
+            span.success(Some(response.status().as_u16()), None);
         }
         Ok(response)
     }
@@ -768,6 +807,7 @@ impl TradeStation {
             .then_some(Duration::from_secs(2));
         let retryable = method == Method::GET;
         let url = format!("{}{}", self.base().await, path);
+        let correlation_id = uuid::Uuid::new_v4().to_string();
         let mut rate_retries = 0u8;
         let mut auth_retry = false;
         loop {
@@ -783,9 +823,34 @@ impl TradeStation {
             if let Some(value) = body.as_ref() {
                 request = request.json(value);
             }
-            let response = request.send().await?;
+            let span = self.audit.as_ref().map(|audit| {
+                audit.begin_api(
+                    "tradestation",
+                    resource,
+                    method.as_str(),
+                    &url,
+                    body.clone(),
+                    Some(correlation_id.clone()),
+                )
+            });
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(span) = span {
+                        span.error(None, error.to_string());
+                    }
+                    return Err(error.into());
+                }
+            };
             self.quota.observe(resource, response.headers()).await;
             if response.status() == StatusCode::UNAUTHORIZED && !auth_retry {
+                if let Some(span) = span {
+                    span.warning(
+                        Some(response.status().as_u16()),
+                        None,
+                        "Access token expired; refreshing",
+                    );
+                }
                 auth_retry = true;
                 self.clear_token().await;
                 self.refresh().await?;
@@ -793,6 +858,9 @@ impl TradeStation {
             }
             if response.status() == StatusCode::TOO_MANY_REQUESTS {
                 let error = rate_limit_error(response.headers(), resource);
+                if let Some(span) = span {
+                    span.warning(Some(response.status().as_u16()), None, error.to_string());
+                }
                 if retryable && priority != RequestPriority::Trading && rate_retries < 2 {
                     rate_retries += 1;
                     let delay = rate_limit_delay(&error);
@@ -818,13 +886,20 @@ impl TradeStation {
                             .map(str::to_owned)
                     })
                     .unwrap_or_else(|| format!("TradeStation returned HTTP {status}"));
+                if let Some(span) = span {
+                    span.error(Some(status.as_u16()), safe_message.clone());
+                }
                 return Err(AppError::Api(safe_message));
             }
-            return if text.trim().is_empty() {
-                Ok(json!({}))
+            let value = if text.trim().is_empty() {
+                json!({})
             } else {
-                Ok(serde_json::from_str(&text)?)
+                serde_json::from_str(&text)?
             };
+            if let Some(span) = span {
+                span.success(Some(status.as_u16()), Some(value.clone()));
+            }
+            return Ok(value);
         }
     }
 

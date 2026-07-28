@@ -1,3 +1,4 @@
+mod audit;
 mod journal;
 mod models;
 mod schwab;
@@ -63,6 +64,7 @@ impl serde::Serialize for AppError {
 }
 
 pub struct NativeState {
+    audit: audit::AuditService,
     api: TradeStation,
     schwab: Schwab,
     schwab_streamer: SchwabStreamer,
@@ -171,10 +173,26 @@ async fn save_schwab_credentials(
     client_secret: String,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
-    if storage::save_schwab_client(&client_id, &client_secret)? {
+    let changed = storage::save_schwab_client(&client_id, &client_secret)?;
+    if changed {
         state.schwab.clear_access_token().await;
         state.schwab_streamer.stop().await;
     }
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "credential-vault",
+        "save-schwab-credentials",
+        "success",
+        if changed {
+            "Schwab credentials were updated"
+        } else {
+            "Schwab credentials were unchanged"
+        },
+    );
+    record.entity_type = Some("credential-state".into());
+    record.entity_id = Some("schwab".into());
+    record.changes = Some(serde_json::json!({"configured": true, "changed": changed}));
+    state.audit.record(record);
     Ok(())
 }
 
@@ -212,7 +230,11 @@ async fn logout_schwab(state: State<'_, NativeState>) -> Result<(), AppError> {
 }
 
 #[tauri::command(rename_all = "camelCase")]
-async fn save_credentials(client_id: String, client_secret: String) -> Result<(), AppError> {
+async fn save_credentials(
+    client_id: String,
+    client_secret: String,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
     if client_id.trim().is_empty() || client_secret.trim().is_empty() {
         return Err(AppError::Validation(
             "Client ID and secret are required".into(),
@@ -220,6 +242,17 @@ async fn save_credentials(client_id: String, client_secret: String) -> Result<()
     }
     storage::set_secret("client_id", client_id.trim())?;
     storage::set_secret("client_secret", client_secret.trim())?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "credential-vault",
+        "save-tradestation-credentials",
+        "success",
+        "TradeStation credentials were updated",
+    );
+    record.entity_type = Some("credential-state".into());
+    record.entity_id = Some("tradestation".into());
+    record.changes = Some(serde_json::json!({"configured": true}));
+    state.audit.record(record);
     Ok(())
 }
 
@@ -276,6 +309,17 @@ async fn begin_login(app: tauri::AppHandle, state: State<'_, NativeState>) -> Re
 async fn logout(state: State<'_, NativeState>) -> Result<(), AppError> {
     state.api.clear_token().await;
     storage::delete_secret("refresh_token")?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "credential-vault",
+        "logout-tradestation",
+        "success",
+        "TradeStation session credentials were cleared",
+    );
+    record.entity_type = Some("credential-state".into());
+    record.entity_id = Some("tradestation".into());
+    record.changes = Some(serde_json::json!({"authenticated": false}));
+    state.audit.record(record);
     Ok(())
 }
 
@@ -284,7 +328,21 @@ async fn set_environment(
     environment: TradingEnvironment,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    let environment_key = environment.key().to_string();
     state.api.set_environment(environment).await;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "workspace",
+        "set-trading-environment",
+        "success",
+        format!(
+            "Trading environment changed to {}",
+            environment_key.to_uppercase()
+        ),
+    );
+    record.entity_type = Some("trading-environment".into());
+    record.entity_id = Some(environment_key);
+    state.audit.record(record);
     Ok(())
 }
 
@@ -948,10 +1006,7 @@ async fn start_option_stream(
     }
     if let Some(previous) = current.insert(
         subscription_id,
-        OptionStreamRegistration {
-            contracts,
-            task,
-        },
+        OptionStreamRegistration { contracts, task },
     ) {
         previous.task.abort();
     }
@@ -1433,6 +1488,17 @@ async fn place_order(
     match state.api.place_order(&order).await {
         Ok(update) => {
             journal::complete_entry_intent(&state.db_path, &intent, &update)?;
+            let mut record = audit::AuditRecord::completed(
+                "record",
+                "journal",
+                "place-order",
+                "success",
+                format!("Order {} was accepted and journaled", update.id),
+            );
+            record.entity_type = Some("order".into());
+            record.entity_id = Some(update.id.clone());
+            record.changes = Some(serde_json::json!({"draft": order, "order": update}));
+            state.audit.record(record);
             let _ = app.emit(
                 "journal-updated",
                 serde_json::json!({"reason":"entry-intent"}),
@@ -1442,6 +1508,21 @@ async fn place_order(
         }
         Err(error) => {
             let _ = journal::fail_entry_intent(&state.db_path, &intent, &error.to_string());
+            let mut record = audit::AuditRecord::completed(
+                "record",
+                "journal",
+                "place-order",
+                "error",
+                format!(
+                    "Order for {} was rejected and the journal intent was marked failed",
+                    order.symbol
+                ),
+            );
+            record.entity_type = Some("order-intent".into());
+            record.entity_id = Some(intent.clone());
+            record.changes = Some(serde_json::json!({"draft": order, "status": "failed"}));
+            record.error = Some(error.to_string());
+            state.audit.record(record);
             let _ = app.emit(
                 "journal-updated",
                 serde_json::json!({"reason":"entry-rejected"}),
@@ -1499,6 +1580,18 @@ async fn replace_order(
                 "confirmed",
                 None,
             )?;
+            let mut record = audit::AuditRecord::completed(
+                "record",
+                "journal",
+                "replace-order",
+                "success",
+                format!("Order {} was replaced", update.id),
+            );
+            record.entity_type = Some("order".into());
+            record.entity_id = Some(update.id.clone());
+            record.changes =
+                Some(serde_json::json!({"before": {"price": old_price}, "after": update}));
+            state.audit.record(record);
             let _ = app.emit(
                 "journal-updated",
                 serde_json::json!({"reason":"protective-order-moved"}),
@@ -1519,6 +1612,20 @@ async fn replace_order(
                     Some(&error.to_string()),
                 );
             }
+            let mut record = audit::AuditRecord::completed(
+                "record",
+                "journal",
+                "replace-order",
+                "error",
+                format!("Order {order_id} replacement failed"),
+            );
+            record.entity_type = Some("order".into());
+            record.entity_id = Some(order_id.clone());
+            record.changes = Some(
+                serde_json::json!({"before": {"price": old_price}, "requested": {"price": new_price}}),
+            );
+            record.error = Some(error.to_string());
+            state.audit.record(record);
             let _ = app.emit(
                 "journal-updated",
                 serde_json::json!({"reason":"protective-order-move-failed"}),
@@ -1573,6 +1680,24 @@ async fn close_position(
             value.error.as_deref(),
         );
     }
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "journal",
+        "close-position",
+        if result.is_ok() { "success" } else { "error" },
+        if result.is_ok() {
+            format!("Position {position_id} close was submitted")
+        } else {
+            format!("Position {position_id} close failed")
+        },
+    );
+    record.entity_type = Some("position".into());
+    record.entity_id = Some(position_id);
+    match result.as_ref() {
+        Ok(value) => record.changes = Some(serde_json::to_value(value)?),
+        Err(error) => record.error = Some(error.to_string()),
+    }
+    state.audit.record(record);
     let _ = app.emit(
         "journal-updated",
         serde_json::json!({"reason":"close-position"}),
@@ -1598,6 +1723,17 @@ async fn cancel_order(
                 "confirmed",
                 None,
             )?;
+            let mut record = audit::AuditRecord::completed(
+                "record",
+                "journal",
+                "cancel-order",
+                "success",
+                format!("Order {order_id} cancellation was confirmed"),
+            );
+            record.entity_type = Some("order".into());
+            record.entity_id = Some(order_id.clone());
+            record.changes = Some(serde_json::json!({"status": "cancelled"}));
+            state.audit.record(record);
             let _ = app.emit(
                 "journal-updated",
                 serde_json::json!({"reason":"order-cancelled"}),
@@ -1613,6 +1749,17 @@ async fn cancel_order(
                 "failed",
                 Some(&error.to_string()),
             );
+            let mut record = audit::AuditRecord::completed(
+                "record",
+                "journal",
+                "cancel-order",
+                "error",
+                format!("Order {order_id} cancellation failed"),
+            );
+            record.entity_type = Some("order".into());
+            record.entity_id = Some(order_id.clone());
+            record.error = Some(error.to_string());
+            state.audit.record(record);
             let _ = app.emit(
                 "journal-updated",
                 serde_json::json!({"reason":"order-cancel-failed"}),
@@ -1634,7 +1781,88 @@ fn save_workspace(
     cloud_profile: Option<Value>,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
-    storage::save_workspace(&state.db_path, &workspace, cloud_profile.as_ref())
+    let previous = storage::load_workspace(&state.db_path)?;
+    storage::save_workspace(&state.db_path, &workspace, cloud_profile.as_ref())?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "sqlite",
+        "save-workspace",
+        "success",
+        "Workspace and local preference records were saved",
+    );
+    record.entity_type = Some("workspace".into());
+    record.entity_id = Some("primary".into());
+    record.changes = Some(serde_json::json!({"before": previous, "after": workspace}));
+    state.audit.record(record);
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_audit_events(
+    filters: audit::AuditFilters,
+    cursor: Option<String>,
+    limit: Option<usize>,
+    state: State<'_, NativeState>,
+) -> Result<audit::AuditPage, AppError> {
+    audit::query(
+        &state.db_path,
+        &filters,
+        cursor.as_deref(),
+        limit.unwrap_or(100),
+        state.audit.health(),
+    )
+}
+
+#[tauri::command]
+fn get_audit_health(state: State<'_, NativeState>) -> audit::AuditHealth {
+    state.audit.health()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn export_audit_events(
+    filters: audit::AuditFilters,
+    state: State<'_, NativeState>,
+) -> Result<String, AppError> {
+    audit::export_json(&state.db_path, &filters, state.audit.health())
+}
+
+#[tauri::command]
+fn record_client_audit(event: Value, state: State<'_, NativeState>) {
+    let operation = event
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let status = event
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("success");
+    let category = event
+        .get("category")
+        .and_then(Value::as_str)
+        .unwrap_or("api");
+    let mut record = audit::AuditRecord::completed(
+        category,
+        "app-bridge",
+        operation,
+        status,
+        format!(
+            "{} {}",
+            operation,
+            if status == "error" {
+                "failed"
+            } else {
+                "completed"
+            }
+        ),
+    );
+    record.duration_ms = event.get("durationMs").and_then(Value::as_i64);
+    record.request = event.get("request").cloned();
+    record.response = event.get("response").cloned();
+    record.error = event
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    state.audit.record(record);
 }
 
 #[tauri::command]
@@ -1650,7 +1878,35 @@ async fn refresh_trading_today(
     date: String,
     state: State<'_, NativeState>,
 ) -> Result<trading_today::TradingTodaySnapshot, AppError> {
-    trading_today::refresh(&state.db_path, &date).await
+    let span = state.audit.begin_api(
+        "trading-economics",
+        "refresh-calendar",
+        "GET",
+        trading_today::source_url("calendar")?,
+        Some(serde_json::json!({"date": date})),
+        Some(uuid::Uuid::new_v4().to_string()),
+    );
+    match trading_today::refresh(&state.db_path, &date).await {
+        Ok(snapshot) => {
+            span.success(Some(200), Some(serde_json::to_value(&snapshot)?));
+            let mut record = audit::AuditRecord::completed(
+                "record",
+                "sqlite",
+                "save-trading-calendar-cache",
+                "success",
+                format!("Cached the Trading Today snapshot for {date}"),
+            );
+            record.entity_type = Some("trading-calendar-cache".into());
+            record.entity_id = Some(date);
+            record.record_count = Some(snapshot.events.len() as i64);
+            state.audit.record(record);
+            Ok(snapshot)
+        }
+        Err(error) => {
+            span.error(None, error.to_string());
+            Err(error)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1909,6 +2165,21 @@ async fn configure_journal(
     state: State<'_, NativeState>,
 ) -> Result<journal::JournalAuthStatus, AppError> {
     let result = journal::configure(&state.db_path, input).await?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "supabase",
+        "configure-journal",
+        "success",
+        "Supabase journal configuration was saved",
+    );
+    record.entity_type = Some("cloud-configuration".into());
+    record.entity_id = Some("journal".into());
+    record.changes = Some(serde_json::json!({
+        "configured": result.configured,
+        "authenticated": result.authenticated,
+        "backfillStart": result.backfill_start,
+    }));
+    state.audit.record(record);
     let _ = app.emit(
         "journal-updated",
         serde_json::json!({"reason":"cloud-configured"}),
@@ -1926,6 +2197,17 @@ async fn disconnect_journal(
         task.abort();
     }
     journal::disconnect(&state.db_path)?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "supabase",
+        "disconnect-journal",
+        "success",
+        "Supabase journal configuration was disconnected",
+    );
+    record.entity_type = Some("cloud-configuration".into());
+    record.entity_id = Some("journal".into());
+    record.changes = Some(serde_json::json!({"configured": false, "authenticated": false}));
+    state.audit.record(record);
     emit_preference_realtime_state(&app, "disabled", None);
     let _ = app.emit(
         "journal-updated",
@@ -1939,7 +2221,19 @@ fn set_journal_backfill_start(
     backfill_start: String,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
-    journal::set_backfill(&state.db_path, &backfill_start)
+    journal::set_backfill(&state.db_path, &backfill_start)?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "journal",
+        "set-backfill-start",
+        "success",
+        format!("Journal backfill start changed to {backfill_start}"),
+    );
+    record.entity_type = Some("journal-setting".into());
+    record.entity_id = Some("backfill-start".into());
+    record.changes = Some(serde_json::json!({"after": backfill_start}));
+    state.audit.record(record);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1948,6 +2242,17 @@ async fn reset_journal_now(
     state: State<'_, NativeState>,
 ) -> Result<journal::JournalAuthStatus, AppError> {
     let status = journal::reset_now(&state.db_path).await?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "journal",
+        "reset-journal",
+        "warning",
+        "Journal history was reset and cloud tombstones were synchronized",
+    );
+    record.entity_type = Some("journal".into());
+    record.entity_id = Some("primary".into());
+    record.changes = Some(serde_json::json!({"reset": true, "configured": status.configured}));
+    state.audit.record(record);
     let _ = app.emit(
         "journal-updated",
         serde_json::json!({"reason":"journal-reset-now"}),
@@ -1962,6 +2267,17 @@ fn set_journal_commission(
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
     journal::set_commission_per_contract_side(&state.db_path, commission_per_contract_side)?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "journal",
+        "set-commission",
+        "success",
+        "Journal commission setting was saved",
+    );
+    record.entity_type = Some("journal-setting".into());
+    record.entity_id = Some("commission-per-contract-side".into());
+    record.changes = Some(serde_json::json!({"after": commission_per_contract_side}));
+    state.audit.record(record);
     let _ = app.emit(
         "journal-updated",
         serde_json::json!({"reason":"commission-updated"}),
@@ -2116,7 +2432,24 @@ async fn ingest_journal_orders(
         &orders,
         &source,
     )
-    .await
+    .await?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "journal",
+        "ingest-orders",
+        "success",
+        format!(
+            "Ingested {} broker order record{}",
+            orders.len(),
+            if orders.len() == 1 { "" } else { "s" }
+        ),
+    );
+    record.entity_type = Some("journal-order-batch".into());
+    record.entity_id = Some(source);
+    record.record_count = Some(orders.len() as i64);
+    record.changes = Some(serde_json::json!({"orders": orders}));
+    state.audit.record(record);
+    Ok(())
 }
 
 async fn complete_journal_cloud_sync(
@@ -2187,6 +2520,10 @@ async fn sync_journal(
 
     complete_journal_cloud_sync(&state.db_path).await?;
 
+    let history_record_count = account_histories
+        .iter()
+        .map(|(_, orders)| orders.len())
+        .sum::<usize>();
     for (account_id, historical_orders) in account_histories {
         journal::repair_misclassified_close_campaigns(
             &state.db_path,
@@ -2208,6 +2545,25 @@ async fn sync_journal(
         "journal-updated",
         serde_json::json!({"reason":"cloud-sync"}),
     );
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "supabase",
+        "sync-journal",
+        if result.state == "error" {
+            "error"
+        } else {
+            "success"
+        },
+        result
+            .message
+            .clone()
+            .unwrap_or_else(|| "Journal cloud synchronization completed".into()),
+    );
+    record.entity_type = Some("journal-sync".into());
+    record.entity_id = Some(environment.key().into());
+    record.record_count = Some(history_record_count as i64);
+    record.response = Some(serde_json::to_value(&result)?);
+    state.audit.record(record);
     Ok(result)
 }
 
@@ -2262,6 +2618,20 @@ async fn save_journal_entry_screenshot(
     state: State<'_, NativeState>,
 ) -> Result<journal::JournalScreenshotMetadata, AppError> {
     let result = journal::save_entry_screenshot(&state.db_path, input).await?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "supabase",
+        "save-entry-screenshot",
+        "success",
+        format!(
+            "Entry screenshot metadata was saved for trade {}",
+            result.trade_id
+        ),
+    );
+    record.entity_type = Some("journal-screenshot".into());
+    record.entity_id = Some(result.trade_id.clone());
+    record.changes = Some(serde_json::to_value(&result)?);
+    state.audit.record(record);
     let _ = app.emit(
         "journal-updated",
         serde_json::json!({"reason":"entry-screenshot"}),
@@ -2286,6 +2656,17 @@ async fn update_journal_annotation(
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
     journal::update_annotation(&state.db_path, &trade_id, &notes, &tags)?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "journal",
+        "update-annotation",
+        "success",
+        format!("Journal annotation was updated for trade {trade_id}"),
+    );
+    record.entity_type = Some("journal-annotation".into());
+    record.entity_id = Some(trade_id.clone());
+    record.changes = Some(serde_json::json!({"notes": notes, "tags": tags}));
+    state.audit.record(record);
     if journal::auth_status(&state.db_path)?.configured {
         schedule_journal_flush(app.clone(), state.db_path.clone());
     }
@@ -2737,9 +3118,7 @@ async fn run_schwab_bar_stream(
                     source_minutes = by_time.into_values().collect();
                     None
                 }
-                Err(error) => Some(format!(
-                    "Schwab current-session history failed: {error}"
-                )),
+                Err(error) => Some(format!("Schwab current-session history failed: {error}")),
             }
         } else {
             Some("Could not determine the current New York trading day".into())
@@ -3560,15 +3939,21 @@ pub fn run() {
         .setup(|app| {
             let app_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_dir)?;
-            let api = TradeStation::new()?;
-            let schwab = Schwab::new()?;
+            let db_path = app_dir.join("northstar.sqlite3");
+            journal::init(&db_path)?;
+            if let Err(error) = audit::init(&db_path) {
+                tracing::error!(%error, "Could not initialize the audit log");
+            }
+            let audit = audit::AuditService::new(db_path.clone(), app.handle().clone());
+            let api = TradeStation::new()?.with_audit(audit.clone());
+            let schwab = Schwab::new()?.with_audit(audit.clone());
             let schwab_streamer = SchwabStreamer::new(schwab.clone());
-            journal::init(&app_dir.join("northstar.sqlite3"))?;
             app.manage(NativeState {
+                audit,
                 api,
                 schwab,
                 schwab_streamer,
-                db_path: app_dir.join("northstar.sqlite3"),
+                db_path,
                 bar_streams: Arc::new(tokio::sync::Mutex::new(BarStreamRegistry::default())),
                 quote_streams: tokio::sync::Mutex::new(HashMap::new()),
                 option_streams: tokio::sync::Mutex::new(HashMap::new()),
@@ -3640,7 +4025,11 @@ pub fn run() {
             save_journal_entry_screenshot,
             get_journal_entry_screenshot,
             update_journal_annotation,
-            ingest_journal_orders
+            ingest_journal_orders,
+            get_audit_events,
+            get_audit_health,
+            export_audit_events,
+            record_client_audit
         ])
         .run(tauri::generate_context!())
         .expect("error while running Northstar Trader");

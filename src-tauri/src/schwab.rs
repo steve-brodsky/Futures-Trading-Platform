@@ -8,7 +8,11 @@ use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    models::{Bar, MarketDataProvider, OptionChainSnapshot, OptionContract, OptionExpiration, Quote, SymbolMeta},
+    audit::AuditService,
+    models::{
+        Bar, MarketDataProvider, OptionChainSnapshot, OptionContract, OptionExpiration, Quote,
+        SymbolMeta,
+    },
     storage, AppError,
 };
 
@@ -52,6 +56,7 @@ pub struct Schwab {
     http: reqwest::Client,
     access_token: Arc<RwLock<Option<AccessToken>>>,
     refresh_lock: Arc<Mutex<()>>,
+    audit: Option<AuditService>,
 }
 
 impl Schwab {
@@ -63,7 +68,17 @@ impl Schwab {
                 .build()?,
             access_token: Arc::new(RwLock::new(None)),
             refresh_lock: Arc::new(Mutex::new(())),
+            audit: None,
         })
+    }
+
+    pub fn with_audit(mut self, audit: AuditService) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    pub fn audit(&self) -> Option<&AuditService> {
+        self.audit.as_ref()
     }
 
     pub async fn clear_access_token(&self) {
@@ -80,7 +95,17 @@ impl Schwab {
     async fn token_request(&self, fields: &[(&str, &str)]) -> Result<TokenPayload, AppError> {
         let (client_id, client_secret) =
             storage::schwab_client()?.ok_or(AppError::AuthenticationRequired)?;
-        let response = self
+        let span = self.audit.as_ref().map(|audit| {
+            audit.begin_api(
+                "schwab",
+                "oauth-token",
+                "POST",
+                TOKEN_URL,
+                Some(serde_json::json!({"grantType": fields.iter().find(|(key, _)| *key == "grant_type").map(|(_, value)| *value)})),
+                Some(uuid::Uuid::new_v4().to_string()),
+            )
+        });
+        let response = match self
             .http
             .post(TOKEN_URL)
             .header(
@@ -93,16 +118,35 @@ impl Schwab {
             .header("Accept", "application/json")
             .form(fields)
             .send()
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(span) = span {
+                    span.error(None, error.to_string());
+                }
+                return Err(error.into());
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
+            if let Some(span) = span {
+                span.error(Some(status.as_u16()), truncate(&detail));
+            }
             return Err(AppError::Api(format!(
                 "Schwab token request failed ({status}): {}",
                 truncate(&detail)
             )));
         }
-        Ok(response.json().await?)
+        let payload = response.json().await?;
+        if let Some(span) = span {
+            span.success(
+                Some(status.as_u16()),
+                Some(serde_json::json!({"tokenIssued": true})),
+            );
+        }
+        Ok(payload)
     }
 
     pub async fn exchange_code(&self, code: &str) -> Result<(), AppError> {
@@ -166,27 +210,61 @@ impl Schwab {
 
     async fn get_json(&self, url: &str) -> Result<Value, AppError> {
         let mut token = self.access_token(false).await?;
+        let correlation_id = uuid::Uuid::new_v4().to_string();
         for retry in 0..=1 {
-            let response = self
+            let span = self.audit.as_ref().map(|audit| {
+                audit.begin_api(
+                    "schwab",
+                    "market-data",
+                    "GET",
+                    url,
+                    None,
+                    Some(correlation_id.clone()),
+                )
+            });
+            let response = match self
                 .http
                 .get(url)
                 .bearer_auth(&token)
                 .header("Accept", "application/json")
                 .send()
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    if let Some(span) = span {
+                        span.error(None, error.to_string());
+                    }
+                    return Err(error.into());
+                }
+            };
             if response.status() == StatusCode::UNAUTHORIZED && retry == 0 {
+                if let Some(span) = span {
+                    span.warning(
+                        Some(response.status().as_u16()),
+                        None,
+                        "Access token expired; refreshing",
+                    );
+                }
                 token = self.access_token(true).await?;
                 continue;
             }
             let status = response.status();
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
+                if let Some(span) = span {
+                    span.error(Some(status.as_u16()), truncate(&detail));
+                }
                 return Err(AppError::Api(format!(
                     "Schwab request failed ({status}): {}",
                     truncate(&detail)
                 )));
             }
-            return Ok(response.json().await?);
+            let value: Value = response.json().await?;
+            if let Some(span) = span {
+                span.success(Some(status.as_u16()), Some(value.clone()));
+            }
+            return Ok(value);
         }
         Err(AppError::AuthenticationRequired)
     }
@@ -237,7 +315,10 @@ impl Schwab {
             .collect())
     }
 
-    pub async fn option_expirations(&self, symbol: &str) -> Result<Vec<OptionExpiration>, AppError> {
+    pub async fn option_expirations(
+        &self,
+        symbol: &str,
+    ) -> Result<Vec<OptionExpiration>, AppError> {
         let mut url = url::Url::parse(&format!("{MARKET_URL}/expirationchain"))?;
         url.query_pairs_mut().append_pair("symbol", symbol.trim());
         let body = self.get_json(url.as_str()).await?;
@@ -710,7 +791,10 @@ pub fn option_expirations_from_value(value: &Value) -> Vec<OptionExpiration> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                standard: item.get("standard").and_then(Value::as_bool).unwrap_or(true),
+                standard: item
+                    .get("standard")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
             })
         })
         .collect::<Vec<_>>();
@@ -724,7 +808,10 @@ pub fn option_chain_from_value(
     requested_symbol: &str,
     expiration_dates: &[String],
 ) -> OptionChainSnapshot {
-    let requested = expiration_dates.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+    let requested = expiration_dates
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     let symbol = value
         .get("symbol")
         .and_then(Value::as_str)
@@ -734,16 +821,23 @@ pub fn option_chain_from_value(
         .or_else(|| value.pointer("/underlying/mark").and_then(Value::as_f64))
         .or_else(|| value.pointer("/underlying/last").and_then(Value::as_f64))
         .unwrap_or_default();
-    let delayed = value.get("isDelayed").and_then(Value::as_bool).unwrap_or(false);
+    let delayed = value
+        .get("isDelayed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut contracts = Vec::new();
     for (map_name, fallback_side) in [("callExpDateMap", "CALL"), ("putExpDateMap", "PUT")] {
-        let Some(expirations) = value.get(map_name).and_then(Value::as_object) else { continue };
+        let Some(expirations) = value.get(map_name).and_then(Value::as_object) else {
+            continue;
+        };
         for (expiration_key, strikes) in expirations {
             let expiration_date = expiration_key.split(':').next().unwrap_or_default();
             if !requested.is_empty() && !requested.contains(expiration_date) {
                 continue;
             }
-            let Some(strikes) = strikes.as_object() else { continue };
+            let Some(strikes) = strikes.as_object() else {
+                continue;
+            };
             for contract_value in strikes.values() {
                 let values: Vec<&Value> = contract_value
                     .as_array()
@@ -816,7 +910,10 @@ fn option_contract_from_chain(
         underlying_price,
         quote_time: integer_named(value, "quoteTimeInLong").unwrap_or_default(),
         delayed,
-        is_mini: value.get("isMini").and_then(Value::as_bool).unwrap_or(false),
+        is_mini: value
+            .get("isMini")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         is_non_standard: value
             .get("isNonStandard")
             .and_then(Value::as_bool)
@@ -825,7 +922,11 @@ fn option_contract_from_chain(
 }
 
 pub fn streamed_option_from_value(value: &Value) -> Option<OptionContract> {
-    let symbol = value.get("key").or_else(|| value.get("0"))?.as_str()?.to_string();
+    let symbol = value
+        .get("key")
+        .or_else(|| value.get("0"))?
+        .as_str()?
+        .to_string();
     let expiration_year = integer_field(value, 12)?;
     let expiration_month = integer_field(value, 23)?;
     let expiration_day = integer_field(value, 26)?;
@@ -931,11 +1032,13 @@ mod tests {
 
     #[test]
     fn parses_nested_chain_and_filters_exact_expirations() {
-        let contract = |symbol: &str, side: &str, expiration: &str| serde_json::json!({
-            "symbol":symbol,"putCall":side,"strikePrice":200.0,"expirationDate":expiration,
-            "multiplier":100.0,"gamma":0.02,"openInterest":1200,"bidPrice":5.0,"askPrice":5.2,
-            "markPrice":5.1,"isMini":false,"isNonStandard":false
-        });
+        let contract = |symbol: &str, side: &str, expiration: &str| {
+            serde_json::json!({
+                "symbol":symbol,"putCall":side,"strikePrice":200.0,"expirationDate":expiration,
+                "multiplier":100.0,"gamma":0.02,"openInterest":1200,"bidPrice":5.0,"askPrice":5.2,
+                "markPrice":5.1,"isMini":false,"isNonStandard":false
+            })
+        };
         let values = serde_json::json!({
             "symbol":"AAPL","underlyingPrice":205.0,"isDelayed":false,
             "callExpDateMap":{
@@ -948,7 +1051,10 @@ mod tests {
         });
         let snapshot = option_chain_from_value(&values, "AAPL", &["2026-07-24".into()]);
         assert_eq!(snapshot.contracts.len(), 2);
-        assert!(snapshot.contracts.iter().all(|item| item.expiration_date == "2026-07-24"));
+        assert!(snapshot
+            .contracts
+            .iter()
+            .all(|item| item.expiration_date == "2026-07-24"));
         assert_eq!(snapshot.contracts[0].underlying_price, 205.0);
     }
 

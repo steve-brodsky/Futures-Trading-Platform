@@ -762,3 +762,54 @@ export interface JournalStatsResult {
   tags: JournalStatsBreakdown[];
   entryHours: JournalStatsBreakdown[];
 }
+
+export type AuditEventCategory = "api" | "record" | "stream" | "system";
+export type AuditEventStatus = "pending" | "success" | "warning" | "error";
+
+export interface AuditEvent {
+  sequence: number;
+  id: string;
+  startedAt: string;
+  completedAt?: string;
+  category: AuditEventCategory;
+  source: string;
+  operation: string;
+  status: AuditEventStatus;
+  summary: string;
+  method?: string;
+  route?: string;
+  statusCode?: number;
+  durationMs?: number;
+  correlationId?: string;
+  entityType?: string;
+  entityId?: string;
+  recordCount?: number;
+  request?: unknown;
+  response?: unknown;
+  changes?: unknown;
+  error?: string;
+}
+
+export interface AuditFilters {
+  search: string;
+  categories: AuditEventCategory[];
+  sources: string[];
+  statuses: AuditEventStatus[];
+  startAt?: string;
+  endAt?: string;
+}
+
+export interface AuditHealth {
+  healthy: boolean;
+  droppedEvents: number;
+  lastError?: string;
+  lastRecoveredAt?: string;
+  sessionOnly: boolean;
+}
+
+export interface AuditPage {
+  events: AuditEvent[];
+  nextCursor?: string;
+  total: number;
+  health: AuditHealth;
+}

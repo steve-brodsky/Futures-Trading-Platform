@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "../types";
+import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "../types";
+import { demoAuditExport, demoAuditPage, instrumentDemoApi } from "./audit";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
 import { demoAccounts, demoBalance, demoBodBalance, demoOptionChain, demoOptionExpirations, demoOrders, demoPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
@@ -7,11 +8,45 @@ import { CME_HOURS_URL, demoTradingTodaySnapshot, NYSE_HOURS_URL, TRADING_ECONOM
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+const nativeAuditExcluded = new Set(["get_audit_events", "get_audit_health", "export_audit_events", "record_client_audit"]);
+const nativeRecordCommands = new Set([
+  "save_credentials", "save_schwab_credentials", "set_environment", "save_workspace",
+  "configure_journal", "disconnect_journal", "set_journal_backfill_start", "reset_journal_now",
+  "set_journal_commission", "save_journal_entry_screenshot", "update_journal_annotation",
+  "ingest_journal_orders", "place_order", "replace_order", "close_position", "cancel_order",
+]);
+
 async function native<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  return invoke<T>(command, args);
+  const started = performance.now();
+  try {
+    const result = await invoke<T>(command, args);
+    if (!nativeAuditExcluded.has(command)) {
+      void invoke("record_client_audit", { event: {
+        operation: command,
+        category: nativeRecordCommands.has(command) ? "record" : command.includes("stream") ? "stream" : "api",
+        status: "success",
+        durationMs: Math.round(performance.now() - started),
+        request: args,
+        response: result,
+      } }).catch(() => undefined);
+    }
+    return result;
+  } catch (reason) {
+    if (!nativeAuditExcluded.has(command)) {
+      void invoke("record_client_audit", { event: {
+        operation: command,
+        category: nativeRecordCommands.has(command) ? "record" : command.includes("stream") ? "stream" : "api",
+        status: "error",
+        durationMs: Math.round(performance.now() - started),
+        request: args,
+        error: String(reason),
+      } }).catch(() => undefined);
+    }
+    throw reason;
+  }
 }
 
-export const api = {
+const rawApi = {
   isNative: isTauri,
   async authStatus(): Promise<{ configured: boolean; authenticated: boolean }> {
     return isTauri ? native("auth_status") : { configured: false, authenticated: false };
@@ -252,4 +287,22 @@ export const api = {
   async ingestJournalOrders(environment: TradingEnvironment, orders: OrderUpdate[], source: "broker-stream" | "broker-history" = "broker-stream"): Promise<void> {
     if (isTauri && orders.length) await native("ingest_journal_orders", { environment, orders, source });
   },
+  async auditEvents(filters: AuditFilters, cursor?: string, limit = 100): Promise<AuditPage> {
+    return isTauri
+      ? native("get_audit_events", { filters, cursor, limit })
+      : demoAuditPage(filters, cursor, limit);
+  },
+  async auditHealth(): Promise<AuditHealth> {
+    return isTauri
+      ? native("get_audit_health")
+      : { healthy: true, droppedEvents: 0, sessionOnly: true };
+  },
+  async exportAuditEvents(filters: AuditFilters): Promise<string> {
+    return isTauri
+      ? native("export_audit_events", { filters })
+      : demoAuditExport(filters);
+  },
 };
+
+const auditMethods = new Set(["auditEvents", "auditHealth", "exportAuditEvents"]);
+export const api = isTauri ? rawApi : instrumentDemoApi(rawApi, auditMethods);

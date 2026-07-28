@@ -13,6 +13,7 @@ import {
 import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
 import { ChartPaneGrid } from "./components/ChartPaneGrid";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
+import { AuditLogModal } from "./components/AuditLogModal";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { TradingTodayModal, type TradingTodaySource } from "./components/TradingTodayModal";
 import { api } from "./lib/bridge";
@@ -45,7 +46,7 @@ import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, 
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -346,6 +347,9 @@ function TradingApp() {
   const [drawingAlertsOpen, setDrawingAlertsOpen] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [auditLogOpen, setAuditLogOpen] = useState(false);
+  const [auditHealth, setAuditHealth] = useState<AuditHealth>({ healthy: true, droppedEvents: 0, sessionOnly: !api.isNative });
+  const auditHealthRef = useRef(auditHealth);
   const [chartSettingsOpen, setChartSettingsOpen] = useState(false);
   const [entryRulesOpen, setEntryRulesOpen] = useState(false);
   const [tradingTodayOpen, setTradingTodayOpen] = useState(currentWindowId === MAIN_WINDOW_ID);
@@ -375,6 +379,24 @@ function TradingApp() {
   const [schwabSecret, setSchwabSecret] = useState("");
   const [schwabConfigured, setSchwabConfigured] = useState(false);
   const [schwabAuthenticated, setSchwabAuthenticated] = useState(!api.isNative);
+
+  useEffect(() => {
+    const updateAuditHealth = (next: AuditHealth, notify = true) => {
+      const previous = auditHealthRef.current;
+      auditHealthRef.current = next;
+      setAuditHealth(next);
+      if (notify && previous.healthy !== next.healthy) {
+        showToast(next.healthy
+          ? "Audit logging recovered."
+          : "Audit logging is degraded. Some diagnostic events may be missing.");
+      }
+    };
+    void api.auditHealth().then((next) => updateAuditHealth(next, false)).catch(() => undefined);
+    if (!api.isNative) return;
+    let cleanup: (() => void) | undefined;
+    void listen<AuditHealth>("audit-health-changed", ({ payload }) => updateAuditHealth(payload)).then((unlisten) => { cleanup = unlisten; });
+    return () => cleanup?.();
+  }, []);
   const [schwabAuthEpoch, setSchwabAuthEpoch] = useState(0);
   const [preferenceSync, setPreferenceSync] = useState<{ state: "idle" | "syncing" | PreferenceSyncResult["state"]; lastSyncedAt?: string; message?: string }>({ state: "idle" });
   const [preferenceRealtime, setPreferenceRealtime] = useState<PreferenceRealtimeStateEvent>({ state: "disabled" });
@@ -3293,11 +3315,14 @@ function TradingApp() {
       <WatchlistSettings workspace={workspace} onChange={(watchlist) => updateWorkspace({ watchlist })} onNotify={showToast} />
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Chart display</h3><p>Configure tab signals and the values shown beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>EMA 200 tab status</strong><small>Green above EMA 200, red below</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showEma200TabDots} onChange={(event) => updateChartLabelSettings({ showEma200TabDots: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure risk sizing and projected swing stops.</p></header><label className="settings-control-row"><span><strong>Risk budget behavior</strong><small>Choose whether risk sizing may exceed the limit</small></span><select aria-label="Risk budget behavior" value={workspace.settings.orderTicket.riskSizingPolicy} onChange={(event) => updateOrderTicketSettings({ riskSizingPolicy: event.target.value as OrderTicketSettings["riskSizingPolicy"] })}><option value="strict">Stay within risk</option><option value="minimum-one">Always allow 1 contract</option></select></label><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
+      <section className="settings-section" aria-labelledby="audit-log-settings"><header><span>Diagnostics</span><h3 id="audit-log-settings">Audit log</h3><p>Review API activity and saved record changes retained locally for seven days.</p></header><button type="button" className="settings-audit-row" onClick={() => { setSettingsOpen(false); setAuditLogOpen(true); }}><span className={auditHealth.healthy ? "healthy" : "degraded"}><Activity size={16} /><i /></span><span><strong>{auditHealth.healthy ? "Logging healthy" : "Logging degraded"}</strong><small>{auditHealth.sessionOnly ? "Session-only browser diagnostics" : auditHealth.healthy ? "Local device only · 10,000 event maximum" : `${auditHealth.droppedEvents} event${auditHealth.droppedEvents === 1 ? "" : "s"} may be missing`}</small></span><em>Open audit log</em></button></section>
       <section className="settings-section" aria-labelledby="journal-fee-settings"><header><span>Journal</span><h3 id="journal-fee-settings">Commission and fees</h3><p>Used for journal net P&amp;L on every opening and closing fill.</p></header><label className="settings-control-row"><span><strong>Fee per contract, per side</strong><small>One contract opened and closed is charged twice</small></span><div className="settings-number-control"><input aria-label="Journal fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.commissionPerContractSide} onChange={(event) => updateJournalCommission(Number(event.target.value))} /><span>USD</span></div></label></section>
       <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings preferenceSync={preferenceSync} preferenceRealtime={preferenceRealtime} onConnectionChanged={() => { void syncCloudPreferences(); }} /></section>
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
       <section className="settings-section settings-api-section" aria-labelledby="schwab-api-settings"><header><span>Connection</span><h3 id="schwab-api-settings">Schwab API</h3><p>Equity and ETF chart data. Credentials and the refresh token stay in the operating system credential vault.</p></header><SchwabCredentials clientId={schwabClientId} secret={schwabSecret} busy={busy} configured={schwabConfigured} connected={schwabAuthenticated} native={api.isNative} onClientIdChange={setSchwabClientId} onSecretChange={setSchwabSecret} onSave={saveSchwabApiCredentials} onConnect={connectSchwab} onDisconnect={disconnectSchwab} /></section>
     </div></Modal>}
+
+    {auditLogOpen && <AuditLogModal onHealthChange={(next) => { auditHealthRef.current = next; setAuditHealth(next); }} onClose={() => { setAuditLogOpen(false); setSettingsOpen(true); }} />}
 
     {chartSettingsOpen && <Modal title="Chart settings" onClose={() => setChartSettingsOpen(false)} width={500}>
       <div className="chart-session-settings">
