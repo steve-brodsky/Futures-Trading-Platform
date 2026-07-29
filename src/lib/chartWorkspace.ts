@@ -10,6 +10,7 @@ import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./price
 import { isValidPositionDrawing } from "./positionDrawing";
 import { normalizeDrawingAlert, sameDrawingAlert } from "./drawingAlerts";
 import { normalizeChartSessionSettings } from "./chartSessions";
+import { normalizeChartEconomicEventSettings } from "./economicEvents";
 
 export const MAX_CHART_TABS = 12;
 export const MAIN_WINDOW_ID = "main";
@@ -326,6 +327,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   }));
   const savedChartLabels = value.settings?.chartLabels;
   const savedChartSessions = value.settings?.chartSessions;
+  const savedChartEconomicEvents = value.settings?.chartEconomicEvents;
   const savedOrderTicket = value.settings?.orderTicket;
   const savedJournal = value.settings?.journal;
   const entryRules = normalizeEntryRules(value.entryRules);
@@ -380,6 +382,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
           : fallback.settings.chartLabels.fontSize,
       },
       chartSessions: normalizeChartSessionSettings(savedChartSessions, fallback.settings.chartSessions),
+      chartEconomicEvents: normalizeChartEconomicEventSettings(savedChartEconomicEvents, fallback.settings.chartEconomicEvents),
       orderTicket: {
         swingStopPivotBars: savedOrderTicket?.swingStopPivotBars === 2 || savedOrderTicket?.swingStopPivotBars === 3
           ? savedOrderTicket.swingStopPivotBars
@@ -508,6 +511,11 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && current.settings.chartSessions.overnightColor === incoming.settings.chartSessions.overnightColor
     && current.settings.chartSessions.asiaColor === incoming.settings.chartSessions.asiaColor
     && current.settings.chartSessions.londonColor === incoming.settings.chartSessions.londonColor
+    && current.settings.chartEconomicEvents.enabled === incoming.settings.chartEconomicEvents.enabled
+    && current.settings.chartEconomicEvents.impactVisibility.high === incoming.settings.chartEconomicEvents.impactVisibility.high
+    && current.settings.chartEconomicEvents.impactVisibility.medium === incoming.settings.chartEconomicEvents.impactVisibility.medium
+    && current.settings.chartEconomicEvents.impactVisibility.low === incoming.settings.chartEconomicEvents.impactVisibility.low
+    && current.settings.chartEconomicEvents.impactVisibility.unrated === incoming.settings.chartEconomicEvents.impactVisibility.unrated
     && current.settings.orderTicket.swingStopPivotBars === incoming.settings.orderTicket.swingStopPivotBars
     && current.settings.orderTicket.swingStopOffsetTicks === incoming.settings.orderTicket.swingStopOffsetTicks
     && current.settings.orderTicket.sizingMode === incoming.settings.orderTicket.sizingMode

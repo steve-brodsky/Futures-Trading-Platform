@@ -6,6 +6,7 @@ import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay } from "./cloudPreferences";
 import { defaultIndicators } from "./workspace";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./chartSessions";
+import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./economicEvents";
 
 function workspace(): WorkspaceState {
   return {
@@ -41,6 +42,7 @@ function workspace(): WorkspaceState {
     settings: {
       chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 12 },
       chartSessions: DEFAULT_CHART_SESSION_SETTINGS,
+      chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS,
       orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", riskAmount: 150 },
       journal: { commissionPerContractSide: 0.75 },
     },
@@ -56,6 +58,7 @@ describe("cloud preferences", () => {
     expect(profile.categories.chart_workspace.recentSymbols).toEqual(original.recentSymbols);
     expect(serialized).toContain("commissionPerContractSide");
     expect(profile.categories.chart_display.sessionShading).toEqual(original.settings.chartSessions);
+    expect(profile.categories.chart_display.economicEvents).toEqual(original.settings.chartEconomicEvents);
     expect(profile.categories.order_entry.entryRuleAlerts).toEqual(original.entryRuleAlerts);
     expect(profile.categories.alerts.entryRules).toBeUndefined();
     expect(serialized).not.toContain("secret-account-id");
@@ -94,6 +97,7 @@ describe("cloud preferences", () => {
       settings: {
         ...local.settings,
         chartSessions: { ...local.settings.chartSessions, colorMode: "by-session", asiaColor: "#112233" },
+        chartEconomicEvents: { ...local.settings.chartEconomicEvents, enabled: true, impactVisibility: { ...local.settings.chartEconomicEvents.impactVisibility, low: false } },
         journal: { commissionPerContractSide: 1.25 },
       },
     });
@@ -102,6 +106,7 @@ describe("cloud preferences", () => {
     expect(merged.recentSymbols.map((item) => item.symbol)).toEqual(["AAPL"]);
     expect(merged.settings.journal.commissionPerContractSide).toBe(1.25);
     expect(merged.settings.chartSessions).toMatchObject({ colorMode: "by-session", asiaColor: "#112233" });
+    expect(merged.settings.chartEconomicEvents).toEqual({ enabled: true, impactVisibility: { high: true, medium: true, low: false, unrated: true } });
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "bell", durationSeconds: 5 });
     expect(merged.environment).toBe("live");
     expect(merged.selectedAccountId).toBe("secret-account-id");
@@ -124,6 +129,7 @@ describe("cloud preferences", () => {
     const profile = cloudPreferenceProfile(local);
     profile.categories.chart_display.fontSize = 900;
     profile.categories.chart_display.sessionShading = { colorMode: "invalid", asiaColor: "red" };
+    profile.categories.chart_display.economicEvents = { enabled: "yes", impactVisibility: { high: false, medium: "yes" } };
     profile.categories.journal_fees.commissionPerContractSide = -20;
     profile.categories.watchlist.symbols = ["mesu26", 123, "mesu26"];
     profile.categories.order_entry.entryRules = {
@@ -134,6 +140,7 @@ describe("cloud preferences", () => {
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.settings.chartLabels.fontSize).toBe(16);
     expect(merged.settings.chartSessions).toEqual(DEFAULT_CHART_SESSION_SETTINGS);
+    expect(merged.settings.chartEconomicEvents).toEqual({ enabled: false, impactVisibility: { high: false, medium: true, low: true, unrated: true } });
     expect(merged.settings.journal.commissionPerContractSide).toBe(0);
     expect(merged.watchlist.map((item) => [item.provider, item.symbol])).toEqual([["tradestation", "MESU26"]]);
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "chime", durationSeconds: 3 });

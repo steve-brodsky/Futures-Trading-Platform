@@ -1,10 +1,10 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { Bell, BellOff, ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, Volume2, X } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
   type IChartApi, type IPriceLine, type ISeriesApi, type Logical, type LogicalRange, type Time,
 } from "lightweight-charts";
-import type { AlertDurationSeconds, AlertSound, Bar, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
+import type { AlertDurationSeconds, AlertSound, Bar, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, EconomicEvent, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme } from "../lib/crosshair";
@@ -22,6 +22,11 @@ import { GexHeatmapPrimitive } from "../lib/gexHeatmapPrimitive";
 import { defaultDrawingAlert } from "../lib/drawingAlerts";
 import { ALERT_DURATIONS, ALERT_SOUNDS } from "../lib/emaAlerts";
 import { playAlertSound, prepareAlertAudio } from "../lib/alertAudio";
+import {
+  clusterEconomicEventCoordinates, economicEventImpact, economicEventImpactLabel, economicEventLogicalPosition, economicEventsEligible,
+  visibleEconomicEvents, type EconomicEventCluster,
+} from "../lib/economicEvents";
+import { formatEventTime } from "../lib/tradingToday";
 
 interface Props {
   bars: Bar[];
@@ -41,6 +46,8 @@ interface Props {
   projectedEntryPrice?: number;
   chartLabelSettings: ChartLabelSettings;
   chartSessionSettings: ChartSessionSettings;
+  economicEvents: EconomicEvent[];
+  economicEventSettings: ChartEconomicEventSettings;
   timeframe: Timeframe;
   timezone: ChartTimezone;
   indicators: IndicatorConfig[];
@@ -104,7 +111,8 @@ type PositionDragKind = "body" | "entry" | "stop" | "target" | "start" | "end";
 
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+  const economicEventTooltipId = useId();
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -126,6 +134,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const magnetEnabledRef = useRef(magnetEnabled);
   const activeToolRef = useRef(activeTool);
   const drawingsRef = useRef(drawings);
+  const economicEventsRef = useRef(economicEvents);
+  const economicEventSettingsRef = useRef(economicEventSettings);
   const drawingCallbacksRef = useRef({ onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing });
   const loadOlderRef = useRef(onLoadOlder);
   const visibleRangeChangeRef = useRef(onVisibleRangeChange);
@@ -140,6 +150,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const [selectedPositionId, setSelectedPositionId] = useState<string | null>(null);
   const [positionCoordinates, setPositionCoordinates] = useState<Record<string, PositionCoordinates>>({});
   const [tradeLineTops, setTradeLineTops] = useState<Record<string, number>>({});
+  const [economicEventClusters, setEconomicEventClusters] = useState<EconomicEventCluster[]>([]);
+  const [hoveredEconomicEventId, setHoveredEconomicEventId] = useState<string | null>(null);
+  const [pinnedEconomicEventId, setPinnedEconomicEventId] = useState<string | null>(null);
   const [candleCountdown, setCandleCountdown] = useState("");
   const [candleCountdownTop, setCandleCountdownTop] = useState<number | null>(null);
   const [draggingOrder, setDraggingOrder] = useState<{ id: string; originalPrice: number; price: number } | null>(null);
@@ -252,6 +265,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   magnetEnabledRef.current = magnetEnabled;
   activeToolRef.current = activeTool;
   drawingsRef.current = drawings;
+  economicEventsRef.current = economicEvents;
+  economicEventSettingsRef.current = economicEventSettings;
   drawingCallbacksRef.current = { onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing };
   loadOlderRef.current = onLoadOlder;
   visibleRangeChangeRef.current = onVisibleRangeChange;
@@ -293,6 +308,24 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       })) return current;
       return positionNext;
     });
+    if (!economicEventsEligible(kind, timeframe)) {
+      setEconomicEventClusters((current) => current.length ? [] : current);
+      return;
+    }
+    const plotWidth = Math.max(0, (host.current?.clientWidth ?? 0) - 72);
+    const coordinates = visibleEconomicEvents(economicEventsRef.current, economicEventSettingsRef.current).flatMap((event) => {
+      const logical = economicEventLogicalPosition(event, plotPointsRef.current);
+      if (logical == null) return [];
+      const x = chart.timeScale().logicalToCoordinate(logical as Logical);
+      return x != null && x >= 7 && x <= plotWidth - 7 ? [{ event, x: Number(x) }] : [];
+    });
+    const clusters = clusterEconomicEventCoordinates(coordinates);
+    setEconomicEventClusters((current) => current.length === clusters.length && current.every((cluster, index) => {
+      const next = clusters[index];
+      return cluster.id === next.id && Math.abs(cluster.x - next.x) < .25 && cluster.impact === next.impact
+        && cluster.events.length === next.events.length
+        && cluster.events.every((event, eventIndex) => event === next.events[eventIndex]);
+    }) ? current : clusters);
   };
 
   useEffect(() => {
@@ -315,11 +348,22 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         positionDragRef.current = null;
         chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
       }
-      setDrawingMenu(null); movingDrawingIdRef.current = null; setMovingDrawingId(null);
+      setDrawingMenu(null); movingDrawingIdRef.current = null; setMovingDrawingId(null); setPinnedEconomicEventId(null);
     };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, []);
+
+  useEffect(() => {
+    if (!pinnedEconomicEventId) return;
+    const closePinnedEvent = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".economic-event-marker,.economic-event-tooltip")) return;
+      setPinnedEconomicEventId(null);
+    };
+    document.addEventListener("pointerdown", closePinnedEvent);
+    return () => document.removeEventListener("pointerdown", closePinnedEvent);
+  }, [pinnedEconomicEventId]);
 
   useEffect(() => {
     if (!host.current) return;
@@ -502,6 +546,25 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   useEffect(() => {
     sessionShadingRef.current?.setSettings(chartSessionSettings);
   }, [chartSessionSettings.colorMode, chartSessionSettings.overnightColor, chartSessionSettings.asiaColor, chartSessionSettings.londonColor, chartGeneration]);
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => syncTradeLabelsRef.current());
+    return () => cancelAnimationFrame(frame);
+  }, [
+    economicEvents,
+    economicEventSettings.enabled,
+    economicEventSettings.impactVisibility.high,
+    economicEventSettings.impactVisibility.medium,
+    economicEventSettings.impactVisibility.low,
+    economicEventSettings.impactVisibility.unrated,
+    plotPoints,
+    chartGeneration,
+  ]);
+
+  useEffect(() => {
+    if (hoveredEconomicEventId && !economicEventClusters.some((cluster) => cluster.id === hoveredEconomicEventId)) setHoveredEconomicEventId(null);
+    if (pinnedEconomicEventId && !economicEventClusters.some((cluster) => cluster.id === pinnedEconomicEventId)) setPinnedEconomicEventId(null);
+  }, [economicEventClusters, hoveredEconomicEventId, pinnedEconomicEventId]);
 
   useEffect(() => {
     if (isSynthetic) { setCandleCountdown(""); return; }
@@ -889,6 +952,13 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
   const selectedPosition = selectedDrawing?.kind === "position" ? selectedDrawing : undefined;
   const selectedLineDrawing = selectedDrawing && selectedDrawing.kind !== "position" ? selectedDrawing : undefined;
+  const activeEconomicEventId = pinnedEconomicEventId ?? hoveredEconomicEventId;
+  const activeEconomicEvent = economicEventClusters.find((cluster) => cluster.id === activeEconomicEventId);
+  const economicEventTooltipLeft = activeEconomicEvent
+    ? Math.max(8, Math.min(activeEconomicEvent.x - 160, Math.max(8, (host.current?.clientWidth ?? 412) - 400)))
+    : 8;
+  const economicEventTimezone = resolveTimezone(timezone, exchange);
+  const economicEventTimezoneLabel = timezoneLabel(timezone, exchange);
 
   return (
     <section className="chart-stage" aria-label={`${symbol} chart`}>
@@ -904,6 +974,56 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       </div>
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
       <div ref={host} className="chart-host" />
+      {economicEventClusters.length > 0 && <div className="economic-event-axis-layer">
+        {activeEconomicEvent && <div className={`economic-event-guide impact-${activeEconomicEvent.impact}`} style={{ left: activeEconomicEvent.x }} />}
+        {economicEventClusters.map((cluster) => {
+          const active = cluster.id === activeEconomicEventId;
+          const eventTime = formatEventTime(cluster.events[0].occursAt, economicEventTimezone);
+          const ariaLabel = cluster.events.length === 1
+            ? `${cluster.events[0].title}, ${economicEventImpactLabel(cluster.events[0].importance)}, ${eventTime} ${economicEventTimezoneLabel}`
+            : `${cluster.events.length} economic events near ${eventTime} ${economicEventTimezoneLabel}; highest is ${cluster.impact} impact`;
+          return <button
+            key={cluster.id}
+            type="button"
+            className={`economic-event-marker impact-${cluster.impact} ${active ? "active" : ""}`}
+            style={{ left: cluster.x }}
+            aria-label={ariaLabel}
+            aria-describedby={active ? economicEventTooltipId : undefined}
+            aria-pressed={pinnedEconomicEventId === cluster.id}
+            onPointerEnter={() => setHoveredEconomicEventId(cluster.id)}
+            onPointerLeave={() => setHoveredEconomicEventId((current) => current === cluster.id ? null : current)}
+            onFocus={() => setHoveredEconomicEventId(cluster.id)}
+            onBlur={() => setHoveredEconomicEventId((current) => current === cluster.id ? null : current)}
+            onClick={() => setPinnedEconomicEventId((current) => current === cluster.id ? null : cluster.id)}
+          >{cluster.events.length > 1 ? cluster.events.length : <span />}</button>;
+        })}
+        {activeEconomicEvent && <section
+          id={economicEventTooltipId}
+          className={`economic-event-tooltip ${pinnedEconomicEventId === activeEconomicEvent.id ? "pinned" : ""}`}
+          style={{ left: economicEventTooltipLeft }}
+          role={pinnedEconomicEventId === activeEconomicEvent.id ? "dialog" : "tooltip"}
+          aria-label="Economic event details"
+        >
+          <header><span>Economic events</span><strong>{economicEventTimezoneLabel}</strong></header>
+          <div>
+            {activeEconomicEvent.events.map((event) => <article key={event.id}>
+              <div className="economic-event-tooltip-heading">
+                <time dateTime={event.occursAt}>{formatEventTime(event.occursAt, economicEventTimezone)}</time>
+                <i className={`impact-${economicEventImpact(event.importance)}`}>{economicEventImpactLabel(event.importance)}</i>
+              </div>
+              <h4>{event.title}</h4>
+              {event.reference && <p>{event.reference}</p>}
+              <dl>
+                <div><dt>Actual</dt><dd className={event.actual ? "has-value" : ""}>{event.actual || "—"}</dd></div>
+                <div><dt>Consensus</dt><dd>{event.consensus || "—"}</dd></div>
+                <div><dt>Previous</dt><dd>{event.previous || "—"}</dd></div>
+                <div><dt>Forecast</dt><dd>{event.forecast || "—"}</dd></div>
+              </dl>
+            </article>)}
+          </div>
+          {pinnedEconomicEventId === activeEconomicEvent.id && <footer>Click the marker again or press Esc to close</footer>}
+        </section>}
+      </div>}
       <div className={`position-drawing-layer ${activeTool === "cursor" ? "interactive" : "placing"}`}>
         {drawings.filter((drawing): drawing is PositionDrawing => drawing.kind === "position").map((drawing) => {
           const coordinates = positionCoordinates[drawing.id];

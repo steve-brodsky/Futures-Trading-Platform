@@ -3,6 +3,7 @@ import type { WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
 import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./chartSessions";
+import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./economicEvents";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAX_CHART_TABS, moveTab, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
@@ -15,7 +16,7 @@ const fallback: WorkspaceState = {
   drawings: {},
   gexSelections: {},
   watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
 describe("chart workspace", () => {
@@ -116,6 +117,38 @@ describe("chart workspace", () => {
     expect(saved.settings.chartSessions).toEqual({ colorMode: "by-session", overnightColor: "#111827", asiaColor: "#123456", londonColor: "#654321" });
   });
 
+  it("defaults and validates chart economic-event visibility", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, settings: { chartLabels: fallback.settings.chartLabels } }, fallback);
+    expect(legacy.settings.chartEconomicEvents).toEqual(DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS);
+
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      settings: {
+        ...fallback.settings,
+        chartEconomicEvents: {
+          enabled: true,
+          impactVisibility: { high: true, medium: false, low: true, unrated: false },
+        },
+      },
+    }, fallback);
+    expect(saved.settings.chartEconomicEvents).toEqual({
+      enabled: true,
+      impactVisibility: { high: true, medium: false, low: true, unrated: false },
+    });
+
+    const malformed = normalizeChartWorkspace({
+      ...fallback,
+      settings: {
+        ...fallback.settings,
+        chartEconomicEvents: { enabled: "yes", impactVisibility: { high: false, medium: "yes" } },
+      },
+    }, fallback);
+    expect(malformed.settings.chartEconomicEvents).toEqual({
+      enabled: false,
+      impactVisibility: { high: false, medium: true, low: true, unrated: true },
+    });
+  });
+
   it("normalizes saved watchlist symbols without changing their order", () => {
     const result = normalizeChartWorkspace({ ...fallback, watchlist: [" mnqu26 ", "MESU26", "MNQU26", "", 42] }, fallback);
     expect(result.watchlist.map((item) => [item.provider, item.symbol])).toEqual([["tradestation", "MNQU26"], ["tradestation", "MESU26"]]);
@@ -184,6 +217,27 @@ describe("chart workspace", () => {
     }, fallback);
     const result = stabilizeChartWorkspace(current, broadcast);
     expect(result.settings.chartLabels).toEqual({ showEma200TabDots: false, showDollarAmount: true, showRMultiple: false, fontSize: 13 });
+    expect(result.settings).not.toBe(current.settings);
+  });
+
+  it("accepts changed economic-event settings from a workspace broadcast", () => {
+    const current = normalizeChartWorkspace(fallback, fallback);
+    const broadcast = normalizeChartWorkspace({
+      ...current,
+      revision: 2,
+      settings: {
+        ...current.settings,
+        chartEconomicEvents: {
+          enabled: true,
+          impactVisibility: { high: true, medium: true, low: false, unrated: false },
+        },
+      },
+    }, fallback);
+    const result = stabilizeChartWorkspace(current, broadcast);
+    expect(result.settings.chartEconomicEvents).toEqual({
+      enabled: true,
+      impactVisibility: { high: true, medium: true, low: false, unrated: false },
+    });
     expect(result.settings).not.toBe(current.settings);
   });
 

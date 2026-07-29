@@ -446,6 +446,13 @@ export interface ChartSessionSettings {
   londonColor: string;
 }
 
+export type EconomicEventImpact = "high" | "medium" | "low" | "unrated";
+
+export interface ChartEconomicEventSettings {
+  enabled: boolean;
+  impactVisibility: Record<EconomicEventImpact, boolean>;
+}
+
 export interface OrderTicketSettings {
   swingStopPivotBars: 2 | 3;
   swingStopOffsetTicks: number;
@@ -457,6 +464,7 @@ export interface OrderTicketSettings {
 export interface WorkspaceSettings {
   chartLabels: ChartLabelSettings;
   chartSessions: ChartSessionSettings;
+  chartEconomicEvents: ChartEconomicEventSettings;
   orderTicket: OrderTicketSettings;
   journal: {
     commissionPerContractSide: number;

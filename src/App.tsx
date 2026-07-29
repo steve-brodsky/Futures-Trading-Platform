@@ -45,8 +45,9 @@ import { activeDrawingAlerts, applyDrawingPatch, trackDrawingAlertTransitions, t
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
+import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./lib/economicEvents";
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -81,7 +82,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -117,6 +118,12 @@ interface WindowMarketSyncEvent {
   environment: TradingEnvironment;
   markets: Array<{ tabId: string; symbol: string; timeframe: Timeframe; market: TabMarketState }>;
   quotes: Record<string, Quote>;
+}
+
+interface TradingTodaySyncEvent {
+  displayDate: string;
+  economicDate: string;
+  snapshot: TradingTodaySnapshot | null;
 }
 
 interface BarSubscription {
@@ -356,6 +363,7 @@ function TradingApp() {
   const [tradingTodayDate, setTradingTodayDate] = useState(() => newYorkDateKey());
   const [tradingTodaySnapshot, setTradingTodaySnapshot] = useState<TradingTodaySnapshot | null>(null);
   const tradingTodaySnapshotRef = useRef<TradingTodaySnapshot | null>(null);
+  const tradingTodayErrorToastDateRef = useRef<string | null>(null);
   const [tradingTodayLoading, setTradingTodayLoading] = useState(currentWindowId === MAIN_WINDOW_ID);
   const [tradingTodayRefreshing, setTradingTodayRefreshing] = useState(false);
   const [tradingTodayError, setTradingTodayError] = useState<string>();
@@ -477,12 +485,11 @@ function TradingApp() {
   }, []);
 
   useEffect(() => {
-    if (!tradingTodayOpen || currentWindowId !== MAIN_WINDOW_ID) return;
+    if (currentWindowId !== MAIN_WINDOW_ID || (!tradingTodayOpen && !workspace.settings.chartEconomicEvents.enabled)) return;
     let cancelled = false;
     let available = tradingTodaySnapshotRef.current?.date === tradingTodayPresentation.economicDate ? tradingTodaySnapshotRef.current : null;
     if (!available) {
-      tradingTodaySnapshotRef.current = null;
-      setTradingTodaySnapshot(null);
+      applyTradingTodaySnapshot(null);
       setTradingTodayLoading(true);
     }
     setTradingTodayError(undefined);
@@ -494,8 +501,7 @@ function TradingApp() {
         if (cancelled) return;
         if (cached) {
           available = cached;
-          tradingTodaySnapshotRef.current = cached;
-          setTradingTodaySnapshot(cached);
+          applyTradingTodaySnapshot(cached);
           setTradingTodayLoading(false);
         }
       } catch {
@@ -507,13 +513,19 @@ function TradingApp() {
         const refreshed = await api.refreshTradingToday(tradingTodayPresentation.economicDate);
         if (cancelled) return;
         available = refreshed;
-        tradingTodaySnapshotRef.current = refreshed;
-        setTradingTodaySnapshot(refreshed);
+        applyTradingTodaySnapshot(refreshed);
+        tradingTodayErrorToastDateRef.current = null;
       } catch (error) {
         if (cancelled) return;
         const message = `Could not refresh Trading Economics: ${String(error)}`;
         if (available) setTradingTodayWarning(`${message}. Showing the latest available data.`);
-        else setTradingTodayError(message);
+        else {
+          setTradingTodayError(message);
+          if (tradingTodayErrorToastDateRef.current !== tradingTodayPresentation.economicDate) {
+            tradingTodayErrorToastDateRef.current = tradingTodayPresentation.economicDate;
+            showToast("Economic events are unavailable. Open Trading Today to retry.");
+          }
+        }
       } finally {
         if (!cancelled) {
           setTradingTodayLoading(false);
@@ -523,7 +535,7 @@ function TradingApp() {
     })();
 
     return () => { cancelled = true; };
-  }, [tradingTodayOpen, tradingTodayPresentation.economicDate]);
+  }, [tradingTodayOpen, tradingTodayPresentation.economicDate, workspace.settings.chartEconomicEvents.enabled]);
 
   useEffect(() => {
     if (!chartStyleOpen) return;
@@ -976,12 +988,27 @@ function TradingApp() {
       setWorkspace(next);
       syncWorkspaceToOpenWindows(next);
     }).then((unlisten) => cleanups.push(unlisten));
+    listen<TradingTodaySyncEvent>("trading-today-sync", ({ payload }) => {
+      if (currentWindowId === MAIN_WINDOW_ID) return;
+      setTradingTodayDate(payload.displayDate);
+      tradingTodaySnapshotRef.current = payload.snapshot?.date === payload.economicDate ? payload.snapshot : null;
+      setTradingTodaySnapshot(tradingTodaySnapshotRef.current);
+      setTradingTodayLoading(false);
+      setTradingTodayRefreshing(false);
+    }).then((unlisten) => cleanups.push(unlisten));
     listen<{ windowId: string }>("workspace-window-ready", ({ payload }) => {
       if (currentWindowId !== MAIN_WINDOW_ID) return;
       void (async () => {
         await emitTo(payload.windowId, "workspace-sync", workspaceRef.current).catch(() => undefined);
         await emitTo(payload.windowId, "window-market-sync", marketSyncForWindow(payload.windowId)).catch(() => undefined);
         await emitTo(payload.windowId, "gex-market-sync", { markets: gexMarketsRef.current } satisfies GexMarketSyncEvent).catch(() => undefined);
+        const displayDate = newYorkDateKey();
+        const economicDate = tradingTodayView(displayDate).economicDate;
+        await emitTo(payload.windowId, "trading-today-sync", {
+          displayDate,
+          economicDate,
+          snapshot: tradingTodaySnapshotRef.current?.date === economicDate ? tradingTodaySnapshotRef.current : null,
+        } satisfies TradingTodaySyncEvent).catch(() => undefined);
         const signals = Object.entries(entryRuleTabSignalsRef.current).map(([tabId, signal]) => ({
           tabId, symbol: signal.symbol, timeframe: signal.timeframe, sides: signal.sides,
         }));
@@ -2089,14 +2116,30 @@ function TradingApp() {
     window.setTimeout(() => setToast(null), 3200);
   }
 
+  function applyTradingTodaySnapshot(snapshot: TradingTodaySnapshot | null) {
+    tradingTodaySnapshotRef.current = snapshot;
+    setTradingTodaySnapshot(snapshot);
+    if (currentWindowId !== MAIN_WINDOW_ID) return;
+    const displayDate = newYorkDateKey();
+    const economicDate = tradingTodayView(displayDate).economicDate;
+    const payload: TradingTodaySyncEvent = {
+      displayDate,
+      economicDate,
+      snapshot: snapshot?.date === economicDate ? snapshot : null,
+    };
+    workspaceRef.current.windows
+      .filter((window) => window.id !== MAIN_WINDOW_ID)
+      .forEach((window) => { void emitTo(window.id, "trading-today-sync", payload).catch(() => undefined); });
+  }
+
   async function refreshTradingToday() {
     setTradingTodayRefreshing(true);
     setTradingTodayError(undefined);
     setTradingTodayWarning(undefined);
     try {
       const refreshed = await api.refreshTradingToday(tradingTodayPresentation.economicDate);
-      tradingTodaySnapshotRef.current = refreshed;
-      setTradingTodaySnapshot(refreshed);
+      applyTradingTodaySnapshot(refreshed);
+      tradingTodayErrorToastDateRef.current = null;
     } catch (error) {
       const message = `Could not refresh Trading Economics: ${String(error)}`;
       if (tradingTodaySnapshotRef.current?.date === tradingTodayPresentation.economicDate) {
@@ -2279,6 +2322,39 @@ function TradingApp() {
       settings: {
         ...current.settings,
         chartSessions: { ...current.settings.chartSessions, ...patch },
+      },
+    }));
+  }
+
+  function updateChartEconomicEventSettings(patch: Partial<ChartEconomicEventSettings>) {
+    commitWorkspace((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        chartEconomicEvents: {
+          ...current.settings.chartEconomicEvents,
+          ...patch,
+          impactVisibility: {
+            ...current.settings.chartEconomicEvents.impactVisibility,
+            ...(patch.impactVisibility ?? {}),
+          },
+        },
+      },
+    }));
+  }
+
+  function updateEconomicEventImpact(impact: EconomicEventImpact, enabled: boolean) {
+    commitWorkspace((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        chartEconomicEvents: {
+          ...current.settings.chartEconomicEvents,
+          impactVisibility: {
+            ...current.settings.chartEconomicEvents.impactVisibility,
+            [impact]: enabled,
+          },
+        },
       },
     }));
   }
@@ -3075,6 +3151,8 @@ function TradingApp() {
       projectedEntryPrice={focused && activeOrderProjection ? projectedEntryPrice(activeOrderProjection) : undefined}
       chartLabelSettings={workspace.settings.chartLabels}
       chartSessionSettings={workspace.settings.chartSessions}
+      economicEvents={tradingTodaySnapshot?.date === tradingTodayPresentation.economicDate ? tradingTodaySnapshot.events : []}
+      economicEventSettings={workspace.settings.chartEconomicEvents}
       timeframe={tab.timeframe}
       indicators={tab.indicators}
       gexLevels={gexCalculation?.levels ?? []}
@@ -3325,6 +3403,31 @@ function TradingApp() {
     {auditLogOpen && <AuditLogModal onHealthChange={(next) => { auditHealthRef.current = next; setAuditHealth(next); }} onClose={() => { setAuditLogOpen(false); setSettingsOpen(true); }} />}
 
     {chartSettingsOpen && <Modal title="Chart settings" onClose={() => setChartSettingsOpen(false)} width={500}>
+      <div className="chart-economic-event-settings">
+        <header>
+          <span>Timeline</span>
+          <h3>Economic events</h3>
+          <p>Plot the current U.S. Trading Day calendar directly on eligible intraday chart axes. Event labels follow each chart’s timezone.</p>
+        </header>
+        <label className="chart-event-master-switch switch-row">
+          <span><strong>Show on charts</strong><small>Candles, line, and area · intraday only</small></span>
+          <input type="checkbox" checked={workspace.settings.chartEconomicEvents.enabled} onChange={(event) => updateChartEconomicEventSettings({ enabled: event.target.checked })} />
+        </label>
+        <fieldset className="chart-event-impact-controls" disabled={!workspace.settings.chartEconomicEvents.enabled}>
+          <legend>Visible impact</legend>
+          {([
+            ["high", "High", "Major releases", "var(--red)"],
+            ["medium", "Medium", "Market-moving", "var(--amber)"],
+            ["low", "Low", "Lower impact", "#6c8299"],
+            ["unrated", "Unrated", "No source rating", "#526174"],
+          ] as const).map(([impact, label, detail, color]) => <label key={impact}>
+            <input type="checkbox" checked={workspace.settings.chartEconomicEvents.impactVisibility[impact]} onChange={(event) => updateEconomicEventImpact(impact, event.target.checked)} />
+            <i style={{ "--impact-color": color } as React.CSSProperties} />
+            <span><strong>{label}</strong><small>{detail}</small></span>
+          </label>)}
+        </fieldset>
+        <p className="chart-event-settings-note">Hover or focus a marker for the event guide and release details. Click to pin.</p>
+      </div>
       <div className="chart-session-settings">
         <header>
           <span>Session backgrounds</span>
