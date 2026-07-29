@@ -3422,7 +3422,7 @@ function TradingApp() {
             ["unrated", "Unrated", "No source rating", "#526174"],
           ] as const).map(([impact, label, detail, color]) => <label key={impact}>
             <input type="checkbox" checked={workspace.settings.chartEconomicEvents.impactVisibility[impact]} onChange={(event) => updateEconomicEventImpact(impact, event.target.checked)} />
-            <i style={{ "--impact-color": color } as React.CSSProperties} />
+            <i className={`impact-${impact}`} style={{ "--impact-color": color } as React.CSSProperties} />
             <span><strong>{label}</strong><small>{detail}</small></span>
           </label>)}
         </fieldset>
