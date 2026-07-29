@@ -47,6 +47,30 @@ describe("syncedCrosshairPlotTime", () => {
     expect(syncedCrosshairPlotTime(240, minutePoints, "candles", "1m", 180)).toBeUndefined();
   });
 
+  it("uses the containing end-stamped TradeStation daily bar for an intraday timestamp", () => {
+    const epoch = (iso: string) => Date.parse(iso) / 1000;
+    const dailyPoints = [
+      epoch("2026-07-14T20:00:00Z"),
+      epoch("2026-07-15T20:00:00Z"),
+      epoch("2026-07-16T20:00:00Z"),
+    ].map((time) => ({ plotTime: time, sourceTime: time }));
+    const intradayTime = epoch("2026-07-15T14:20:00Z");
+
+    expect(syncedCrosshairPlotTime(intradayTime, dailyPoints, "candles", "D", dailyPoints.at(-1)?.sourceTime, "tradestation"))
+      .toBe(dailyPoints[1].plotTime);
+  });
+
+  it("does not map a timestamp beyond loaded end-stamped daily coverage", () => {
+    const epoch = (iso: string) => Date.parse(iso) / 1000;
+    const dailyPoints = [
+      epoch("2026-07-14T20:00:00Z"),
+      epoch("2026-07-15T20:00:00Z"),
+    ].map((time) => ({ plotTime: time, sourceTime: time }));
+
+    expect(syncedCrosshairPlotTime(epoch("2026-07-15T20:00:01Z"), dailyPoints, "candles", "D", dailyPoints.at(-1)?.sourceTime, "tradestation"))
+      .toBeUndefined();
+  });
+
   it("prefers the last synthetic item when source timestamps are duplicated", () => {
     const syntheticPoints = [
       { plotTime: 1, sourceTime: 60 },

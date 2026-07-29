@@ -211,7 +211,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const chart = chartRef.current;
     const priceSeries = priceRef.current;
     if (!requested || !chart || !priceSeries) return;
-    const plotTime = syncedCrosshairPlotTime(requested.sourceTime, plotPointsRef.current, kind, timeframe, barsRef.current.at(-1)?.time);
+    const plotTime = syncedCrosshairPlotTime(requested.sourceTime, plotPointsRef.current, kind, timeframe, barsRef.current.at(-1)?.time, provider);
     if (plotTime == null || !installedPlotTimesRef.current.has(plotTime)) {
       chart.clearCrosshairPosition();
       return;
