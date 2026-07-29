@@ -440,8 +440,9 @@ describe("chart workspace", () => {
     expect(normalizeChartWorkspace(saved, fallback).tabs[0].ema200Alert["5m"]).toEqual({ enabled: true, sound: "siren", durationSeconds: 10 });
   });
 
-  it("preserves an explicit disabled confirmation preference", () => {
-    const result = normalizeChartWorkspace({ ...fallback, confirmOrders: false }, fallback);
+  it("preserves an explicit disabled confirmation preference in a live workspace", () => {
+    const result = normalizeChartWorkspace({ ...fallback, environment: "live", confirmOrders: false }, fallback);
+    expect(result.environment).toBe("live");
     expect(result.confirmOrders).toBe(false);
   });
 

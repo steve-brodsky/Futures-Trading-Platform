@@ -962,7 +962,6 @@ function TradingApp() {
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus(), api.schwabAuthStatus()]).then(async ([saved, auth, schwabAuth]) => {
       const normalized = normalizeChartWorkspace(saved, defaultWorkspace);
-      if (normalized.environment === "live") normalized.confirmOrders = true;
       await api.setEnvironment(normalized.environment);
       await api.setJournalCommission(normalized.settings.journal.commissionPerContractSide);
       if (currentWindowId === MAIN_WINDOW_ID) {
