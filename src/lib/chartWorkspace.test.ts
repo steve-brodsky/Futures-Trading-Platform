@@ -7,6 +7,7 @@ import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./economicEvents";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
 import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAX_CHART_TABS, moveTab, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
+import { DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS } from "./contractRoll";
 
 const fallback: WorkspaceState = {
   revision: 0,
@@ -16,7 +17,7 @@ const fallback: WorkspaceState = {
   drawings: {},
   gexSelections: {},
   watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
 
 describe("chart workspace", () => {
@@ -206,6 +207,32 @@ describe("chart workspace", () => {
       settings: { ...fallback.settings, orderTicket: { ...fallback.settings.orderTicket, sizingMode: "other", riskSizingPolicy: "other", riskAmount: -5 } },
     }, fallback);
     expect(invalid.settings.orderTicket).toMatchObject({ sizingMode: "contracts", riskSizingPolicy: "strict", riskAmount: undefined });
+  });
+
+  it("normalizes contract rollover alert audio settings for legacy and invalid saves", () => {
+    const legacy = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, contractRollAlerts: undefined },
+    }, fallback);
+    expect(legacy.settings.contractRollAlerts).toEqual(DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS);
+
+    const configured = normalizeChartWorkspace({
+      ...fallback,
+      settings: {
+        ...fallback.settings,
+        contractRollAlerts: { audioEnabled: false, sound: "bell", durationSeconds: 5 },
+      },
+    }, fallback);
+    expect(configured.settings.contractRollAlerts).toEqual({ audioEnabled: false, sound: "bell", durationSeconds: 5 });
+
+    const invalid = normalizeChartWorkspace({
+      ...fallback,
+      settings: {
+        ...fallback.settings,
+        contractRollAlerts: { audioEnabled: "yes", sound: "noise", durationSeconds: 8 },
+      },
+    }, fallback);
+    expect(invalid.settings.contractRollAlerts).toEqual(DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS);
   });
 
   it("accepts changed global settings from a workspace broadcast", () => {

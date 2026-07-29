@@ -47,8 +47,15 @@ import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, 
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
 import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./lib/economicEvents";
+import {
+  DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS,
+  chicagoDateKey,
+  contractRollAlertReceiptKey,
+  contractRollStatus,
+  equityIndexContractRoot,
+} from "./lib/contractRoll";
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -83,7 +90,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, journal: { commissionPerContractSide: 0.4 } },
+  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -137,7 +144,16 @@ interface BarSubscription {
 }
 
 type ReviewState =
-  | { kind: "entry"; draft: OrderDraft; preview: OrderPreview; sourceTabId: string; chartSymbol: string }
+  | {
+    kind: "entry";
+    draft: OrderDraft;
+    preview?: OrderPreview;
+    sourceTabId: string;
+    chartSymbol: string;
+    rolloverStatus?: ContractRollStatus;
+    rolloverAcknowledged: boolean;
+    previewLoading?: boolean;
+  }
   | { kind: "close-position"; draft: OrderDraft; preview: OrderPreview; positionId: string };
 
 interface EntryScreenshotCandidate {
@@ -177,6 +193,35 @@ function activeProtectionIds(expirations: Map<string, number>, now = Date.now())
 
 function formatPrice(value?: number): string {
   return value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+}
+
+function formatRollDate(value: string): string {
+  const date = new Date(`${value}T12:00:00Z`);
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
+
+const CONTRACT_ROLL_RECEIPTS_KEY = "northstar-contract-roll-alert-receipts";
+
+function loadContractRollReceipts(): Record<string, string> {
+  try {
+    const value = JSON.parse(localStorage.getItem(CONTRACT_ROLL_RECEIPTS_KEY) ?? "{}");
+    return value != null && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, string>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveContractRollReceipts(receipts: Record<string, string>) {
+  try { localStorage.setItem(CONTRACT_ROLL_RECEIPTS_KEY, JSON.stringify(receipts)); }
+  catch { /* Device-local receipt persistence is best effort. */ }
 }
 
 function supportsGex(symbol: SymbolMeta): boolean {
@@ -577,7 +622,46 @@ function TradingApp() {
   const activeAlertCount = ALERT_TIMEFRAMES.filter((timeframe) => activeTab.ema200Alert[timeframe].enabled).length;
   const activeLineAlerts = useMemo(() => activeDrawingAlerts(workspace.drawings), [workspace.drawings]);
   const chartSymbolsKey = [...new Set(workspace.tabs.map((tab) => instrumentKey(tab.symbol)))].sort().join("|");
-  const tradeDetailSymbolsKey = [...new Set(workspace.tabs.filter((tab) => isContinuousFuture(tab.symbol)).map(resolveTradeSymbol).filter((symbol): symbol is string => Boolean(symbol)))].sort().join("|");
+  const tradeDetailSymbolsKey = [...new Set([
+    ...workspace.tabs.map(resolveTradeSymbol),
+    ...positions.filter((position) => Math.abs(position.quantity) > 0).map((position) => position.symbol.trim().toUpperCase()),
+  ].filter((symbol): symbol is string => Boolean(symbol)))].sort().join("|");
+  const monitoredRollMetas = useMemo(() => {
+    const instruments = new Map<string, SymbolMeta>();
+    workspace.tabs.forEach((tab) => {
+      const symbol = resolveTradeSymbol(tab);
+      if (!symbol) return;
+      const meta = tradeDetails[symbol] ?? (!isContinuousFuture(tab.symbol) ? tab.symbol : undefined);
+      if (meta && equityIndexContractRoot(meta)) instruments.set(symbol, meta);
+    });
+    positions.forEach((position) => {
+      if (Math.abs(position.quantity) === 0) return;
+      const symbol = position.symbol.trim().toUpperCase();
+      const meta = tradeDetails[symbol];
+      if (meta && equityIndexContractRoot(meta)) instruments.set(symbol, meta);
+    });
+    return [...instruments.values()];
+  }, [workspace.tabs, positions, tradeDetails]);
+  const rollRootsKey = [...new Set(monitoredRollMetas
+    .map((meta) => equityIndexContractRoot(meta))
+    .filter((root): root is string => Boolean(root)))].sort().join("|");
+  const contractRollDateKey = chicagoDateKey(currentTime);
+  const contractChoiceRootsKey = [...new Set([
+    ...rollRootsKey.split("|").filter(Boolean),
+    ...(activeContinuous && activeTab.symbol.root ? [activeTab.symbol.root.toUpperCase()] : []),
+  ])].sort().join("|");
+  const monitoredRollStatuses = useMemo(() => monitoredRollMetas
+    .map((meta) => contractRollStatus(meta, contractChoices[equityIndexContractRoot(meta) ?? ""] ?? [], contractRollDateKey))
+    .filter((status): status is ContractRollStatus => Boolean(status && status.phase !== "clear"))
+    .sort((left, right) => left.rollDate.localeCompare(right.rollDate) || left.symbol.localeCompare(right.symbol)),
+  [monitoredRollMetas, contractChoices, contractRollDateKey]);
+  const positionRollStatuses = useMemo(() => Object.fromEntries(positions.flatMap((position) => {
+    const symbol = position.symbol.trim().toUpperCase();
+    const meta = tradeDetails[symbol];
+    const root = meta && equityIndexContractRoot(meta);
+    const status = contractRollStatus(meta, root ? contractChoices[root] ?? [] : [], contractRollDateKey);
+    return status && status.phase !== "clear" ? [[symbol, status]] : [];
+  })), [positions, tradeDetails, contractChoices, contractRollDateKey]);
   const quoteInstruments = quoteSubscriptionInstruments(workspace);
   const quoteSymbolsKey = quoteInstruments.map(instrumentKey).join("|");
   const vwapSymbolsKey = nySessionVwapSymbols(workspace.tabs).join("|");
@@ -2053,17 +2137,70 @@ function TradingApp() {
   }, [workspaceLoaded, authenticated, environment, authEpoch, tradeDetailSymbolsKey]);
 
   useEffect(() => {
-    const root = activeContinuous ? activeTab.symbol.root : undefined;
-    if (!workspaceLoaded || !root || api.isNative && !authenticated) return;
+    const roots = contractChoiceRootsKey.split("|").filter(Boolean);
+    if (!workspaceLoaded || !roots.length || api.isNative && !authenticated) return;
     let active = true;
-    setContractLookupErrors((current) => ({ ...current, [root]: "" }));
-    api.futureContracts(root).then((contracts) => {
-      if (active) setContractChoices((current) => ({ ...current, [root]: contracts }));
-    }).catch((error) => {
-      if (active) setContractLookupErrors((current) => ({ ...current, [root]: String(error) }));
+    const refresh = async () => {
+      const items = await Promise.all(roots.map(async (root) => {
+        try { return { root, contracts: await api.futureContracts(root) }; }
+        catch (error) { return { root, error: String(error) }; }
+      }));
+      if (!active) return;
+      setContractChoices((current) => {
+        const next = { ...current };
+        items.forEach((item) => { if (item.contracts) next[item.root] = item.contracts; });
+        return next;
+      });
+      setContractLookupErrors((current) => {
+        const next = { ...current };
+        items.forEach((item) => {
+          if (item.error) next[item.root] = item.error;
+          else delete next[item.root];
+        });
+        return next;
+      });
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 15 * 60_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [workspaceLoaded, authenticated, environment, authEpoch, contractChoiceRootsKey]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !monitoredRollStatuses.length) return;
+    const receipts = loadContractRollReceipts();
+    Object.entries(receipts).forEach(([key, date]) => {
+      if (!date || date < contractRollDateKey.slice(0, 4) + "-01-01") delete receipts[key];
     });
-    return () => { active = false; };
-  }, [workspaceLoaded, authenticated, environment, authEpoch, activeContinuous, activeTab.symbol.root]);
+    const unseen = monitoredRollStatuses.filter((status) => {
+      const key = contractRollAlertReceiptKey(status, contractRollDateKey);
+      if (receipts[key]) return false;
+      receipts[key] = contractRollDateKey;
+      return true;
+    });
+    if (!unseen.length) return;
+    saveContractRollReceipts(receipts);
+    setNotifications((current) => [
+      ...unseen.map((status): ActivityNotification => ({
+        id: crypto.randomUUID(),
+        symbol: status.symbol,
+        time: new Date().toISOString(),
+        title: status.phase === "roll-due" ? "Contract roll date reached" : "Contract roll approaching",
+        text: status.phase === "roll-due"
+          ? `${status.symbol} is past its customary CME roll date of ${formatRollDate(status.rollDate)}.${status.nextContract ? ` The next contract is ${status.nextContract.symbol}.` : ""}`
+          : `${status.symbol} rolls ${formatRollDate(status.rollDate)} in ${status.sessionsUntilRoll} weekday session${status.sessionsUntilRoll === 1 ? "" : "s"}.${status.nextContract ? ` Next: ${status.nextContract.symbol}.` : ""}`,
+        level: "warning",
+      })),
+      ...current,
+    ].slice(0, 250));
+    if (workspace.settings.contractRollAlerts.audioEnabled) {
+      queueConfiguredAlertSounds(unseen.map(() => workspace.settings.contractRollAlerts));
+    }
+  }, [
+    workspaceLoaded,
+    monitoredRollStatuses,
+    contractRollDateKey,
+    workspace.settings.contractRollAlerts,
+  ]);
 
   async function syncCloudPreferences() {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
@@ -2396,6 +2533,16 @@ function TradingApp() {
       settings: {
         ...current.settings,
         orderTicket: { ...current.settings.orderTicket, ...patch },
+      },
+    }));
+  }
+
+  function updateContractRollAlertSettings(patch: Partial<ContractRollAlertSettings>) {
+    commitWorkspace((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        contractRollAlerts: { ...current.settings.contractRollAlerts, ...patch },
       },
     }));
   }
@@ -2885,6 +3032,14 @@ function TradingApp() {
     finally { setBusy(false); }
   }
 
+  function rollStatusForSymbol(symbol: string): ContractRollStatus | undefined {
+    const normalized = symbol.trim().toUpperCase();
+    const tab = workspace.tabs.find((item) => resolveTradeSymbol(item) === normalized);
+    const meta = tradeDetails[normalized] ?? (tab && !isContinuousFuture(tab.symbol) ? tab.symbol : undefined);
+    const root = meta && equityIndexContractRoot(meta);
+    return contractRollStatus(meta, root ? contractChoices[root] ?? [] : [], chicagoDateKey());
+  }
+
   function eligibilityForEntry(sourceTabId: string, expectedChartSymbol: string, expectedTradeSymbol: string): Record<EntryRuleSide, EntryRuleResult> {
     const tab = workspace.tabs.find((item) => item.id === sourceTabId);
     if (!tab || tab.symbol.symbol !== expectedChartSymbol) {
@@ -2904,10 +3059,57 @@ function TradingApp() {
 
   async function openReview(draft: OrderDraft, sourceTabId: string, chartSymbol: string) {
     if (!api.isNative) return showToast("Browser demo mode cannot place orders. Run the Tauri app to connect.");
+    const rolloverStatus = rollStatusForSymbol(draft.symbol);
+    if (rolloverStatus?.phase === "roll-due") {
+      setReview({
+        kind: "entry",
+        sourceTabId,
+        chartSymbol,
+        draft,
+        rolloverStatus,
+        rolloverAcknowledged: false,
+      });
+      return;
+    }
     setBusy(true);
-    try { setReview({ kind: "entry", sourceTabId, chartSymbol, draft, preview: await api.confirmOrder(draft) }); }
+    try {
+      setReview({
+        kind: "entry",
+        sourceTabId,
+        chartSymbol,
+        draft,
+        preview: await api.confirmOrder(draft),
+        rolloverAcknowledged: false,
+      });
+    }
     catch (error) { showToast(String(error)); }
     finally { setBusy(false); }
+  }
+
+  async function setRolloverAcknowledged(acknowledged: boolean) {
+    if (!review || review.kind !== "entry" || !review.rolloverStatus) return;
+    if (!acknowledged) {
+      setReview({ ...review, rolloverAcknowledged: false, preview: undefined, previewLoading: false });
+      return;
+    }
+    const draft = review.draft;
+    setReview({ ...review, rolloverAcknowledged: true, preview: undefined, previewLoading: true });
+    setBusy(true);
+    try {
+      const preview = await api.confirmOrder({ ...draft, rolloverAcknowledged: true });
+      setReview((current) => current?.kind === "entry"
+        && current.draft.symbol === draft.symbol
+        && current.draft.accountId === draft.accountId
+        ? { ...current, rolloverAcknowledged: true, previewLoading: false, preview }
+        : current);
+    } catch (error) {
+      setReview((current) => current?.kind === "entry"
+        ? { ...current, rolloverAcknowledged: false, previewLoading: false, preview: undefined }
+        : current);
+      showToast(String(error));
+    } finally {
+      setBusy(false);
+    }
   }
 
   function clearSubmittedEntry(symbol: string) {
@@ -2944,7 +3146,9 @@ function TradingApp() {
     const side = draft.side === "Buy" ? "long" : "short";
     const eligibility = eligibilityForEntry(sourceTabId, chartSymbol, draft.symbol)[side];
     if (!eligibility.allowed) return showToast(`${draft.side} entry blocked: ${eligibility.reason}`);
-    if (workspace.confirmOrders) return openReview(draft, sourceTabId, chartSymbol);
+    if (workspace.confirmOrders || rollStatusForSymbol(draft.symbol)?.phase === "roll-due") {
+      return openReview(draft, sourceTabId, chartSymbol);
+    }
     if (!api.isNative) return showToast("Browser demo mode cannot place orders. Run the Tauri app to connect.");
     const screenshotCandidateId = armEntryScreenshot(draft, sourceTabId, chartSymbol);
     setBusy(true);
@@ -3103,13 +3307,29 @@ function TradingApp() {
       setReview(null);
       return executeClosePosition(positionId);
     }
-    const side = review.draft.side === "Buy" ? "long" : "short";
-    const eligibility = eligibilityForEntry(review.sourceTabId, review.chartSymbol, review.draft.symbol)[side];
-    if (!eligibility.allowed) return showToast(`${review.draft.side} entry blocked: ${eligibility.reason}`);
-    const screenshotCandidateId = armEntryScreenshot(review.draft, review.sourceTabId, review.chartSymbol);
+    const latestRollStatus = rollStatusForSymbol(review.draft.symbol);
+    if (latestRollStatus?.phase === "roll-due" && (!review.rolloverAcknowledged || !review.preview)) {
+      setReview({
+        ...review,
+        rolloverStatus: latestRollStatus,
+        rolloverAcknowledged: false,
+        preview: undefined,
+        previewLoading: false,
+      });
+      return showToast(`Acknowledge the ${review.draft.symbol} rollover warning before submitting.`);
+    }
+    if (!review.preview?.valid) return showToast("The broker preview must be valid before submitting.");
+    const submittedDraft: OrderDraft = {
+      ...review.draft,
+      rolloverAcknowledged: latestRollStatus?.phase === "roll-due" ? true : undefined,
+    };
+    const side = submittedDraft.side === "Buy" ? "long" : "short";
+    const eligibility = eligibilityForEntry(review.sourceTabId, review.chartSymbol, submittedDraft.symbol)[side];
+    if (!eligibility.allowed) return showToast(`${submittedDraft.side} entry blocked: ${eligibility.reason}`);
+    const screenshotCandidateId = armEntryScreenshot(submittedDraft, review.sourceTabId, review.chartSymbol);
     setBusy(true);
     try {
-      const result = await api.placeOrder(review.draft);
+      const result = await api.placeOrder(submittedDraft);
       reportMutation(result, "Order");
       const update = result.brokerOrder;
       if (result.brokerOutcome !== "confirmed" || !update) {
@@ -3121,7 +3341,7 @@ function TradingApp() {
       recentOrderIdsRef.current.set(update.id, Date.now() + 15_000);
       setOrders((current) => upsertStreamOrder(current, update));
       brokerageRefreshRef.current(true);
-      if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(review.draft.symbol);
+      if (["Working", "Filled", "Pending"].includes(update.status)) clearSubmittedEntry(submittedDraft.symbol);
       setReview(null);
       showToast(`Order ${update.status.toLowerCase()}: ${update.id}`);
     } catch (error) {
@@ -3160,8 +3380,9 @@ function TradingApp() {
   const reviewEntryEligibility = review?.kind === "entry"
     ? eligibilityForEntry(review.sourceTabId, review.chartSymbol, review.draft.symbol)[review.draft.side === "Buy" ? "long" : "short"]
     : null;
-  const activeRoot = activeTab.symbol.root;
+  const activeRoot = activeTab.symbol.root?.toUpperCase();
   const activeContracts = activeRoot ? contractChoices[activeRoot] ?? [] : [];
+  const activeRollStatus = contractRollStatus(activeTradeMeta, activeContracts, contractRollDateKey);
   const activeGexSupported = supportsGex(activeTab.symbol);
   const activeGexMarket = activeGexSupported ? gexMarkets[activeTab.symbol.symbol] : undefined;
   const activeGexSelection = normalizeGexSelection(workspace.gexSelections[activeTab.symbol.symbol] ?? defaultGexSelection());
@@ -3180,6 +3401,17 @@ function TradingApp() {
   const activeOrderProjection = !isDetached && workspace.rightPanelOpen
     && orderProjection && orderProjection.tradeSymbol === activeTradeSymbol ? orderProjection : undefined;
   const activeOrderTicketResetEpoch = activeTradeSymbol ? orderTicketResetEpochs[activeTradeSymbol] ?? 0 : 0;
+  const useNextActiveContract = () => {
+    const next = activeRollStatus?.nextContract;
+    if (!next) return;
+    if (activeContinuous) {
+      updateActiveTab({ tradeContract: next.symbol });
+      showToast(`Trade contract changed to ${next.symbol}.`);
+      return;
+    }
+    selectSymbol(next);
+    showToast(`Chart changed to ${next.symbol}.`);
+  };
   const projectedEntryPrice = (projection: OrderProjection) => (projection.side ?? "Buy") === "Buy" ? activeTradeQuote.ask : activeTradeQuote.bid;
   const editProjectedExit = (field: ProjectedExitField, price: number) => setOrderProjection((current) => {
     if (!current || current.tradeSymbol !== activeTradeSymbol) return current;
@@ -3413,11 +3645,11 @@ function TradingApp() {
         {workspace.rightPanelOpen && <div id="order-panel-content" className="right-panel-content">
           {activeTab.symbol.provider === "schwab"
             ? <div className="equity-order-disabled"><span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p></div>
-            : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}
+            : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} rollStatus={activeRollStatus} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onUseNextContract={useNextActiveContract} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}
         </div>}
       </aside>}
 
-      {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
+      {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} positionRollStatuses={positionRollStatuses} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
     </section>
 
     {tradingTodayOpen && !isDetached && <TradingTodayModal
@@ -3474,6 +3706,15 @@ function TradingApp() {
       <WatchlistSettings workspace={workspace} onChange={(watchlist) => updateWorkspace({ watchlist })} onNotify={showToast} />
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Chart display</h3><p>Configure tab signals and the values shown beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>EMA 200 tab status</strong><small>Green above EMA 200, red below</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showEma200TabDots} onChange={(event) => updateChartLabelSettings({ showEma200TabDots: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure risk sizing and projected swing stops.</p></header><label className="settings-control-row"><span><strong>Risk budget behavior</strong><small>Choose whether risk sizing may exceed the limit</small></span><select aria-label="Risk budget behavior" value={workspace.settings.orderTicket.riskSizingPolicy} onChange={(event) => updateOrderTicketSettings({ riskSizingPolicy: event.target.value as OrderTicketSettings["riskSizingPolicy"] })}><option value="strict">Stay within risk</option><option value="minimum-one">Always allow 1 contract</option></select></label><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
+      <section className="settings-section" aria-labelledby="contract-roll-alert-settings">
+        <header><span>Trading</span><h3 id="contract-roll-alert-settings">Contract rollover alerts</h3><p>Visual warnings and order acknowledgment stay active. Configure the once-daily alert sound.</p></header>
+        <label className="switch-row settings-row"><span><strong>Daily sound</strong><small>Once per affected contract and Chicago calendar date</small></span><input type="checkbox" checked={workspace.settings.contractRollAlerts.audioEnabled} onChange={(event) => updateContractRollAlertSettings({ audioEnabled: event.target.checked })} /></label>
+        <div className="contract-roll-audio-settings">
+          <label><span>Sound</span><select aria-label="Contract rollover alert sound" disabled={!workspace.settings.contractRollAlerts.audioEnabled} value={workspace.settings.contractRollAlerts.sound} onChange={(event) => updateContractRollAlertSettings({ sound: event.target.value as AlertSound })}>{ALERT_SOUNDS.map((sound) => <option key={sound.value} value={sound.value}>{sound.label}</option>)}</select></label>
+          <label><span>Duration</span><select aria-label="Contract rollover alert duration" disabled={!workspace.settings.contractRollAlerts.audioEnabled} value={workspace.settings.contractRollAlerts.durationSeconds} onChange={(event) => updateContractRollAlertSettings({ durationSeconds: Number(event.target.value) as AlertDurationSeconds })}>{ALERT_DURATIONS.map((duration) => <option key={duration} value={duration}>{duration}s</option>)}</select></label>
+          <button type="button" disabled={!workspace.settings.contractRollAlerts.audioEnabled} onClick={() => playAlertSound(workspace.settings.contractRollAlerts.sound, workspace.settings.contractRollAlerts.durationSeconds)}>Preview</button>
+        </div>
+      </section>
       {selectedAccount && riskStatus && <RiskSafetySettings account={selectedAccount} environment={environment} status={riskStatus} transitioning={environmentTransitioning} onStatus={setRiskStatus} onNotify={showToast} />}
       <section className="settings-section" aria-labelledby="audit-log-settings"><header><span>Diagnostics</span><h3 id="audit-log-settings">Audit log</h3><p>Review API activity and saved record changes retained locally for seven days.</p></header><button type="button" className="settings-audit-row" onClick={() => { setSettingsOpen(false); setAuditLogOpen(true); }}><span className={auditHealth.healthy ? "healthy" : "degraded"}><Activity size={16} /><i /></span><span><strong>{auditHealth.healthy ? "Logging healthy" : "Logging degraded"}</strong><small>{auditHealth.sessionOnly ? "Session-only browser diagnostics" : auditHealth.healthy ? "Local device only · 10,000 event maximum" : `${auditHealth.droppedEvents} event${auditHealth.droppedEvents === 1 ? "" : "s"} may be missing`}</small></span><em>Open audit log</em></button></section>
       <section className="settings-section" aria-labelledby="journal-fee-settings"><header><span>Journal</span><h3 id="journal-fee-settings">Commission and fees</h3><p>Used for journal net P&amp;L on every opening and closing fill.</p></header><label className="settings-control-row"><span><strong>Fee per contract, per side</strong><small>One contract opened and closed is charged twice</small></span><div className="settings-number-control"><input aria-label="Journal fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.commissionPerContractSide} onChange={(event) => updateJournalCommission(Number(event.target.value))} /><span>USD</span></div></label></section>
@@ -3552,7 +3793,32 @@ function TradingApp() {
       />
     </Modal>}
 
-    {review && <Modal title={review.kind === "close-position" ? "Close position" : "Review order"} onClose={() => setReview(null)}><div className="review-hero"><span className={review.draft.side === "Buy" ? "buy" : "sell"}>{review.draft.side}</span><strong>{review.draft.quantity} {review.draft.symbol}</strong><small>{review.kind === "close-position" ? "Market close · cancels working exits first" : `${review.draft.type} · ${review.draft.duration}${review.chartSymbol !== review.draft.symbol ? ` · Chart ${review.chartSymbol} · Trading ${review.draft.symbol}` : ""}`}</small></div><dl className="review-list">{review.kind === "entry" && <><div><dt>Take profit</dt><dd>{formatPrice(review.draft.takeProfit)}</dd></div><div><dt>Stop loss</dt><dd>{formatPrice(review.draft.stopLoss)}</dd></div></>}<div><dt>Estimated commission</dt><dd>{review.preview.estimatedCommission ?? "—"}</dd></div><div><dt>Initial margin</dt><dd>{review.preview.initialMargin ?? "—"}</dd></div><div><dt>Environment</dt><dd className={environment === "live" ? "negative" : "cyan"}>{environment.toUpperCase()}</dd></div></dl><p className="preview-summary">{review.kind === "close-position" ? "All working close-side orders for this symbol will be cancelled and confirmed inactive before the market close is submitted." : review.preview.summary}</p>{reviewEntryEligibility && <p className={`entry-review-rule ${reviewEntryEligibility.status}`}>{reviewEntryEligibility.reason}</p>}<button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview.valid || busy || Boolean(reviewEntryEligibility && !reviewEntryEligibility.allowed)} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button></Modal>}
+    {review && <Modal title={review.kind === "close-position" ? "Close position" : review.rolloverStatus ? "Rollover acknowledgment" : "Review order"} onClose={() => setReview(null)}>
+      <div className="review-hero">
+        <span className={review.draft.side === "Buy" ? "buy" : "sell"}>{review.draft.side}</span>
+        <strong>{review.draft.quantity} {review.draft.symbol}</strong>
+        <small>{review.kind === "close-position" ? "Market close · cancels working exits first" : `${review.draft.type} · ${review.draft.duration}${review.chartSymbol !== review.draft.symbol ? ` · Chart ${review.chartSymbol} · Trading ${review.draft.symbol}` : ""}`}</small>
+      </div>
+      {review.kind === "entry" && review.rolloverStatus && <div className="rollover-review-warning">
+        <CalendarDays size={17} />
+        <span><strong>{review.draft.symbol} passed its customary roll date</strong><small>Roll date: {formatRollDate(review.rolloverStatus.rollDate)}{review.rolloverStatus.nextContract ? ` · Lead contract: ${review.rolloverStatus.nextContract.symbol}` : ""}</small></span>
+      </div>}
+      <dl className="review-list">
+        {review.kind === "entry" && <><div><dt>Take profit</dt><dd>{formatPrice(review.draft.takeProfit)}</dd></div><div><dt>Stop loss</dt><dd>{formatPrice(review.draft.stopLoss)}</dd></div></>}
+        <div><dt>Estimated commission</dt><dd>{review.preview?.estimatedCommission ?? (review.kind === "entry" && review.previewLoading ? "Checking…" : "—")}</dd></div>
+        <div><dt>Initial margin</dt><dd>{review.preview?.initialMargin ?? "—"}</dd></div>
+        <div><dt>Environment</dt><dd className={environment === "live" ? "negative" : "cyan"}>{environment.toUpperCase()}</dd></div>
+      </dl>
+      {review.kind === "entry" && review.rolloverStatus && <label className="rollover-acknowledgment">
+        <input type="checkbox" checked={review.rolloverAcknowledged} disabled={review.previewLoading || busy} onChange={(event) => { void setRolloverAcknowledged(event.target.checked); }} />
+        <span><strong>I intend to trade {review.draft.symbol} after its CME roll date.</strong><small>This acknowledgment applies to this order only and will not be remembered.</small></span>
+      </label>}
+      <p className="preview-summary">{review.kind === "close-position"
+        ? "All working close-side orders for this symbol will be cancelled and confirmed inactive before the market close is submitted."
+        : review.preview?.summary ?? (review.rolloverStatus ? "A broker preview will load after you acknowledge the rollover risk." : "Waiting for broker preview.")}</p>
+      {reviewEntryEligibility && <p className={`entry-review-rule ${reviewEntryEligibility.status}`}>{reviewEntryEligibility.reason}</p>}
+      <button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview?.valid || busy || Boolean(review.kind === "entry" && review.rolloverStatus && !review.rolloverAcknowledged) || Boolean(reviewEntryEligibility && !reviewEntryEligibility.allowed)} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button>
+    </Modal>}
 
     {toast && <div className="toast" role="status">{toast}</div>}
   </main>;
@@ -3939,7 +4205,7 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   </section>;
 }
 
-function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, settings, contracts, tradeContract, contractStatus, contractLookupError, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, resetEpoch, onTradeContractChange, onSettingsChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; bars: Bar[]; timeframe: Timeframe; settings: OrderTicketSettings; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; resetEpoch: number; onTradeContractChange: (symbol?: string) => void; onSettingsChange: (patch: Partial<OrderTicketSettings>) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {
+function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, settings, contracts, tradeContract, contractStatus, contractLookupError, rollStatus, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, resetEpoch, onTradeContractChange, onUseNextContract, onSettingsChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; bars: Bar[]; timeframe: Timeframe; settings: OrderTicketSettings; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; rollStatus?: ContractRollStatus; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; resetEpoch: number; onTradeContractChange: (symbol?: string) => void; onUseNextContract: () => void; onSettingsChange: (patch: Partial<OrderTicketSettings>) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {
   const symbol = tradeSymbol ?? chartSymbol;
   const continuous = isContinuousFuture(chartSymbol);
   const [side, setSide] = useState<"Buy" | "Sell">("Buy");
@@ -4171,6 +4437,16 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
   return <div className="order-ticket">
     <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
     {continuous && <label className="trade-contract-field"><span><strong>Trade contract</strong><small>Chart {chartSymbol.symbol}</small></span><select aria-label="Trade contract" value={tradeContract ?? "__auto__"} onChange={(event) => onTradeContractChange(event.target.value === "__auto__" ? undefined : event.target.value)}><option value="__auto__">Auto · {chartSymbol.underlying ?? "Unavailable"}</option>{manualMissing && <option value={tradeContract}>{tradeContract} · Saved selection</option>}{contracts.map((contract) => <option key={contract.symbol} value={contract.symbol}>{contract.symbol} · {formatContractExpiration(contract.expiration)}</option>)}</select>{contractStatus && <small className="negative">{contractStatus}</small>}{!contractStatus && contractLookupError && <small className="negative">Contract list unavailable; the current selection is unchanged.</small>}</label>}
+    {rollStatus && rollStatus.phase !== "clear" && <div className={`contract-roll-warning ${rollStatus.phase}`} role={rollStatus.phase === "roll-due" ? "alert" : "status"}>
+      <CalendarDays size={15} />
+      <span>
+        <strong>{rollStatus.phase === "roll-due" ? "Contract roll date reached" : `Roll in ${rollStatus.sessionsUntilRoll} session${rollStatus.sessionsUntilRoll === 1 ? "" : "s"}`}</strong>
+        <small>{rollStatus.phase === "roll-due"
+          ? `${rollStatus.symbol} is no longer the customary lead month as of ${formatRollDate(rollStatus.rollDate)}.`
+          : `${rollStatus.symbol} rolls ${formatRollDate(rollStatus.rollDate)}.${rollStatus.nextContract ? ` Next: ${rollStatus.nextContract.symbol}.` : ""}`}</small>
+      </span>
+      {rollStatus.nextContract && <button type="button" onClick={onUseNextContract}>{continuous ? "Trade" : "Switch chart"} {rollStatus.nextContract.symbol}</button>}
+    </div>}
     <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => { setSide("Sell"); publishProjection(takeProfit, stopLoss, "Sell"); }}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => { setSide("Buy"); publishProjection(takeProfit, stopLoss, "Buy"); }}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
     <div className="field compact sizing-field">
       <div className="sizing-mode" role="group" aria-label="Position sizing method">
@@ -4193,8 +4469,8 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
   </div>;
 }
 
-function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange, accounts, account, positions, orders, balances, bodBalances, history, setHistory, loading, error, streamState, notifications, closingPositionIds, onClosePosition, onNotify, onCancel }: {
-  workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; maximized: boolean; onMaximizedChange: (maximized: boolean) => void; accounts: Account[]; account?: Account; positions: Position[]; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; streamState: StreamConnectionState; notifications: ActivityNotification[]; closingPositionIds: Set<string>; onClosePosition: (position: Position) => void; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
+function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange, accounts, account, positions, positionRollStatuses, orders, balances, bodBalances, history, setHistory, loading, error, streamState, notifications, closingPositionIds, onClosePosition, onNotify, onCancel }: {
+  workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; maximized: boolean; onMaximizedChange: (maximized: boolean) => void; accounts: Account[]; account?: Account; positions: Position[]; positionRollStatuses: Record<string, ContractRollStatus>; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; streamState: StreamConnectionState; notifications: ActivityNotification[]; closingPositionIds: Set<string>; onClosePosition: (position: Position) => void; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
 }) {
   const tabs: Array<[WorkspaceState["bottomTab"], string]> = [["positions", "Positions"], ["orders", "Orders"], ["history", "Order history"], ["summary", "Account summary"], ["notifications", "Notifications log"]];
   const [orderFilter, setOrderFilter] = useState("All");
@@ -4285,7 +4561,7 @@ function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange,
     {workspace.bottomPanelOpen && <><div className="account-summary"><select value={account?.id ?? ""} onChange={(event) => updateWorkspace({ selectedAccountId: event.target.value })}>{accounts.map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Today’s profit</dt><dd>{money(balance?.realizedProfitLoss)}</dd></div><div><dt>Unrealized PnL</dt><dd>{money(balance?.unrealizedProfitLoss ?? positions.reduce((sum, item) => sum + item.unrealizedPnl, 0))}</dd></div></dl></div>
     <nav className="bottom-tabs">{tabs.map(([tab, label]) => <button key={tab} className={workspace.bottomTab === tab ? "active" : ""} onClick={() => updateWorkspace({ bottomTab: tab })}>{label}</button>)}<button className="export-button" title="Export active tab to CSV" onClick={exportRows}><Download size={16} /></button></nav>
     <div className="table-wrap">{error && <div className="panel-error">{error}</div>}
-      {workspace.bottomTab === "positions" && (positions.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Stop loss</th><th>Take profit</th><th>Last price</th><th>Bid price</th><th>Ask price</th><th>Unrealized PnL</th><th>PnL quantity</th><th>PnL percent</th><th /></tr></thead><tbody>{positions.map((p) => { const closing = closingPositionIds.has(p.id); return <tr key={p.id}><td><strong>{p.symbol}</strong></td><td className={p.side === "Long" ? "buy-text" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{money(p.averagePrice)}</td><td>—</td><td>—</td><td>{money(p.last)}</td><td>{money(p.bid)}</td><td>{money(p.ask)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(p.unrealizedPnl)}</td><td>{money(p.unrealizedPnlQuantity)}</td><td>{p.unrealizedPnlPercent == null ? "—" : `${p.unrealizedPnlPercent.toFixed(2)}%`}</td><td><button className="close-position-button" disabled={closing} onClick={() => onClosePosition(p)}><X size={12} />{closing ? "Closing…" : "Close Position"}</button></td></tr>; })}</tbody></table> : <Empty label="There are no open positions in this account" />)}
+      {workspace.bottomTab === "positions" && (positions.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Stop loss</th><th>Take profit</th><th>Last price</th><th>Bid price</th><th>Ask price</th><th>Unrealized PnL</th><th>PnL quantity</th><th>PnL percent</th><th /></tr></thead><tbody>{positions.map((p) => { const closing = closingPositionIds.has(p.id); const roll = positionRollStatuses[p.symbol.trim().toUpperCase()]; return <tr key={p.id}><td><span className="position-symbol"><strong>{p.symbol}</strong>{roll && <small className={`contract-roll-badge ${roll.phase}`} title={`${p.symbol} rolls ${formatRollDate(roll.rollDate)}. Positions are never rolled automatically.`}>{roll.phase === "roll-due" ? "ROLL DUE" : `${roll.sessionsUntilRoll}D`}</small>}</span></td><td className={p.side === "Long" ? "buy-text" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{money(p.averagePrice)}</td><td>—</td><td>—</td><td>{money(p.last)}</td><td>{money(p.bid)}</td><td>{money(p.ask)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(p.unrealizedPnl)}</td><td>{money(p.unrealizedPnlQuantity)}</td><td>{p.unrealizedPnlPercent == null ? "—" : `${p.unrealizedPnlPercent.toFixed(2)}%`}</td><td><button className="close-position-button" disabled={closing} onClick={() => onClosePosition(p)}><X size={12} />{closing ? "Closing…" : "Close Position"}</button></td></tr>; })}</tbody></table> : <Empty label="There are no open positions in this account" />)}
       {workspace.bottomTab === "orders" && <><div className="table-filters">{["All", "Working", "Inactive", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={orderFilter === filter ? "active" : ""} onClick={() => setOrderFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleOrders} /></>}
       {workspace.bottomTab === "history" && <><div className="history-controls"><label>From <input type="date" value={since} max={until} onChange={(e) => setSince(e.target.value)} /></label><label>To <input type="date" value={until} min={since} onChange={(e) => setUntil(e.target.value)} /></label>{["All", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={historyFilter === filter ? "active" : ""} onClick={() => setHistoryFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleHistory} />{history.nextToken && <button className="load-more" disabled={historyLoading} onClick={() => loadHistory(true)}>{historyLoading ? "Loading…" : "Load more"}</button>}</>}
       {workspace.bottomTab === "summary" && <div className="balance-sections"><BalanceSection title="Real-time" balance={balance} money={money} /><BalanceSection title="Beginning of day" balance={bod} money={money} /></div>}

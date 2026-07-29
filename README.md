@@ -36,6 +36,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 - SIM and LIVE TradeStation environments with an explicit environment-switch confirmation.
 - Market entries with required server-side take-profit and stop-loss brackets, DAY/GTC duration, tick validation, and estimated dollar risk.
 - Automatic or manually selected concrete trade contract when charting a continuous futures symbol. Continuous symbols themselves are never sent as order symbols.
+- CME U.S. equity-index rollover warnings for charts and positions, with daily audio/log alerts, explicit next-contract actions, and a native per-order acknowledgment requirement after the customary roll date.
 - Optional order-review step using TradeStation's confirmation endpoint, including commission and initial-margin estimates when supplied by the API.
 - Long and short entry rules built from nested AND/OR comparisons between market price, SMA, and EMA values.
 - Per-side entry-rule alerts across every open chart, with sound, toast/log output, and persistent Long/Short tab badges.
@@ -272,7 +273,7 @@ The main window owns shared streams and persisted workspace state. Detached wind
 
 ### 2. Complete the core trading workspace
 
-- Add editable watchlists with remote symbol metadata, multiple named lists, drag ordering, and contract-roll assistance.
+- Add editable watchlists with remote symbol metadata, multiple named lists, drag ordering, and watchlist-level contract-roll visibility.
 - Expose limit, stop-market, and stop-limit entries in the ticket; the native order layer already supports them.
 - Add quantity presets and risk-based sizing from stop distance, account equity, and a configurable risk percentage.
 - Expand chart trading to create, modify, and cancel working entry orders, plus cancel-all and flatten-all actions with explicit safeguards.

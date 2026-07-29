@@ -3812,6 +3812,7 @@ mod tests {
             duration: "DAY".into(),
             take_profit: Some(6260.0),
             stop_loss: Some(6245.0),
+            rollover_acknowledged: false,
         };
         let meta = SymbolMeta {
             provider: MarketDataProvider::Tradestation,
@@ -3893,6 +3894,7 @@ mod tests {
             duration: "DAY".into(),
             take_profit: Some(6260.0),
             stop_loss: Some(6245.0),
+            rollover_acknowledged: false,
         };
         let meta = SymbolMeta {
             provider: MarketDataProvider::Tradestation,

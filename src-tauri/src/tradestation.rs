@@ -2137,6 +2137,7 @@ fn flatten_draft(account_id: &str, position: &Position) -> Result<OrderDraft, Ap
         duration: "DAY".into(),
         take_profit: None,
         stop_loss: None,
+        rollover_acknowledged: false,
     })
 }
 

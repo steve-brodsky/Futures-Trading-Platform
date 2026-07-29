@@ -2,7 +2,8 @@ use crate::{
     models::{AccountBalance, OrderDraft, OrderUpdate, Position, SymbolMeta, TradingEnvironment},
     AppError,
 };
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Timelike, Utc};
+use chrono_tz::America::Chicago;
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -888,6 +889,17 @@ pub fn evaluate_risk(policy: &RiskPolicy, context: RiskContext<'_>) -> RiskDecis
         };
     }
 
+    if let Some(roll_date) = equity_index_roll_date(context.meta) {
+        let chicago_date = context.now.with_timezone(&Chicago).date_naive();
+        if chicago_date >= roll_date && !draft.rollover_acknowledged {
+            reasons.push(format!(
+                "{} passed its customary CME roll date of {}; explicitly acknowledge the rollover before placing a risk-increasing order",
+                draft.symbol,
+                roll_date.format("%Y-%m-%d")
+            ));
+        }
+    }
+
     if matches!(context.environment, TradingEnvironment::Live) && !context.live_armed {
         reasons.push("LIVE trading is not armed for this account and application session".into());
     }
@@ -1037,6 +1049,65 @@ pub fn evaluate_risk(policy: &RiskPolicy, context: RiskContext<'_>) -> RiskDecis
         estimated_trade_risk: trade_risk,
         estimated_aggregate_risk: aggregate_risk,
     }
+}
+
+fn equity_index_roll_date(meta: &SymbolMeta) -> Option<NaiveDate> {
+    const ROOTS: &[&str] = &["ES", "MES", "NQ", "MNQ", "YM", "MYM", "RTY", "M2K"];
+    let supplied_root = meta
+        .root
+        .as_deref()
+        .map(str::trim)
+        .map(|root| root.trim_start_matches('@').to_ascii_uppercase());
+    let parsed_root = if supplied_root.as_deref().map(str::is_empty).unwrap_or(true) {
+        contract_symbol_root(&meta.symbol)
+    } else {
+        supplied_root
+    }?;
+    if !ROOTS.contains(&parsed_root.as_str()) {
+        return None;
+    }
+    let expiration = parse_contract_expiration(meta.expiration.as_deref()?)?;
+    let days_since_monday = expiration.weekday().num_days_from_monday() as i64;
+    expiration.checked_sub_signed(chrono::Duration::days(days_since_monday))
+}
+
+fn contract_symbol_root(symbol: &str) -> Option<String> {
+    let symbol = symbol.trim().trim_start_matches('@').to_ascii_uppercase();
+    let bytes = symbol.as_bytes();
+    let year_start = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_digit())
+        .map(|index| index + 1)?;
+    let year_digits = bytes.len().checked_sub(year_start)?;
+    if !(1..=2).contains(&year_digits) || year_start == 0 {
+        return None;
+    }
+    let month_index = year_start - 1;
+    if !b"FGHJKMNQUVXZ".contains(&bytes[month_index]) || month_index == 0 {
+        return None;
+    }
+    Some(symbol[..month_index].to_string())
+}
+
+fn parse_contract_expiration(value: &str) -> Option<NaiveDate> {
+    let value = value.trim();
+    if value.len() >= 10 {
+        if let Ok(date) = NaiveDate::parse_from_str(&value[..10], "%Y-%m-%d") {
+            return Some(date);
+        }
+    }
+    if let Ok(date) = DateTime::parse_from_rfc3339(value) {
+        return Some(date.date_naive());
+    }
+    let inner = value.strip_prefix("/Date(")?.strip_suffix(")/")?;
+    let offset_start = inner
+        .char_indices()
+        .skip(1)
+        .find(|(_, ch)| *ch == '+' || *ch == '-')
+        .map(|(index, _)| index)
+        .unwrap_or(inner.len());
+    let millis = inner[..offset_start].parse::<i64>().ok()?;
+    DateTime::<Utc>::from_timestamp_millis(millis).map(|date| date.date_naive())
 }
 
 fn validate_prices_and_geometry(
@@ -1221,6 +1292,7 @@ mod tests {
             duration: "DAY".into(),
             take_profit: Some(6002.0),
             stop_loss: Some(5998.0),
+            rollover_acknowledged: false,
         }
     }
 
@@ -1514,6 +1586,95 @@ mod tests {
         );
         assert!(reducing.allowed);
         assert!(!reducing.risk_increasing);
+    }
+
+    #[test]
+    fn rolled_equity_index_entries_require_per_order_acknowledgment() {
+        let mut order = draft();
+        order.symbol = "MESU26".into();
+        let mut contract = meta();
+        contract.symbol = order.symbol.clone();
+        contract.expiration = Some("2026-09-18".into());
+        let now = DateTime::parse_from_rfc3339("2026-09-14T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let metadata = HashMap::from([(order.symbol.clone(), contract.clone())]);
+        let evaluate = |draft: &OrderDraft, positions: &[Position], evaluated_at: DateTime<Utc>| {
+            evaluate_risk(
+                &RiskPolicy::default(),
+                RiskContext {
+                    environment: &TradingEnvironment::Sim,
+                    draft,
+                    meta: &contract,
+                    contract_metadata: &metadata,
+                    positions,
+                    orders: &[],
+                    balances: &[],
+                    market_price: Some(6000.0),
+                    live_armed: true,
+                    recent_order_count: Some(0),
+                    consecutive_losses: Some((0, evaluated_at)),
+                    now: evaluated_at,
+                },
+            )
+        };
+
+        let before_roll = DateTime::parse_from_rfc3339("2026-09-13T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(evaluate(&order, &[], before_roll).allowed);
+
+        let blocked = evaluate(&order, &[], now);
+        assert!(blocked.risk_increasing);
+        assert!(!blocked.allowed);
+        assert!(blocked
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("customary CME roll date")));
+
+        order.rollover_acknowledged = true;
+        assert!(evaluate(&order, &[], now).allowed);
+
+        order.rollover_acknowledged = false;
+        order.side = "Sell".into();
+        order.order_type = "Market".into();
+        order.limit_price = None;
+        order.stop_loss = None;
+        order.take_profit = None;
+        let position = Position {
+            id: "p1".into(),
+            symbol: order.symbol.clone(),
+            side: "Long".into(),
+            quantity: 1.0,
+            average_price: 6000.0,
+            last: 6000.0,
+            unrealized_pnl: 0.0,
+            bid: None,
+            ask: None,
+            unrealized_pnl_percent: None,
+            unrealized_pnl_quantity: None,
+            initial_requirement: None,
+            maintenance_margin: None,
+            market_value: None,
+            timestamp: None,
+        };
+        let reducing = evaluate(&order, &[position], now);
+        assert!(reducing.allowed);
+        assert!(!reducing.risk_increasing);
+    }
+
+    #[test]
+    fn rollover_rule_handles_shifted_expirations_and_ignores_other_futures() {
+        let mut contract = meta();
+        contract.expiration = Some("2026-06-18".into());
+        assert_eq!(
+            equity_index_roll_date(&contract),
+            NaiveDate::from_ymd_opt(2026, 6, 15)
+        );
+        contract.root = Some("MCL".into());
+        contract.symbol = "MCLM26".into();
+        assert_eq!(equity_index_roll_date(&contract), None);
+        assert_eq!(contract_symbol_root("M2KU26").as_deref(), Some("M2K"));
     }
 
     #[tokio::test]

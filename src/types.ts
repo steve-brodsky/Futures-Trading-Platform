@@ -242,6 +242,8 @@ export interface OrderDraft {
   duration: "DAY" | "GTC";
   takeProfit?: number;
   stopLoss?: number;
+  /** Required for a risk-increasing order in a rolled U.S. equity-index contract. */
+  rolloverAcknowledged?: boolean;
 }
 
 export interface OrderPreview {
@@ -548,11 +550,31 @@ export interface OrderTicketSettings {
   riskAmount?: number;
 }
 
+export type ContractRollPhase = "clear" | "approaching" | "roll-due";
+
+export interface ContractRollStatus {
+  phase: ContractRollPhase;
+  symbol: string;
+  root: string;
+  expirationDate: string;
+  warningStartDate: string;
+  rollDate: string;
+  sessionsUntilRoll: number;
+  nextContract?: SymbolMeta;
+}
+
+export interface ContractRollAlertSettings {
+  audioEnabled: boolean;
+  sound: AlertSound;
+  durationSeconds: AlertDurationSeconds;
+}
+
 export interface WorkspaceSettings {
   chartLabels: ChartLabelSettings;
   chartSessions: ChartSessionSettings;
   chartEconomicEvents: ChartEconomicEventSettings;
   orderTicket: OrderTicketSettings;
+  contractRollAlerts: ContractRollAlertSettings;
   journal: {
     commissionPerContractSide: number;
   };

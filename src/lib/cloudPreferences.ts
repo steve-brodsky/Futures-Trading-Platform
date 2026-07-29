@@ -9,6 +9,7 @@ import type {
 import { normalizeChartWorkspace } from "./chartWorkspace";
 import { normalizeEma200Alert } from "./emaAlerts";
 import { normalizeEntryRuleAlerts } from "./entryRuleAlerts";
+import { normalizeContractRollAlertSettings } from "./contractRoll";
 
 export const CLOUD_PREFERENCE_CATEGORIES: CloudPreferenceCategory[] = [
   "chart_workspace",
@@ -78,6 +79,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       },
       order_entry: {
         orderTicket: { ...workspace.settings.orderTicket },
+        contractRollAlerts: { ...workspace.settings.contractRollAlerts },
         entryRules: workspace.entryRules,
         entryRuleAlerts: workspace.entryRuleAlerts,
       },
@@ -184,6 +186,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
         },
       },
       orderTicket: { ...current.settings.orderTicket, ...object(orderEntry?.orderTicket) },
+      contractRollAlerts: normalizeContractRollAlertSettings(orderEntry?.contractRollAlerts ?? current.settings.contractRollAlerts),
       journal: {
         commissionPerContractSide: typeof journalFees?.commissionPerContractSide === "number"
           ? journalFees.commissionPerContractSide

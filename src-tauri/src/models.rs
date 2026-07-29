@@ -172,6 +172,8 @@ pub struct OrderDraft {
     pub duration: String,
     pub take_profit: Option<f64>,
     pub stop_loss: Option<f64>,
+    #[serde(default)]
+    pub rollover_acknowledged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

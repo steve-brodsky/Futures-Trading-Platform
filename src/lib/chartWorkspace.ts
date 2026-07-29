@@ -11,6 +11,7 @@ import { isValidPositionDrawing } from "./positionDrawing";
 import { normalizeDrawingAlert, sameDrawingAlert } from "./drawingAlerts";
 import { normalizeChartSessionSettings } from "./chartSessions";
 import { normalizeChartEconomicEventSettings } from "./economicEvents";
+import { normalizeContractRollAlertSettings } from "./contractRoll";
 
 export const MAX_CHART_TABS = 12;
 export const MAIN_WINDOW_ID = "main";
@@ -329,6 +330,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   const savedChartSessions = value.settings?.chartSessions;
   const savedChartEconomicEvents = value.settings?.chartEconomicEvents;
   const savedOrderTicket = value.settings?.orderTicket;
+  const savedContractRollAlerts = value.settings?.contractRollAlerts;
   const savedJournal = value.settings?.journal;
   const entryRules = normalizeEntryRules(value.entryRules);
   const entryRuleAlerts = normalizeEntryRuleAlerts(value.entryRuleAlerts);
@@ -400,6 +402,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
           ? savedOrderTicket.riskAmount
           : undefined,
       },
+      contractRollAlerts: normalizeContractRollAlertSettings(savedContractRollAlerts ?? fallback.settings.contractRollAlerts),
       journal: {
         commissionPerContractSide: typeof savedJournal?.commissionPerContractSide === "number" && Number.isFinite(savedJournal.commissionPerContractSide)
           ? Math.max(0, Math.min(100, savedJournal.commissionPerContractSide))

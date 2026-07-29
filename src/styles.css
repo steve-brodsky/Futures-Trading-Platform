@@ -318,6 +318,18 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .trade-contract-field > span small { color: #687587; font: 500 8px DM Mono, monospace; }
 .trade-contract-field select { height: 32px; border-color: #2b3947; color: #dce5ed; background-color: #101720; }
 .trade-contract-field > small { font: 500 8px/1.4 DM Mono, monospace; }
+.contract-roll-warning { display: grid; grid-template-columns: 16px minmax(0,1fr); align-items: start; gap: 8px; margin: 0 0 11px; padding: 9px 10px; border: 1px solid rgba(240,184,75,.28); border-radius: 5px; color: #e0b04f; background: rgba(240,184,75,.065); animation: contract-roll-in .18s ease-out; }
+.contract-roll-warning.roll-due { border-color: rgba(239,70,111,.35); color: #ef7892; background: rgba(239,70,111,.075); }
+.contract-roll-warning > svg { margin-top: 1px; }
+.contract-roll-warning > span { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.contract-roll-warning strong { color: #ecd28f; font-size: 9px; font-weight: 650; }
+.contract-roll-warning.roll-due strong { color: #f2a1b2; }
+.contract-roll-warning small { color: #a9905c; font: 500 8px/1.45 DM Mono, monospace; }
+.contract-roll-warning.roll-due small { color: #b97a88; }
+.contract-roll-warning button { grid-column: 2; justify-self: start; height: 26px; padding: 0 8px; border: 1px solid currentColor; border-radius: 4px; color: inherit; background: rgba(8,12,17,.35); font: 650 8px DM Mono, monospace; cursor: pointer; }
+.contract-roll-warning button:hover { color: #f3d98f; background: rgba(240,184,75,.1); }
+.contract-roll-warning.roll-due button:hover { color: #ffc1ce; background: rgba(239,70,111,.1); }
+@keyframes contract-roll-in { from { opacity: 0; transform: translateY(-3px); } }
 .market-buttons { height: 52px; display: grid; grid-template-columns: 1fr 28px 1fr; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .market-buttons > button { border: 0; background: #141a22; display: flex; flex-direction: column; justify-content: center; cursor: pointer; }
 .market-buttons > button:first-child { color: var(--red); text-align: left; padding-left: 10px; }
@@ -462,6 +474,9 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .load-more { display: block; margin: 12px auto; padding: 7px 14px; border: 1px solid #303b4a; border-radius: 5px; color: #cbd3dd; background: var(--surface-3); cursor: pointer; }
 .close-position-button { min-width: 108px; height: 26px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 8px; border: 1px solid rgba(239,70,111,.38); border-radius: 4px; color: #ef7892; background: rgba(239,70,111,.08); font-size: 8px; font-weight: 600; white-space: nowrap; cursor: pointer; }
 .close-position-button:hover:not(:disabled) { color: #fff; border-color: var(--red); background: rgba(239,70,111,.24); }
+.position-symbol { display: inline-flex; align-items: center; gap: 6px; }
+.contract-roll-badge { padding: 2px 4px; border-radius: 3px; color: #d9ac52; background: rgba(240,184,75,.1); font: 700 7px DM Mono, monospace; white-space: nowrap; }
+.contract-roll-badge.roll-due { color: #f0839b; background: rgba(239,70,111,.12); }
 @keyframes panel-in { from { opacity: .5; transform: translateY(12px); } }
 table { width: 100%; border-collapse: collapse; font-size: 9px; }
 th { position: sticky; top: 0; height: 26px; padding: 0 12px; text-align: left; color: var(--muted-2); background: #0d1117; font-weight: 500; border-bottom: 1px solid var(--line-soft); }
@@ -750,6 +765,12 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .watchlist-editor-empty strong { color: #aeb8c5; font-size: 9px; }
 .watchlist-editor-empty span { font-size: 8px; }
 .settings-api-section .demo-warning { margin-left: 0; margin-right: 0; }
+.contract-roll-audio-settings { display: grid; grid-template-columns: minmax(0,1fr) 92px 62px; align-items: end; gap: 7px; padding: 11px 0 14px; border-bottom: 1px solid var(--line-soft); }
+.contract-roll-audio-settings label { min-width: 0; display: flex; flex-direction: column; gap: 5px; color: #6f7c8e; font: 650 7px DM Mono, monospace; letter-spacing: .06em; text-transform: uppercase; }
+.contract-roll-audio-settings select { width: 100%; height: 29px; padding: 0 7px; border: 1px solid #2c3745; border-radius: 4px; color: #cbd3dd; background: #10161e; font: 500 8px DM Mono, monospace; text-transform: capitalize; }
+.contract-roll-audio-settings button { height: 29px; border: 1px solid #334152; border-radius: 4px; color: #9ca9b9; background: #18212b; font-size: 8px; cursor: pointer; }
+.contract-roll-audio-settings button:hover:not(:disabled) { color: #eef3f8; border-color: #52647a; }
+.contract-roll-audio-settings select:disabled, .contract-roll-audio-settings button:disabled { opacity: .42; cursor: default; }
 .api-status-line { display: flex; align-items: center; gap: 7px; padding: 12px 0 2px; color: #8d99a8; font: 600 9px DM Mono, monospace; text-transform: uppercase; letter-spacing: .05em; }
 .api-status-line > span { width: 7px; height: 7px; border-radius: 50%; background: #566170; box-shadow: 0 0 0 3px rgba(86,97,112,.1); }
 .api-status-line > span.configured { background: var(--amber); box-shadow: 0 0 0 3px rgba(240,184,75,.1); }
@@ -837,6 +858,15 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .review-hero .sell { color: var(--red); background: rgba(239,70,111,.1); }
 .review-hero strong { font: 600 18px DM Mono, monospace; }
 .review-hero small { color: var(--muted); }
+.rollover-review-warning { display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 9px; margin: 0 17px; padding: 12px 0; border-bottom: 1px solid rgba(239,70,111,.24); color: var(--red); }
+.rollover-review-warning > span { display: flex; flex-direction: column; gap: 4px; }
+.rollover-review-warning strong { color: #f0a2b3; font-size: 10px; }
+.rollover-review-warning small { color: #a97582; font: 500 8px DM Mono, monospace; }
+.rollover-acknowledgment { min-height: 58px; display: grid; grid-template-columns: 15px minmax(0,1fr); align-items: center; gap: 9px; margin: 0 17px; padding: 9px 0; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); cursor: pointer; }
+.rollover-acknowledgment input { width: 14px; height: 14px; margin: 0; accent-color: var(--red); cursor: pointer; }
+.rollover-acknowledgment > span { display: flex; flex-direction: column; gap: 4px; }
+.rollover-acknowledgment strong { color: #e7c3cb; font-size: 9px; font-weight: 600; }
+.rollover-acknowledgment small { color: #81727b; font: 500 8px/1.4 DM Mono, monospace; }
 .review-list { margin-top: 13px; }
 .review-list div { display: flex; justify-content: space-between; padding: 7px 0; font-size: 10px; }
 .review-list dt { color: var(--muted); }
