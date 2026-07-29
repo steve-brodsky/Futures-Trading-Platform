@@ -357,10 +357,18 @@ impl ServiceLifecycle {
         self.transitioning.load(Ordering::SeqCst)
     }
 
-    pub async fn begin_transition(&self) -> (OwnedMutexGuard<()>, u64) {
-        let guard = self.transition_lock.clone().lock_owned().await;
+    pub async fn lock_transition(&self) -> OwnedMutexGuard<()> {
+        self.transition_lock.clone().lock_owned().await
+    }
+
+    pub fn begin_locked_transition(&self) -> u64 {
         self.transitioning.store(true, Ordering::SeqCst);
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub async fn begin_transition(&self) -> (OwnedMutexGuard<()>, u64) {
+        let guard = self.lock_transition().await;
+        let generation = self.begin_locked_transition();
         (guard, generation)
     }
 
@@ -1707,6 +1715,25 @@ mod tests {
         assert!(!lifecycle.accepts(next));
         lifecycle.finish_transition();
         assert!(!lifecycle.accepts(old));
+        assert!(lifecycle.accepts(next));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_lock_alone_keeps_running_services_valid() {
+        let lifecycle = ServiceLifecycle::default();
+        let generation = lifecycle.generation();
+        let guard = lifecycle.lock_transition().await;
+        assert!(!lifecycle.is_transitioning());
+        assert_eq!(lifecycle.generation(), generation);
+        assert!(lifecycle.accepts(generation));
+        drop(guard);
+
+        let guard = lifecycle.lock_transition().await;
+        let next = lifecycle.begin_locked_transition();
+        assert!(lifecycle.is_transitioning());
+        assert_eq!(next, generation + 1);
+        lifecycle.finish_transition();
+        drop(guard);
         assert!(lifecycle.accepts(next));
     }
 

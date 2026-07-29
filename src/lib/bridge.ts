@@ -122,6 +122,9 @@ const rawApi = {
   async startBarStream(subscriptionId: string, provider: MarketDataProvider, symbol: string, timeframe: Timeframe, consumer: BarStreamConsumer, generation: number): Promise<void> {
     if (isTauri) await native("start_bar_stream", { subscriptionId, provider, symbol, timeframe, consumer, generation });
   },
+  async refreshBarStream(provider: MarketDataProvider, symbol: string, timeframe: Timeframe): Promise<Bar[]> {
+    return isTauri ? native("refresh_bar_stream", { provider, symbol, timeframe }) : this.bars(provider, symbol, timeframe);
+  },
   async stopBarStream(subscriptionId: string, generation: number): Promise<void> {
     if (isTauri) await native("stop_bar_stream", { subscriptionId, generation });
   },

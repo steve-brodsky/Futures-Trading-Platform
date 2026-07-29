@@ -161,6 +161,26 @@ fn cache_namespace(
     }
 }
 
+fn bar_retained_limit(provider: &MarketDataProvider, timeframe: &str) -> usize {
+    if *provider == MarketDataProvider::Tradestation {
+        return tradestation::history_spec(timeframe)
+            .map(|(_, _, bars_back)| bars_back)
+            .unwrap_or(10_000);
+    }
+    match timeframe {
+        "1m" => 10_000,
+        "5m" => 4_000,
+        "15m" => 2_000,
+        "30m" => 1_000,
+        "1h" => 1_000,
+        "4h" => 500,
+        "D" => 5_000,
+        "W" => 2_500,
+        "M" => 1_000,
+        _ => 10_000,
+    }
+}
+
 #[tauri::command]
 async fn auth_status(state: State<'_, NativeState>) -> Result<AuthStatus, AppError> {
     let configured = storage::get_secret("client_id")?.is_some()
@@ -348,7 +368,11 @@ async fn set_environment(
     environment: TradingEnvironment,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
-    let (_transition, generation) = state.safety.lifecycle.begin_transition().await;
+    let _transition = state.safety.lifecycle.lock_transition().await;
+    if state.api.environment().await == environment {
+        return Ok(());
+    }
+    let generation = state.safety.lifecycle.begin_locked_transition();
     shutdown_native_services(&state).await;
     let environment_key = environment.key().to_string();
     state.api.set_environment(environment).await;
@@ -732,24 +756,7 @@ async fn start_bar_stream(
     }
     let environment = state.api.environment().await;
     let key = bar_stream_key(&provider, &environment, &symbol, &timeframe);
-    let retained_limit = if provider == MarketDataProvider::Tradestation {
-        tradestation::history_spec(&timeframe)
-            .map(|(_, _, bars_back)| bars_back)
-            .unwrap_or(10_000)
-    } else {
-        match timeframe.as_str() {
-            "1m" => 10_000,
-            "5m" => 4_000,
-            "15m" => 2_000,
-            "30m" => 1_000,
-            "1h" => 1_000,
-            "4h" => 500,
-            "D" => 5_000,
-            "W" => 2_500,
-            "M" => 1_000,
-            _ => 10_000,
-        }
-    };
+    let retained_limit = bar_retained_limit(&provider, &timeframe);
     let mut cached_bars = storage::load_bars(
         &state.db_path,
         cache_namespace(&provider, &environment),
@@ -911,6 +918,60 @@ async fn start_bar_stream(
         }
     }
     Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn refresh_bar_stream(
+    app: tauri::AppHandle,
+    provider: MarketDataProvider,
+    symbol: String,
+    timeframe: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<Bar>, AppError> {
+    if state.safety.lifecycle.is_transitioning() {
+        return Ok(Vec::new());
+    }
+    let environment_generation = state.safety.lifecycle.generation();
+    let environment = state.api.environment().await;
+    let key = bar_stream_key(&provider, &environment, &symbol, &timeframe);
+    let retained_limit = bar_retained_limit(&provider, &timeframe);
+    let registry_handle = state.bar_streams.clone();
+    let shared_stream = {
+        let registry = registry_handle.lock().await;
+        registry
+            .streams
+            .get(&key)
+            .map(|shared| (shared.subscribers.clone(), shared.latest_bars.clone()))
+    };
+    let bars = match provider {
+        MarketDataProvider::Tradestation => {
+            state.api.recent_bars(&symbol, &timeframe, 4).await?
+        }
+        MarketDataProvider::Schwab => state.schwab.bars(&symbol, &timeframe).await?,
+    };
+    if !state.safety.lifecycle.accepts(environment_generation) {
+        return Ok(Vec::new());
+    }
+    storage::save_bars(
+        &state.db_path,
+        cache_namespace(&provider, &environment),
+        &symbol,
+        &timeframe,
+        &bars,
+    )?;
+    if let Some((subscribers, latest_bars)) = shared_stream {
+        let retained = retain_bar_snapshot(&latest_bars, &bars, retained_limit);
+        emit_bar_snapshot(
+            &app,
+            &subscribers,
+            &provider,
+            &environment,
+            &symbol,
+            &timeframe,
+            &retained,
+        );
+    }
+    Ok(bars)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5675,6 +5736,7 @@ pub fn run() {
             get_older_bars,
             get_bar_range,
             start_bar_stream,
+            refresh_bar_stream,
             stop_bar_stream,
             start_quote_stream,
             stop_quote_stream,

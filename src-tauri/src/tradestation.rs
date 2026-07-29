@@ -1166,6 +1166,33 @@ impl TradeStation {
         Ok(result)
     }
 
+    pub async fn recent_bars(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        bars_back: usize,
+    ) -> Result<Vec<Bar>, AppError> {
+        let (interval, unit, configured) = history_spec(timeframe)?;
+        let bars_back = bars_back.clamp(2, configured);
+        validate_bars_back(interval, unit, bars_back)?;
+        let path = format!(
+            "/marketdata/barcharts/{symbol}?interval={interval}&unit={unit}&barsback={bars_back}"
+        );
+        let body = self
+            .send_with_priority(Method::GET, &path, None, RequestPriority::Background)
+            .await?;
+        let mut result: Vec<Bar> = body
+            .get("Bars")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| bar_from_value(item, timeframe))
+            .collect();
+        result.sort_by_key(|bar| bar.time);
+        result.dedup_by_key(|bar| bar.time);
+        Ok(result)
+    }
+
     pub async fn older_bars(
         &self,
         symbol: &str,

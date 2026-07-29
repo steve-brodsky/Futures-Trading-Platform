@@ -22,6 +22,7 @@ import { mutationPresentation } from "./lib/mutationResults";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
+import { nextBarRolloverRefresh, type BarRolloverRefreshState } from "./lib/barRollover";
 import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
 import { calculateContractsForRisk, calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
@@ -477,6 +478,7 @@ function TradingApp() {
   const [currentTime, setCurrentTime] = useState(() => Date.now());
   const entryRuleMinute = Math.floor(currentTime / 60_000) * 60_000;
   const subscriptionsRef = useRef(new Map<string, BarSubscription>());
+  const barRolloverRefreshRef = useRef(new Map<string, BarRolloverRefreshState>());
   const latestDetachedGenerationRef = useRef(new Map<string, number>());
   const awaitingDetachedGenerationRef = useRef(new Set<string>());
   const tabMarketEnvironmentRef = useRef(environment);
@@ -1892,20 +1894,70 @@ function TradingApp() {
   }, [quoteSymbolsKey, schwabAuthEpoch, schwabAuthenticated, workspaceLoaded]);
 
   useEffect(() => {
-    if (api.isNative) return;
     const refresh = () => Promise.all((["tradestation", "schwab"] as MarketDataProvider[]).map((provider) => {
-      const symbols = quoteInstruments.filter((item) => item.provider === provider).map((item) => item.symbol);
+      const providerAuthenticated = provider === "tradestation" ? authenticated : schwabAuthenticated;
+      const symbols = quoteInstruments
+        .filter((item) => item.provider === provider && (!api.isNative || providerAuthenticated))
+        .filter((item) => !api.isNative || !quotesRef.current[instrumentKey(item)]?.receivedAt || Date.now() - quotesRef.current[instrumentKey(item)].receivedAt! >= 2_500)
+        .map((item) => item.symbol);
       return symbols.length ? api.quotes(provider, symbols) : Promise.resolve([]);
-    })).then((groups) => groups.flat()).then((items) => setQuotes(Object.fromEntries(items.map((quote) => [instrumentKey(quote), { ...quote, receivedAt: Date.now() }])))).catch(() => setQuotes({}));
+    })).then((groups) => groups.flat()).then((items) => {
+      if (!items.length) return;
+      const receivedAt = Date.now();
+      setQuotes((current) => ({
+        ...current,
+        ...Object.fromEntries(items.map((quote) => [instrumentKey(quote), { ...quote, receivedAt }])),
+      }));
+    }).catch(() => undefined);
     refresh();
-    const timer = window.setInterval(refresh, api.isNative ? 3000 : 1800);
+    const timer = window.setInterval(refresh, api.isNative ? 3_000 : 1_800);
     return () => clearInterval(timer);
-  }, [quoteSymbolsKey, authEpoch]);
+  }, [quoteSymbolsKey, authEpoch, authenticated, schwabAuthEpoch, schwabAuthenticated]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setCurrentTime(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
+    const refreshedMarkets = new Set<string>();
+    workspace.tabs.forEach((tab) => {
+      if (tab.symbol.provider !== "tradestation") return;
+      const market = tabMarkets[tab.id];
+      if (!isSameBarMarket(market, tab.symbol.provider, tab.symbol.symbol, tab.timeframe)) return;
+      const latestBar = market.bars.at(-1);
+      const marketKey = `tradestation\u0000${environment}\u0000${tab.symbol.symbol}\u0000${tab.timeframe}`;
+      const refreshState = nextBarRolloverRefresh({
+        bar: latestBar,
+        timeframe: tab.timeframe,
+        nowMilliseconds: currentTime,
+        state: barRolloverRefreshRef.current.get(marketKey),
+      });
+      if (refreshedMarkets.has(marketKey) || !refreshState) return;
+      refreshedMarkets.add(marketKey);
+      barRolloverRefreshRef.current.set(marketKey, refreshState);
+      void api.refreshBarStream(
+        tab.symbol.provider,
+        tab.symbol.symbol,
+        tab.timeframe,
+      ).then((incoming) => {
+        if (!incoming.length) return;
+        setTabMarkets((current) => {
+          let changed = false;
+          const next = { ...current };
+          workspaceRef.current.tabs.forEach((candidate) => {
+            if (candidate.symbol.provider !== tab.symbol.provider || candidate.symbol.symbol !== tab.symbol.symbol || candidate.timeframe !== tab.timeframe) return;
+            const existing = current[candidate.id];
+            if (!isSameBarMarket(existing, candidate.symbol.provider, candidate.symbol.symbol, candidate.timeframe)) return;
+            next[candidate.id] = { ...existing, bars: mergeBars(existing.bars, incoming) };
+            changed = true;
+          });
+          return changed ? next : current;
+        });
+      }).catch(() => undefined);
+    });
+  }, [workspaceLoaded, tabStreamKey, tabMarkets, currentTime, environment]);
 
   async function loadVwapRange(symbol: string, range: EpochRange) {
     const provider = workspaceRef.current.tabs.find((tab) => tab.symbol.symbol === symbol)?.symbol.provider ?? "tradestation";
