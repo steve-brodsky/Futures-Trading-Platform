@@ -90,7 +90,7 @@ export interface TradingChartCapture {
 
 export interface TradingChartHandle {
   captureEntryScreenshot: () => Promise<TradingChartCapture>;
-  applySyncedCrosshair: (sourceTime: number, price: number) => void;
+  applySyncedCrosshair: (sourceTime: number, price: number, sourceTimeframe?: Timeframe) => void;
   clearSyncedCrosshair: () => void;
 }
 
@@ -138,7 +138,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const magnetEnabledRef = useRef(magnetEnabled);
   const crosshairSyncEnabledRef = useRef(crosshairSyncEnabled);
   const crosshairSyncChangeRef = useRef(onCrosshairSyncChange);
-  const syncedCrosshairRef = useRef<{ sourceTime: number; price: number } | null>(null);
+  const syncedCrosshairRef = useRef<{ sourceTime: number; sourceTimeframe?: Timeframe; price: number } | null>(null);
+  const syncedCrosshairPriceLineRef = useRef<IPriceLine | null>(null);
   const installedPlotTimesRef = useRef(new Set<number>());
   const applySyncedCrosshairRef = useRef<() => void>(() => undefined);
   const activeToolRef = useRef(activeTool);
@@ -211,12 +212,35 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const chart = chartRef.current;
     const priceSeries = priceRef.current;
     if (!requested || !chart || !priceSeries) return;
-    const plotTime = syncedCrosshairPlotTime(requested.sourceTime, plotPointsRef.current, kind, timeframe, barsRef.current.at(-1)?.time, provider);
+    const price = roundToTick(requested.price, minMove);
+    const priceLineOptions = {
+      price,
+      color: "#8291a6",
+      lineWidth: 1 as const,
+      lineStyle: LineStyle.Dashed,
+      lineVisible: true,
+      axisLabelVisible: true,
+      axisLabelColor: "#263242",
+      axisLabelTextColor: "#eef3f8",
+      title: "",
+    };
+    if (syncedCrosshairPriceLineRef.current) syncedCrosshairPriceLineRef.current.applyOptions(priceLineOptions);
+    else syncedCrosshairPriceLineRef.current = priceSeries.createPriceLine(priceLineOptions);
+
+    const plotTime = syncedCrosshairPlotTime(
+      requested.sourceTime,
+      plotPointsRef.current,
+      kind,
+      timeframe,
+      barsRef.current.at(-1)?.time,
+      provider,
+      requested.sourceTimeframe,
+    );
     if (plotTime == null || !installedPlotTimesRef.current.has(plotTime)) {
       chart.clearCrosshairPosition();
       return;
     }
-    chart.setCrosshairPosition(roundToTick(requested.price, minMove), asTime(plotTime), priceSeries);
+    chart.setCrosshairPosition(price, asTime(plotTime), priceSeries);
   };
 
   useImperativeHandle(ref, () => ({
@@ -277,14 +301,18 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       if (approximateDataUrlBytes(dataUrl) > ENTRY_SCREENSHOT_MAX_BYTES) throw new Error("The entry chart exceeds the 5 MB cloud limit.");
       return { dataUrl, width: output.width, height: output.height, capturedAt: new Date().toISOString() };
     },
-    applySyncedCrosshair: (sourceTime: number, price: number) => {
+    applySyncedCrosshair: (sourceTime: number, price: number, sourceTimeframe?: Timeframe) => {
       if (!Number.isFinite(sourceTime) || !Number.isFinite(price)) return;
-      syncedCrosshairRef.current = { sourceTime, price };
+      syncedCrosshairRef.current = { sourceTime, sourceTimeframe, price };
       applySyncedCrosshairRef.current();
     },
     clearSyncedCrosshair: () => {
       syncedCrosshairRef.current = null;
       chartRef.current?.clearCrosshairPosition();
+      if (syncedCrosshairPriceLineRef.current && priceRef.current) {
+        priceRef.current.removePriceLine(syncedCrosshairPriceLineRef.current);
+      }
+      syncedCrosshairPriceLineRef.current = null;
     },
   }));
 
@@ -453,6 +481,11 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
 
     let settingCrosshair = false;
     chart.subscribeCrosshairMove((param) => {
+      if (param.sourceEvent && syncedCrosshairPriceLineRef.current) {
+        priceSeries.removePriceLine(syncedCrosshairPriceLineRef.current);
+        syncedCrosshairPriceLineRef.current = null;
+        syncedCrosshairRef.current = null;
+      }
       syncTradeLabelsRef.current();
       if (param.point) {
         const nearest = gexLevelsRef.current.reduce<{ level: GexLevel; distance: number } | null>((best, level) => {
@@ -496,6 +529,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         crosshairSyncChangeRef.current({
           visible: true,
           sourceTime: sourceTimeByPlotTimeRef.current.get(Number(param.time)) ?? Number(param.time),
+          sourceTimeframe: timeframe,
           price: snappedPrice,
         });
       }
@@ -575,6 +609,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     previousBars.current = [];
     previousPlotPoints.current = [];
     installedPlotTimesRef.current.clear();
+    syncedCrosshairPriceLineRef.current = null;
     firstData.current = true;
     const syncLabels = () => syncTradeLabelsRef.current();
     const resizeObserver = new ResizeObserver(syncLabels);
@@ -586,7 +621,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       resizeObserver.disconnect();
       host.current?.removeEventListener("wheel", syncLabels);
       host.current?.removeEventListener("pointermove", syncLabels);
-      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; installedPlotTimesRef.current.clear(); indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null; gexPrimitiveRef.current = null;
+      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; installedPlotTimesRef.current.clear(); syncedCrosshairPriceLineRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null; gexPrimitiveRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone, renkoSettings.brickSizeTicks, renkoSettings.priceSource, renkoSettings.reversalBricks, pointAndFigureSettings.boxSizeTicks, pointAndFigureSettings.priceSource, pointAndFigureSettings.reversalBoxes]);
 

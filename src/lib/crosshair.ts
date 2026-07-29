@@ -7,7 +7,7 @@ export interface CrosshairPlotPoint {
 }
 
 export type ChartCrosshairUpdate =
-  | { visible: true; sourceTime: number; price: number }
+  | { visible: true; sourceTime: number; sourceTimeframe?: Timeframe; price: number }
   | { visible: false };
 
 export type CrosshairSyncEvent = {
@@ -87,6 +87,7 @@ export function syncedCrosshairPlotTime(
   timeframe: Timeframe,
   latestSourceBarTime?: number,
   targetProvider?: MarketDataProvider,
+  sourceTimeframe?: Timeframe,
 ): number | undefined {
   if (!Number.isFinite(sourceTime) || !points.length) return undefined;
 
@@ -101,12 +102,21 @@ export function syncedCrosshairPlotTime(
     return match.point.plotTime;
   }
 
-  const point = latestPointAtOrBefore(sourceTime, points);
+  // TradeStation calendar timestamps identify the end of the period. Move
+  // inside that boundary when projecting one onto an intraday target so the
+  // final target candle is selected instead of being treated as out of range.
+  const lookupTime = targetProvider === "tradestation"
+    && sourceTimeframe != null
+    && ["D", "W", "M"].includes(sourceTimeframe)
+    && !["D", "W", "M"].includes(timeframe)
+    ? sourceTime - 1
+    : sourceTime;
+  const point = latestPointAtOrBefore(lookupTime, points);
   if (!point) return undefined;
 
   const coverageStart = synthetic ? latestSourceBarTime : point.sourceTime;
   if (coverageStart == null) return undefined;
   const coverageEnd = candleEndTime(coverageStart, timeframe);
-  if (coverageEnd == null || sourceTime >= coverageEnd) return undefined;
+  if (coverageEnd == null || lookupTime >= coverageEnd) return undefined;
   return point.plotTime;
 }

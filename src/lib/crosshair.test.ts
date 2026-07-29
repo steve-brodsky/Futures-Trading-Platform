@@ -42,6 +42,10 @@ describe("syncedCrosshairPlotTime", () => {
     expect(syncedCrosshairPlotTime(120, minutePoints, "line", "1m", 180)).toBe(120);
   });
 
+  it("maps an end-stamped TradeStation daily crosshair to the final intraday candle", () => {
+    expect(syncedCrosshairPlotTime(240, minutePoints, "candles", "1m", 180, "tradestation", "D")).toBe(180);
+  });
+
   it("returns no target outside loaded time-chart coverage", () => {
     expect(syncedCrosshairPlotTime(30, minutePoints, "candles", "1m", 180)).toBeUndefined();
     expect(syncedCrosshairPlotTime(240, minutePoints, "candles", "1m", 180)).toBeUndefined();

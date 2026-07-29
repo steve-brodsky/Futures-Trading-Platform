@@ -2059,7 +2059,7 @@ function TradingApp() {
       if (tabId === event.sourceTabId) return;
       const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
       if (!tab || instrumentKey(tab.symbol) !== key) return;
-      if (event.visible) handle.applySyncedCrosshair(event.sourceTime, event.price);
+      if (event.visible) handle.applySyncedCrosshair(event.sourceTime, event.price, event.sourceTimeframe);
       else handle.clearSyncedCrosshair();
     });
     return true;
@@ -2088,7 +2088,7 @@ function TradingApp() {
     if (!workspaceRef.current.settings.crosshairSyncEnabled) return;
     const event = activeCrosshairEventsRef.current.get(instrumentKey(tab.symbol));
     if (!event || event.sourceTabId === tab.id) return;
-    if (event.visible) handle.applySyncedCrosshair(event.sourceTime, event.price);
+    if (event.visible) handle.applySyncedCrosshair(event.sourceTime, event.price, event.sourceTimeframe);
   }
 
   function clearCrosshairSyncState(publishLocalClears: boolean) {
