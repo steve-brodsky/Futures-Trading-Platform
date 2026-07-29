@@ -17,6 +17,7 @@ import { AuditLogModal } from "./components/AuditLogModal";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { TradingTodayModal, type TradingTodaySource } from "./components/TradingTodayModal";
 import { api } from "./lib/bridge";
+import { mutationPresentation } from "./lib/mutationResults";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
@@ -47,7 +48,7 @@ import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRange
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
 import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./lib/economicEvents";
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -421,6 +422,8 @@ function TradingApp() {
   const recentOrderIdsRef = useRef(new Map<string, number>());
   const recentPositionIdsRef = useRef(new Map<string, number>());
   const [busy, setBusy] = useState(false);
+  const [environmentTransitioning, setEnvironmentTransitioning] = useState(false);
+  const [riskStatus, setRiskStatus] = useState<RiskPolicyStatus | null>(null);
   const [closingPositionIds, setClosingPositionIds] = useState<Set<string>>(() => new Set());
   const closingPositionTimersRef = useRef(new Map<string, number>());
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
@@ -457,6 +460,7 @@ function TradingApp() {
   const screenshotRetryTimersRef = useRef(new Map<string, number>());
   const retryEntryScreenshotsRef = useRef<() => void>(() => undefined);
   const environmentRef = useRef(environment);
+  const environmentGenerationRef = useRef(0);
   const stripBoundsRef = useRef(new Map<string, StripBounds>());
   const viewRangesRef = useRef(new Map<string, { from: number; to: number }>());
   const windowState = workspace.windows.find((item) => item.id === currentWindowId) ?? workspace.windows[0];
@@ -607,6 +611,12 @@ function TradingApp() {
   vwapDataEpochRef.current = `${environment}:${authEpoch}`;
   entryScreenshotCandidatesRef.current = entryScreenshotCandidates;
   environmentRef.current = environment;
+
+  function acceptsEnvironmentGeneration(generation: number): boolean {
+    if (generation < environmentGenerationRef.current) return false;
+    if (generation > environmentGenerationRef.current) environmentGenerationRef.current = generation;
+    return true;
+  }
   const activeTradeQuote: Quote = activeTradeSymbol
     ? quotes[`tradestation:${activeTradeSymbol}`] ?? (api.isNative
       ? { provider: "tradestation", symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
@@ -808,6 +818,7 @@ function TradingApp() {
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus(), api.schwabAuthStatus()]).then(async ([saved, auth, schwabAuth]) => {
       const normalized = normalizeChartWorkspace(saved, defaultWorkspace);
+      if (normalized.environment === "live") normalized.confirmOrders = true;
       await api.setEnvironment(normalized.environment);
       await api.setJournalCommission(normalized.settings.journal.commissionPerContractSide);
       if (currentWindowId === MAIN_WINDOW_ID) {
@@ -873,10 +884,12 @@ function TradingApp() {
         handleAlertBarUpdate(payload);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
+        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "tradestation" && payload.environment !== environmentRef.current) return;
         setQuotes((current) => ({ ...current, [instrumentKey(payload.quote)]: { ...payload.quote, receivedAt: Date.now() } }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OptionUpdateEvent>("option-update", ({ payload }) => {
+        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         setGexMarkets((current) => {
           let changed = false;
           const next = { ...current };
@@ -894,6 +907,7 @@ function TradingApp() {
         });
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OptionStreamStateEvent>("option-stream-state", ({ payload }) => {
+        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         setGexMarkets((current) => {
           const market = current[payload.symbol];
           if (!market) return current;
@@ -923,6 +937,7 @@ function TradingApp() {
         }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<PositionsSnapshotEvent>("positions-snapshot", ({ payload }) => {
+        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.accountId !== selectedAccountIdRef.current) return;
         const protectedIds = activeProtectionIds(recentPositionIdsRef.current);
         setPositions((current) => reconcilePositionSnapshot(current, payload.positions, protectedIds));
@@ -931,6 +946,7 @@ function TradingApp() {
         brokerageBalanceRefreshRef.current();
       }).then((unlisten) => cleanups.push(unlisten));
       listen<PositionUpdateEvent>("position-update", ({ payload }) => {
+        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.accountId !== selectedAccountIdRef.current) return;
         setPositions((current) => {
           const isNew = isNewOpenPosition(current, payload.position);
@@ -941,6 +957,7 @@ function TradingApp() {
         brokerageBalanceRefreshRef.current();
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OrdersSnapshotEvent>("orders-snapshot", ({ payload }) => {
+        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.accountId !== selectedAccountIdRef.current) return;
         const protectedIds = activeProtectionIds(recentOrderIdsRef.current);
         setOrders((current) => reconcileOrderSnapshot(current, payload.orders, protectedIds));
@@ -948,6 +965,7 @@ function TradingApp() {
         brokerageBalanceRefreshRef.current();
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OrderStreamUpdateEvent>("order-stream-update", ({ payload }) => {
+        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.accountId !== selectedAccountIdRef.current) return;
         recentOrderIdsRef.current.set(payload.order.id, Date.now() + 15_000);
         setOrders((current) => upsertStreamOrder(current, payload.order));
@@ -969,6 +987,7 @@ function TradingApp() {
         }
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BrokerageStreamStateEvent>("brokerage-stream-state", ({ payload }) => {
+        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.accountId !== selectedAccountIdRef.current) return;
         setBrokerageStreamStates((current) => ({ ...current, [payload.channel]: payload.state }));
       }).then((unlisten) => cleanups.push(unlisten));
@@ -1180,6 +1199,18 @@ function TradingApp() {
   const selectedAccount = accounts.find((account) => account.id === workspace.selectedAccountId) ?? accounts[0];
   selectedAccountIdRef.current = selectedAccount?.id;
   const entryRuleAccountId = selectedAccount?.id ?? (api.isNative ? undefined : "demo");
+
+  useEffect(() => {
+    let active = true;
+    if (!selectedAccount) {
+      setRiskStatus(null);
+      return;
+    }
+    api.riskPolicy(selectedAccount.id)
+      .then((status) => { if (active) setRiskStatus(status); })
+      .catch((error) => { if (active) showToast(`Risk policy unavailable: ${String(error)}`); });
+    return () => { active = false; };
+  }, [selectedAccount?.id, environment]);
   const entryRulePositionScope = entryRuleAccountId ? positionSnapshotScope(environment, entryRuleAccountId) : undefined;
   const entryRulePositionsReady = !api.isNative || positionsReadyScope === entryRulePositionScope;
   const brokerageStreamsHealthy = areBrokerageStreamsHealthy(brokerageStreamStates);
@@ -2724,15 +2755,16 @@ function TradingApp() {
   async function confirmEnvironment() {
     if (!envConfirm) return;
     setBusy(true);
+    setEnvironmentTransitioning(true);
     try {
       await api.setEnvironment(envConfirm);
-      updateWorkspace({ environment: envConfirm });
+      updateWorkspace({ environment: envConfirm, ...(envConfirm === "live" ? { confirmOrders: true } : {}) });
       setAuthenticated(api.isNative ? authenticated : false);
       setOrders([]); setPositions([]);
       setEnvConfirm(null);
       setAccounts(await api.accounts().catch(() => []));
       showToast(`Switched to ${envConfirm.toUpperCase()}`);
-    } finally { setBusy(false); }
+    } finally { setBusy(false); setEnvironmentTransitioning(false); }
   }
 
   async function toggleFullscreen() {
@@ -2885,6 +2917,29 @@ function TradingApp() {
     setOrderTicketResetEpochs((current) => ({ ...current, [symbol]: (current[symbol] ?? 0) + 1 }));
   }
 
+  function reportMutation(result: BrokerMutationResult, label: string) {
+    const presentation = mutationPresentation(result, label);
+    if (presentation.kind === "rejected") {
+      showToast(presentation.message);
+      return;
+    }
+    if (presentation.kind === "unknown") {
+      setNotifications((current) => [{
+        id: crypto.randomUUID(), time: new Date().toISOString(), title: `${label} outcome unknown`,
+        text: presentation.message, level: "error" as const,
+      }, ...current].slice(0, 250));
+      showToast(`${label} outcome unknown — do not retry.`);
+      return;
+    }
+    if (presentation.kind === "confirmed-warning") {
+      setNotifications((current) => [{
+        id: crypto.randomUUID(), time: new Date().toISOString(), title: `${label} confirmed · local warning`,
+        text: presentation.message, level: "warning" as const,
+      }, ...current].slice(0, 250));
+      showToast(`${label} confirmed; local reconciliation is pending.`);
+    }
+  }
+
   async function submitOrder(draft: OrderDraft, sourceTabId: string, chartSymbol: string) {
     const side = draft.side === "Buy" ? "long" : "short";
     const eligibility = eligibilityForEntry(sourceTabId, chartSymbol, draft.symbol)[side];
@@ -2894,7 +2949,13 @@ function TradingApp() {
     const screenshotCandidateId = armEntryScreenshot(draft, sourceTabId, chartSymbol);
     setBusy(true);
     try {
-      const update = await api.placeOrder(draft);
+      const result = await api.placeOrder(draft);
+      reportMutation(result, "Order");
+      const update = result.brokerOrder;
+      if (result.brokerOutcome !== "confirmed" || !update) {
+        if (screenshotCandidateId) removeScreenshotCandidate(screenshotCandidateId);
+        return;
+      }
       if (["Working", "Filled", "Pending"].includes(update.status)) acceptEntryScreenshot(screenshotCandidateId, update.id);
       else if (screenshotCandidateId) removeScreenshotCandidate(screenshotCandidateId);
       recentOrderIdsRef.current.set(update.id, Date.now() + 15_000);
@@ -2932,7 +2993,10 @@ function TradingApp() {
     setClosingPositionIds((current) => new Set(current).add(positionId));
     let waitForFill = false;
     try {
-      const result = await api.closePosition(selectedAccount.id, positionId);
+      const mutation = await api.closePosition(selectedAccount.id, positionId);
+      reportMutation(mutation, "Position close");
+      const result = mutation.closeResult;
+      if (!result || mutation.brokerOutcome !== "confirmed") return;
       brokerageRefreshRef.current(true);
       if (result.error) {
         setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), symbol: result.symbol, title: "Position close aborted", text: result.error!, level: "error" as const }, ...current].slice(0, 250));
@@ -3001,7 +3065,14 @@ function TradingApp() {
     setReplacingOrderIds((current) => new Set(current).add(order.id));
     setOrders((current) => current.map((item) => item.id === order.id ? withOrderPrice(item, newPrice) : item));
     try {
-      const updated = await api.replaceOrder(selectedAccount.id, order.id, newPrice);
+      const result = await api.replaceOrder(selectedAccount.id, order.id, newPrice);
+      reportMutation(result, "Order replacement");
+      if (result.brokerOutcome === "rejected") {
+        setOrders((current) => current.map((item) => item.id === order.id ? withOrderPrice(item, original) : item));
+        return;
+      }
+      const updated = result.brokerOrder;
+      if (!updated) return;
       setOrders((current) => current.map((item) => item.id === order.id ? { ...item, ...updated } : item));
       brokerageRefreshRef.current(true);
       showToast(`${order.type === "Limit" ? "Take profit" : "Stop loss"} moved to ${formatPrice(newPrice)}.`);
@@ -3014,8 +3085,11 @@ function TradingApp() {
   }
 
   async function cancelWorkingOrder(id: string) {
+    if (!selectedAccount) return;
     try {
-      await api.cancelOrder(id);
+      const result = await api.cancelOrder(selectedAccount.id, id);
+      reportMutation(result, "Cancellation");
+      if (result.brokerOutcome !== "confirmed") return;
       setOrders((current) => current.map((order) => order.id === id ? { ...order, status: "Cancelled", closedAt: new Date().toISOString() } : order));
       brokerageRefreshRef.current(true);
       setNotifications((current) => [{ id: crypto.randomUUID(), time: new Date().toISOString(), title: "Order cancellation sent", text: `Cancellation requested for order ${id}`, level: "warning" }, ...current]);
@@ -3035,7 +3109,13 @@ function TradingApp() {
     const screenshotCandidateId = armEntryScreenshot(review.draft, review.sourceTabId, review.chartSymbol);
     setBusy(true);
     try {
-      const update = await api.placeOrder(review.draft);
+      const result = await api.placeOrder(review.draft);
+      reportMutation(result, "Order");
+      const update = result.brokerOrder;
+      if (result.brokerOutcome !== "confirmed" || !update) {
+        if (screenshotCandidateId) removeScreenshotCandidate(screenshotCandidateId);
+        return;
+      }
       if (["Working", "Filled", "Pending"].includes(update.status)) acceptEntryScreenshot(screenshotCandidateId, update.id);
       else if (screenshotCandidateId) removeScreenshotCandidate(screenshotCandidateId);
       recentOrderIdsRef.current.set(update.id, Date.now() + 15_000);
@@ -3192,6 +3272,7 @@ function TradingApp() {
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
       {!isDetached && <button className={`environment-badge ${environment}`} title="TradeStation futures environment" onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
+      {!isDetached && environment === "live" && <button className={`risk-arm-chip ${riskStatus?.liveArmed ? "armed" : "disarmed"}`} disabled={environmentTransitioning} title="Session-only LIVE trading arm state" onClick={() => setSettingsOpen(true)}><LockKeyhole size={12} />{riskStatus?.liveArmed ? "LIVE ARMED" : "LIVE DISARMED"}</button>}
       <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => activeTab.symbol.provider === "schwab" ? setSettingsOpen(true) : setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
@@ -3332,7 +3413,7 @@ function TradingApp() {
         {workspace.rightPanelOpen && <div id="order-panel-content" className="right-panel-content">
           {activeTab.symbol.provider === "schwab"
             ? <div className="equity-order-disabled"><span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p></div>
-            : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}
+            : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}
         </div>}
       </aside>}
 
@@ -3393,6 +3474,7 @@ function TradingApp() {
       <WatchlistSettings workspace={workspace} onChange={(watchlist) => updateWorkspace({ watchlist })} onNotify={showToast} />
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Chart display</h3><p>Configure tab signals and the values shown beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>EMA 200 tab status</strong><small>Green above EMA 200, red below</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showEma200TabDots} onChange={(event) => updateChartLabelSettings({ showEma200TabDots: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure risk sizing and projected swing stops.</p></header><label className="settings-control-row"><span><strong>Risk budget behavior</strong><small>Choose whether risk sizing may exceed the limit</small></span><select aria-label="Risk budget behavior" value={workspace.settings.orderTicket.riskSizingPolicy} onChange={(event) => updateOrderTicketSettings({ riskSizingPolicy: event.target.value as OrderTicketSettings["riskSizingPolicy"] })}><option value="strict">Stay within risk</option><option value="minimum-one">Always allow 1 contract</option></select></label><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
+      {selectedAccount && riskStatus && <RiskSafetySettings account={selectedAccount} environment={environment} status={riskStatus} transitioning={environmentTransitioning} onStatus={setRiskStatus} onNotify={showToast} />}
       <section className="settings-section" aria-labelledby="audit-log-settings"><header><span>Diagnostics</span><h3 id="audit-log-settings">Audit log</h3><p>Review API activity and saved record changes retained locally for seven days.</p></header><button type="button" className="settings-audit-row" onClick={() => { setSettingsOpen(false); setAuditLogOpen(true); }}><span className={auditHealth.healthy ? "healthy" : "degraded"}><Activity size={16} /><i /></span><span><strong>{auditHealth.healthy ? "Logging healthy" : "Logging degraded"}</strong><small>{auditHealth.sessionOnly ? "Session-only browser diagnostics" : auditHealth.healthy ? "Local device only · 10,000 event maximum" : `${auditHealth.droppedEvents} event${auditHealth.droppedEvents === 1 ? "" : "s"} may be missing`}</small></span><em>Open audit log</em></button></section>
       <section className="settings-section" aria-labelledby="journal-fee-settings"><header><span>Journal</span><h3 id="journal-fee-settings">Commission and fees</h3><p>Used for journal net P&amp;L on every opening and closing fill.</p></header><label className="settings-control-row"><span><strong>Fee per contract, per side</strong><small>One contract opened and closed is charged twice</small></span><div className="settings-number-control"><input aria-label="Journal fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.commissionPerContractSide} onChange={(event) => updateJournalCommission(Number(event.target.value))} /><span>USD</span></div></label></section>
       <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings preferenceSync={preferenceSync} preferenceRealtime={preferenceRealtime} onConnectionChanged={() => { void syncCloudPreferences(); }} /></section>
@@ -3624,6 +3706,100 @@ function ChartLayoutGlyph({ layout }: { layout: ChartLayout }) {
   return <span className={`chart-layout-glyph glyph-${layout}`} aria-hidden="true">
     {Array.from({ length: chartLayoutCapacity(layout) }, (_, index) => <i key={index} />)}
   </span>;
+}
+
+function RiskSafetySettings({ account, environment, status, transitioning, onStatus, onNotify }: {
+  account: Account;
+  environment: TradingEnvironment;
+  status: RiskPolicyStatus;
+  transitioning: boolean;
+  onStatus: (status: RiskPolicyStatus) => void;
+  onNotify: (message: string) => void;
+}) {
+  const [policy, setPolicy] = useState<RiskPolicy>(status.policy);
+  const [saving, setSaving] = useState(false);
+  const [mutations, setMutations] = useState<BrokerMutationIntent[]>([]);
+  useEffect(() => { setPolicy(status.policy); }, [status]);
+  const refreshMutations = () => api.brokerMutations(environment, account.id)
+    .then(setMutations)
+    .catch((error) => onNotify(String(error)));
+  useEffect(() => { void refreshMutations(); }, [account.id, environment]);
+
+  const updateLimit = (key: "maxQuantityPerOrder" | "maxTotalOpenContracts" | "maxRiskPerTrade" | "maxAggregateOpenRisk" | "maxRealizedDailyLoss", patch: { enabled?: boolean; value?: number }) => {
+    setPolicy((current) => ({ ...current, [key]: { ...current[key], ...patch } }));
+  };
+  const save = async () => {
+    setSaving(true);
+    try {
+      const next = await api.saveRiskPolicy(account.id, policy);
+      onStatus(next);
+      onNotify("Native risk policy saved. LIVE trading was disarmed.");
+    } catch (error) { onNotify(String(error)); }
+    finally { setSaving(false); }
+  };
+  const toggleArmed = async () => {
+    const armed = !status.liveArmed;
+    const confirmation = armed && environment === "live"
+      ? window.prompt(`Type ARM LIVE ${account.id} to arm LIVE trading for this session.`) ?? ""
+      : "";
+    if (armed && environment === "live" && confirmation !== `ARM LIVE ${account.id}`) return;
+    try {
+      onStatus(await api.setLiveTradingArmed(account.id, armed, confirmation));
+      onNotify(armed ? "LIVE trading armed for this application session." : "LIVE trading disarmed.");
+    } catch (error) { onNotify(String(error)); }
+  };
+  const runKillSwitch = async () => {
+    const required = environment === "live" ? `FLATTEN LIVE ${account.id}` : "FLATTEN";
+    const confirmation = window.prompt(`Kill switch: cancel working orders and flatten positions. Type ${required}.`) ?? "";
+    if (confirmation !== required) return;
+    try {
+      const result = await api.killSwitch(account.id, confirmation);
+      const items = [...result.cancelledOrders, ...result.flattenedPositions];
+      const confirmed = items.filter((item) => item.result.brokerOutcome === "confirmed").length;
+      const unknown = items.filter((item) => item.result.brokerOutcome === "unknown").length;
+      const rejected = items.filter((item) => item.result.brokerOutcome === "rejected").length;
+      onNotify(result.alreadyFlat
+        ? "Kill switch complete: account already had no working orders or open positions."
+        : `Kill switch results: ${confirmed} confirmed, ${unknown} unknown, ${rejected} rejected.`);
+      refreshMutations();
+    } catch (error) { onNotify(String(error)); }
+  };
+  const reconcile = async (intent: BrokerMutationIntent, manual: boolean) => {
+    const brokerOrderId = manual ? window.prompt("Enter the exact broker order ID to match.") ?? "" : undefined;
+    if (manual && !brokerOrderId) return;
+    const confirmation = manual ? window.prompt(`Type RECONCILE ${intent.id} to apply this exact match.`) ?? "" : "";
+    try {
+      const result = await api.reconcileBrokerMutation(intent.id, brokerOrderId, confirmation);
+      onNotify(result.brokerOutcome === "confirmed"
+        ? "Mutation reconciled to confirmed broker state."
+        : result.reconciliationStatus === "manual_review_required"
+          ? "No safe automatic match. Manual review is still required."
+          : "No unambiguous broker match yet; retry remains blocked.");
+      refreshMutations();
+    } catch (error) { onNotify(String(error)); }
+  };
+  const unresolved = mutations.filter((item) => item.localPersistence !== "complete" || ["requested", "submitting", "unknown", "reconciling", "reconciliation_failed"].includes(item.state));
+
+  return <section className="settings-section risk-safety-settings" aria-labelledby="native-risk-settings">
+    <header><span>Safety</span><h3 id="native-risk-settings">Native risk & recovery</h3><p>Rust-enforced account limits. Every rule is disabled until explicitly enabled.</p></header>
+    <div className={`risk-arm-state ${status.liveArmed ? "armed" : "disarmed"}`}><LockKeyhole size={15} /><span><strong>{environment === "live" ? (status.liveArmed ? "LIVE trading armed" : "LIVE trading disarmed") : "SIM environment"}</strong><small>{environment === "live" ? "Arming expires on environment change, logout, or app restart." : "LIVE will require a new typed confirmation."}</small></span>{environment === "live" && <button type="button" disabled={transitioning || saving} onClick={toggleArmed}>{status.liveArmed ? "Disarm" : "Arm LIVE"}</button>}</div>
+    <RiskLimitRow label="Maximum quantity per order" limit={policy.maxQuantityPerOrder} step={1} onChange={(patch) => updateLimit("maxQuantityPerOrder", patch)} />
+    <RiskLimitRow label="Maximum total open contracts" limit={policy.maxTotalOpenContracts} step={1} onChange={(patch) => updateLimit("maxTotalOpenContracts", patch)} />
+    <RiskLimitRow label="Maximum risk per trade ($)" limit={policy.maxRiskPerTrade} step={1} onChange={(patch) => updateLimit("maxRiskPerTrade", patch)} />
+    <RiskLimitRow label="Maximum aggregate open risk ($)" limit={policy.maxAggregateOpenRisk} step={1} onChange={(patch) => updateLimit("maxAggregateOpenRisk", patch)} />
+    <RiskLimitRow label="Maximum realized daily loss ($)" limit={policy.maxRealizedDailyLoss} step={1} onChange={(patch) => updateLimit("maxRealizedDailyLoss", patch)} />
+    <label className="switch-row settings-row"><span><strong>Require protective stop</strong><small>Risk-increasing entries without a stop fail closed</small></span><input type="checkbox" checked={policy.requiredProtectiveStop} onChange={(event) => setPolicy((current) => ({ ...current, requiredProtectiveStop: event.target.checked }))} /></label>
+    <label className="switch-row settings-row"><span><strong>Allowed trading session</strong><small>{policy.allowedSession.timezone} · {policy.allowedSession.start}–{policy.allowedSession.end}</small></span><input type="checkbox" checked={policy.allowedSession.enabled} onChange={(event) => setPolicy((current) => ({ ...current, allowedSession: { ...current.allowedSession, enabled: event.target.checked } }))} /></label>
+    {policy.allowedSession.enabled && <div className="risk-inline-fields"><input aria-label="Trading session timezone" value={policy.allowedSession.timezone} onChange={(event) => setPolicy((current) => ({ ...current, allowedSession: { ...current.allowedSession, timezone: event.target.value } }))} /><input aria-label="Trading session start" type="time" value={policy.allowedSession.start} onChange={(event) => setPolicy((current) => ({ ...current, allowedSession: { ...current.allowedSession, start: event.target.value } }))} /><input aria-label="Trading session end" type="time" value={policy.allowedSession.end} onChange={(event) => setPolicy((current) => ({ ...current, allowedSession: { ...current.allowedSession, end: event.target.value } }))} /></div>}
+    <label className="switch-row settings-row"><span><strong>Consecutive-loss cooldown</strong><small>{policy.consecutiveLossCooldown.threshold} losses · {policy.consecutiveLossCooldown.cooldownMinutes} minutes</small></span><input type="checkbox" checked={policy.consecutiveLossCooldown.enabled} onChange={(event) => setPolicy((current) => ({ ...current, consecutiveLossCooldown: { ...current.consecutiveLossCooldown, enabled: event.target.checked } }))} /></label>
+    <label className="switch-row settings-row"><span><strong>Order-rate protection</strong><small>{policy.orderRate.maxOrders} orders / {policy.orderRate.windowSeconds}s</small></span><input type="checkbox" checked={policy.orderRate.enabled} onChange={(event) => setPolicy((current) => ({ ...current, orderRate: { ...current.orderRate, enabled: event.target.checked } }))} /></label>
+    <div className="risk-actions"><button type="button" className="primary-button" disabled={saving || transitioning} onClick={save}>{saving ? "Saving…" : "Save native policy"}</button><button type="button" className="danger-button" disabled={saving || transitioning} onClick={runKillSwitch}>Cancel all & flatten</button></div>
+    {unresolved.length > 0 && <div className="reconciliation-list"><strong>Reconciliation required</strong>{unresolved.map((intent) => <div key={intent.id}><span><b>{intent.kind.replaceAll("_", " ")}</b><small>{intent.symbol ?? intent.targetId ?? intent.id} · {intent.state.replaceAll("_", " ")}</small></span><button type="button" onClick={() => reconcile(intent, false)}>Reconcile</button>{intent.manualReviewRequired && <button type="button" onClick={() => reconcile(intent, true)}>Manual match</button>}</div>)}</div>}
+  </section>;
+}
+
+function RiskLimitRow({ label, limit, step, onChange }: { label: string; limit: { enabled: boolean; value: number }; step: number; onChange: (patch: { enabled?: boolean; value?: number }) => void }) {
+  return <label className="risk-limit-row"><span><input type="checkbox" checked={limit.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} /><strong>{label}</strong></span><input type="number" min={step} step={step} disabled={!limit.enabled} value={limit.value} onChange={(event) => onChange({ value: Math.max(step, Number(event.target.value) || step) })} /></label>;
 }
 
 function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: WorkspaceState; onChange: (symbols: SymbolMeta[]) => void; onNotify: (message: string) => void }) {

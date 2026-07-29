@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, ClosePositionResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "../types";
+import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "../types";
 import { demoAuditExport, demoAuditPage, instrumentDemoApi } from "./audit";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
@@ -14,6 +14,7 @@ const nativeRecordCommands = new Set([
   "configure_journal", "disconnect_journal", "set_journal_backfill_start", "reset_journal_now",
   "set_journal_commission", "save_journal_entry_screenshot", "update_journal_annotation",
   "ingest_journal_orders", "place_order", "replace_order", "close_position", "cancel_order",
+  "save_risk_policy", "set_live_trading_armed", "reconcile_broker_mutation", "kill_switch",
 ]);
 
 async function native<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -159,20 +160,57 @@ const rawApi = {
     if (isTauri) return native("confirm_order", { order });
     return { valid: true, summary: `${order.side} ${order.quantity} ${order.symbol} ${order.type}`, estimatedCommission: "$1.24", initialMargin: "$2,460.00", errors: [] };
   },
-  async placeOrder(order: OrderDraft): Promise<OrderUpdate> {
-    if (isTauri) return native("place_order", { order });
+  async placeOrder(order: OrderDraft, clientMutationId = crypto.randomUUID()): Promise<BrokerMutationResult> {
+    if (isTauri) return native("place_order", { order, clientMutationId });
     throw new Error("Order placement is disabled in browser demo mode.");
   },
-  async replaceOrder(accountId: string, orderId: string, newPrice: number): Promise<OrderUpdate> {
-    if (isTauri) return native("replace_order", { accountId, orderId, newPrice });
+  async replaceOrder(accountId: string, orderId: string, newPrice: number, clientMutationId = crypto.randomUUID()): Promise<BrokerMutationResult> {
+    if (isTauri) return native("replace_order", { accountId, orderId, newPrice, clientMutationId });
     throw new Error("Order replacement is disabled in browser demo mode.");
   },
-  async closePosition(accountId: string, positionId: string): Promise<ClosePositionResult> {
-    if (isTauri) return native("close_position", { accountId, positionId });
+  async closePosition(accountId: string, positionId: string, clientMutationId = crypto.randomUUID()): Promise<BrokerMutationResult> {
+    if (isTauri) return native("close_position", { accountId, positionId, clientMutationId });
     throw new Error("Position closing is disabled in browser demo mode.");
   },
-  async cancelOrder(orderId: string): Promise<void> {
-    if (isTauri) await native("cancel_order", { orderId });
+  async cancelOrder(accountId: string, orderId: string, clientMutationId = crypto.randomUUID()): Promise<BrokerMutationResult> {
+    if (isTauri) return native("cancel_order", { accountId, orderId, clientMutationId });
+    throw new Error("Order cancellation is disabled in browser demo mode.");
+  },
+  async riskPolicy(accountId: string): Promise<RiskPolicyStatus> {
+    if (isTauri) return native("get_risk_policy", { accountId });
+    return {
+      environment: "sim", accountId, liveArmed: false, sessionId: "browser-demo",
+      policy: {
+        maxQuantityPerOrder: { enabled: false, value: 1 },
+        maxTotalOpenContracts: { enabled: false, value: 1 },
+        maxRiskPerTrade: { enabled: false, value: 100 },
+        maxAggregateOpenRisk: { enabled: false, value: 500 },
+        maxRealizedDailyLoss: { enabled: false, value: 500 },
+        requiredProtectiveStop: false,
+        allowedSession: { enabled: false, timezone: "America/Chicago", start: "08:30", end: "15:00", weekdays: [1, 2, 3, 4, 5] },
+        consecutiveLossCooldown: { enabled: false, threshold: 3, cooldownMinutes: 30 },
+        orderRate: { enabled: false, maxOrders: 5, windowSeconds: 60, cooldownSeconds: 60 },
+      },
+    };
+  },
+  async saveRiskPolicy(accountId: string, policy: RiskPolicy): Promise<RiskPolicyStatus> {
+    if (isTauri) return native("save_risk_policy", { accountId, policy });
+    return { ...(await this.riskPolicy(accountId)), policy };
+  },
+  async setLiveTradingArmed(accountId: string, armed: boolean, confirmation: string): Promise<RiskPolicyStatus> {
+    if (isTauri) return native("set_live_trading_armed", { accountId, armed, confirmation });
+    return { ...(await this.riskPolicy(accountId)), liveArmed: armed };
+  },
+  async brokerMutations(environment: TradingEnvironment, accountId: string): Promise<BrokerMutationIntent[]> {
+    return isTauri ? native("list_broker_mutations", { environment, accountId }) : [];
+  },
+  async reconcileBrokerMutation(mutationId: string, brokerOrderId?: string, confirmation = ""): Promise<BrokerMutationResult> {
+    if (isTauri) return native("reconcile_broker_mutation", { mutationId, brokerOrderId, confirmation });
+    throw new Error("Broker reconciliation is available in the desktop app.");
+  },
+  async killSwitch(accountId: string, confirmation: string): Promise<KillSwitchResult> {
+    if (isTauri) return native("kill_switch", { accountId, confirmation });
+    throw new Error("The kill switch is available in the desktop app.");
   },
   async loadWorkspace(): Promise<WorkspaceState | null> {
     if (isTauri) return native("load_workspace");

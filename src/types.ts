@@ -290,6 +290,93 @@ export interface EntryRuleEmaCrossCondition {
   lookback: number;
 }
 
+export type BrokerOutcome = "confirmed" | "rejected" | "unknown";
+export type LocalPersistenceStatus = "complete" | "pending" | "failed";
+export type ReconciliationStatus = "not_required" | "required" | "reconciling" | "reconciled" | "manual_review_required" | "failed";
+
+export interface BrokerMutationResult {
+  mutationId: string;
+  brokerOutcome: BrokerOutcome;
+  localPersistence: LocalPersistenceStatus;
+  reconciliationStatus: ReconciliationStatus;
+  warnings: string[];
+  brokerOrder: OrderUpdate | null;
+  closeResult: ClosePositionResult | null;
+  rejectionReason?: string;
+  retryBlocked: boolean;
+}
+
+export type MutationState = "requested" | "submitting" | "accepted" | "rejected" | "unknown" | "reconciling" | "reconciled" | "reconciliation_failed";
+
+export interface BrokerMutationIntent {
+  id: string;
+  environment: TradingEnvironment;
+  accountId: string;
+  kind: string;
+  equivalenceKey: string;
+  symbol?: string;
+  action: string;
+  quantity?: number;
+  orderType?: string;
+  limitPrice?: number;
+  stopPrice?: number;
+  takeProfit?: number;
+  stopLoss?: number;
+  targetId?: string;
+  brokerId?: string;
+  state: MutationState;
+  localPersistence: LocalPersistenceStatus;
+  reconciliationStatus: string;
+  manualReviewRequired: boolean;
+  warning?: string;
+  error?: string;
+  request: unknown;
+  brokerObject?: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EnabledU32Limit { enabled: boolean; value: number; }
+export interface EnabledF64Limit { enabled: boolean; value: number; }
+export interface TradingSessionPolicy { enabled: boolean; timezone: string; start: string; end: string; weekdays: number[]; }
+export interface CooldownPolicy { enabled: boolean; threshold: number; cooldownMinutes: number; }
+export interface OrderRatePolicy { enabled: boolean; maxOrders: number; windowSeconds: number; cooldownSeconds: number; }
+
+export interface RiskPolicy {
+  maxQuantityPerOrder: EnabledU32Limit;
+  maxTotalOpenContracts: EnabledU32Limit;
+  maxRiskPerTrade: EnabledF64Limit;
+  maxAggregateOpenRisk: EnabledF64Limit;
+  maxRealizedDailyLoss: EnabledF64Limit;
+  requiredProtectiveStop: boolean;
+  allowedSession: TradingSessionPolicy;
+  consecutiveLossCooldown: CooldownPolicy;
+  orderRate: OrderRatePolicy;
+}
+
+export interface RiskPolicyStatus {
+  environment: TradingEnvironment;
+  accountId: string;
+  policy: RiskPolicy;
+  liveArmed: boolean;
+  sessionId: string;
+}
+
+export interface KillSwitchItemResult {
+  itemType: "order" | "position";
+  itemId: string;
+  symbol?: string;
+  result: BrokerMutationResult;
+}
+
+export interface KillSwitchResult {
+  environment: TradingEnvironment;
+  accountId: string;
+  cancelledOrders: KillSwitchItemResult[];
+  flattenedPositions: KillSwitchItemResult[];
+  alreadyFlat: boolean;
+}
+
 export type EntryRuleWeekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 export type EntryRuleTimezone = Exclude<ChartTimezone, "exchange" | "local">;
 
@@ -540,13 +627,14 @@ export interface BarSnapshotEvent {
 }
 
 export interface BarUpdateEvent extends Omit<BarSnapshotEvent, "bars"> { bar: Bar; }
-export interface QuoteUpdateEvent { subscriptionId: string; provider: MarketDataProvider; environment: TradingEnvironment; quote: Quote; }
-export interface OptionUpdateEvent { subscriptionId: string; contract: OptionContract; }
-export interface OptionStreamStateEvent { subscriptionId: string; symbol: string; state: StreamConnectionState | "rest-only" | "error"; message?: string; }
+export interface QuoteUpdateEvent { subscriptionId: string; provider: MarketDataProvider; environment: TradingEnvironment; environmentGeneration: number; quote: Quote; }
+export interface OptionUpdateEvent { subscriptionId: string; environmentGeneration: number; contract: OptionContract; }
+export interface OptionStreamStateEvent { subscriptionId: string; symbol: string; environmentGeneration: number; state: StreamConnectionState | "rest-only" | "error"; message?: string; }
 export interface StreamStateEvent {
   subscriptionId: string;
   provider: MarketDataProvider;
   environment: TradingEnvironment;
+  environmentGeneration?: number;
   channel: "bars" | "quotes";
   state: StreamConnectionState;
   message?: string;
@@ -554,11 +642,11 @@ export interface StreamStateEvent {
   timeframe?: Timeframe;
   generation?: number;
 }
-export interface PositionsSnapshotEvent { accountId: string; positions: Position[]; }
-export interface PositionUpdateEvent { accountId: string; position: Position; }
-export interface OrdersSnapshotEvent { accountId: string; orders: OrderUpdate[]; }
-export interface OrderStreamUpdateEvent { accountId: string; order: OrderUpdate; }
-export interface BrokerageStreamStateEvent { accountId: string; channel: "positions" | "orders"; state: StreamConnectionState; message?: string; }
+export interface PositionsSnapshotEvent { accountId: string; environmentGeneration: number; positions: Position[]; }
+export interface PositionUpdateEvent { accountId: string; environmentGeneration: number; position: Position; }
+export interface OrdersSnapshotEvent { accountId: string; environmentGeneration: number; orders: OrderUpdate[]; }
+export interface OrderStreamUpdateEvent { accountId: string; environmentGeneration: number; order: OrderUpdate; }
+export interface BrokerageStreamStateEvent { accountId: string; environmentGeneration: number; channel: "positions" | "orders"; state: StreamConnectionState; message?: string; }
 
 export type RiskProvenance = "exact" | "inferred" | "unknown";
 export type JournalTradeStatus = "open" | "closed";

@@ -400,6 +400,7 @@ pub struct TradeStation {
     quota: QuotaCoordinator,
     cache: Arc<Mutex<ClientCache>>,
     inflight_gets: Arc<Mutex<HashMap<String, Vec<oneshot::Sender<Result<Value, String>>>>>>,
+    refresh_lock: Arc<Mutex<()>>,
     brokerage_cache: Arc<Mutex<BrokerageCache>>,
     brokerage_revision: watch::Sender<u64>,
     audit: Option<AuditService>,
@@ -441,6 +442,7 @@ impl TradeStation {
             quota: QuotaCoordinator::default(),
             cache: Arc::new(Mutex::new(ClientCache::default())),
             inflight_gets: Arc::new(Mutex::new(HashMap::new())),
+            refresh_lock: Arc::new(Mutex::new(())),
             brokerage_cache: Arc::new(Mutex::new(BrokerageCache::default())),
             brokerage_revision,
             audit: None,
@@ -619,6 +621,26 @@ impl TradeStation {
     }
 
     async fn refresh(&self) -> Result<String, AppError> {
+        self.refresh_single_flight(|| self.refresh_request()).await
+    }
+
+    async fn refresh_single_flight<F, Fut>(&self, refresh: F) -> Result<String, AppError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(String, u64), AppError>>,
+    {
+        let _guard = self.refresh_lock.lock().await;
+        if let Some(token) = self.session.lock().await.token.clone() {
+            if token.expires_at > Instant::now() {
+                return Ok(token.value);
+            }
+        }
+        let (access, expires) = refresh().await?;
+        self.set_token(access.clone(), expires).await;
+        Ok(access)
+    }
+
+    async fn refresh_request(&self) -> Result<(String, u64), AppError> {
         let client_id =
             storage::get_secret("client_id")?.ok_or(AppError::AuthenticationRequired)?;
         let client_secret =
@@ -653,8 +675,7 @@ impl TradeStation {
             .get("expires_in")
             .and_then(Value::as_u64)
             .unwrap_or(1200);
-        self.set_token(access.clone(), expires).await;
-        Ok(access)
+        Ok((access, expires))
     }
 
     pub async fn token(&self) -> Result<String, AppError> {
@@ -765,34 +786,38 @@ impl TradeStation {
             return self.send_request(method, path, body, priority).await;
         }
         let key = format!("{}{}", self.base().await, path);
-        let receiver = {
+        let (receiver, leader) = {
             let mut inflight = self.inflight_gets.lock().await;
+            let (sender, receiver) = oneshot::channel();
             if let Some(waiters) = inflight.get_mut(&key) {
-                let (sender, receiver) = oneshot::channel();
                 waiters.push(sender);
-                Some(receiver)
+                (receiver, false)
             } else {
-                inflight.insert(key.clone(), Vec::new());
-                None
+                inflight.insert(key.clone(), vec![sender]);
+                (receiver, true)
             }
         };
-        if let Some(receiver) = receiver {
-            return receiver
-                .await
-                .map_err(|_| AppError::Api("A shared TradeStation request was cancelled".into()))?
-                .map_err(AppError::Api);
+        if leader {
+            let api = self.clone();
+            let key_for_task = key.clone();
+            let path = path.to_string();
+            tauri::async_runtime::spawn(async move {
+                let result = api.send_request(method, &path, body, priority).await;
+                let shared = result
+                    .as_ref()
+                    .map(Clone::clone)
+                    .map_err(ToString::to_string);
+                if let Some(waiters) = api.inflight_gets.lock().await.remove(&key_for_task) {
+                    for waiter in waiters {
+                        let _ = waiter.send(shared.clone());
+                    }
+                }
+            });
         }
-        let result = self.send_request(method, path, body, priority).await;
-        let shared = result
-            .as_ref()
-            .map(Clone::clone)
-            .map_err(ToString::to_string);
-        if let Some(waiters) = self.inflight_gets.lock().await.remove(&key) {
-            for waiter in waiters {
-                let _ = waiter.send(shared.clone());
-            }
-        }
-        result
+        receiver
+            .await
+            .map_err(|_| AppError::Api("A shared TradeStation request was cancelled".into()))?
+            .map_err(AppError::Api)
     }
 
     async fn send_request(
@@ -839,7 +864,13 @@ impl TradeStation {
                     if let Some(span) = span {
                         span.error(None, error.to_string());
                     }
-                    return Err(error.into());
+                    return Err(if method == Method::GET || error.is_connect() {
+                        error.into()
+                    } else {
+                        AppError::AmbiguousBrokerOutcome(format!(
+                            "Broker request transport failed after submission may have begun: {error}"
+                        ))
+                    });
                 }
             };
             self.quota.observe(resource, response.headers()).await;
@@ -889,7 +920,20 @@ impl TradeStation {
                 if let Some(span) = span {
                     span.error(Some(status.as_u16()), safe_message.clone());
                 }
-                return Err(AppError::Api(safe_message));
+                if method != Method::GET
+                    && (status.is_server_error()
+                        || status == StatusCode::REQUEST_TIMEOUT
+                        || status.as_u16() == 425)
+                {
+                    return Err(AppError::AmbiguousBrokerOutcome(format!(
+                        "{safe_message} (HTTP {status})"
+                    )));
+                }
+                return Err(if method != Method::GET && status.is_client_error() {
+                    AppError::BrokerRejected(safe_message)
+                } else {
+                    AppError::Api(safe_message)
+                });
             }
             let value = if text.trim().is_empty() {
                 json!({})
@@ -1371,7 +1415,7 @@ impl TradeStation {
             .unwrap_or(&body);
         let id = string(response, "OrderID");
         if id.is_empty() {
-            return Err(AppError::Api(
+            return Err(AppError::AmbiguousBrokerOutcome(
                 response
                     .get("Message")
                     .and_then(Value::as_str)
@@ -2633,6 +2677,31 @@ fn mask_account(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn concurrent_expired_token_requests_share_exactly_one_refresh() {
+        let api = TradeStation::new().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let tasks = (0..20)
+            .map(|_| {
+                let api = api.clone();
+                let calls = calls.clone();
+                tokio::spawn(async move {
+                    api.refresh_single_flight(|| async {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        Ok(("shared-token".into(), 1200))
+                    })
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+        for result in futures_util::future::join_all(tasks).await {
+            assert_eq!(result.unwrap().unwrap(), "shared-token");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn stream_client_has_no_total_request_timeout() {

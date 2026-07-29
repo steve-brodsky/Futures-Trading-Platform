@@ -1109,3 +1109,94 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
   .audit-log-status-strip em { display: none; }
   .audit-event-details { padding-left: 15px; }
 }
+.risk-arm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #5b2b32;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #211317;
+  color: #ff9ca8;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: .055em;
+}
+
+.risk-arm-chip.armed {
+  border-color: #23664e;
+  background: #10251e;
+  color: #66e5b3;
+}
+
+.risk-arm-chip:disabled { opacity: .45; }
+
+.risk-safety-settings { gap: 0; }
+
+.risk-arm-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 10px;
+  padding: 10px;
+  border: 1px solid #4b2930;
+  border-radius: 7px;
+  background: #1a1114;
+  color: #ef929e;
+}
+
+.risk-arm-state.armed {
+  border-color: #285c49;
+  background: #101f1a;
+  color: #61d9aa;
+}
+
+.risk-arm-state > span { display: grid; flex: 1; gap: 2px; }
+.risk-arm-state small { color: var(--muted); font-size: 10px; }
+.risk-arm-state button { padding: 6px 9px; }
+
+.risk-limit-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  border-top: 1px solid var(--line);
+}
+
+.risk-limit-row > span { display: flex; align-items: center; gap: 8px; }
+.risk-limit-row strong { font-size: 11px; font-weight: 600; }
+.risk-limit-row > input { width: 108px; padding: 5px 7px; }
+.risk-limit-row > input:disabled { opacity: .4; }
+
+.risk-inline-fields {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr 1fr;
+  gap: 6px;
+  padding: 0 0 9px;
+}
+
+.risk-inline-fields input { min-width: 0; padding: 6px; }
+.risk-actions { display: flex; gap: 8px; padding-top: 12px; }
+
+.reconciliation-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.reconciliation-list > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid #513b22;
+  border-radius: 6px;
+  background: #1f1910;
+}
+
+.reconciliation-list > div > span { display: grid; flex: 1; }
+.reconciliation-list small { color: var(--muted); font-size: 10px; }
+.reconciliation-list button { padding: 5px 7px; font-size: 10px; }

@@ -1,6 +1,7 @@
 mod audit;
 mod journal;
 mod models;
+mod safety;
 mod schwab;
 mod schwab_oauth;
 mod schwab_streamer;
@@ -8,7 +9,7 @@ mod storage;
 mod tradestation;
 mod trading_today;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use models::*;
 use schwab::Schwab;
@@ -32,6 +33,10 @@ pub enum AppError {
     Validation(String),
     #[error("{0}")]
     Api(String),
+    #[error("{0}")]
+    BrokerRejected(String),
+    #[error("{0}")]
+    AmbiguousBrokerOutcome(String),
     #[error(
         "TradeStation temporarily paused {resource} requests; retry in {retry_after_secs} seconds"
     )]
@@ -69,11 +74,19 @@ pub struct NativeState {
     schwab: Schwab,
     schwab_streamer: SchwabStreamer,
     db_path: PathBuf,
+    safety: Arc<safety::SafetyService>,
     bar_streams: Arc<tokio::sync::Mutex<BarStreamRegistry>>,
-    quote_streams: tokio::sync::Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    quote_streams: tokio::sync::Mutex<HashMap<String, QuoteStreamRegistration>>,
+    quote_provider_tasks:
+        tokio::sync::Mutex<HashMap<MarketDataProvider, tauri::async_runtime::JoinHandle<()>>>,
     option_streams: tokio::sync::Mutex<HashMap<String, OptionStreamRegistration>>,
     brokerage_streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
     preference_realtime: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+}
+
+struct QuoteStreamRegistration {
+    provider: MarketDataProvider,
+    symbols: BTreeSet<String>,
 }
 
 struct OptionStreamRegistration {
@@ -218,14 +231,13 @@ async fn begin_schwab_login(
 
 #[tauri::command]
 async fn logout_schwab(state: State<'_, NativeState>) -> Result<(), AppError> {
-    state.schwab_streamer.stop().await;
-    let mut registrations = state.option_streams.lock().await;
-    for (_, registration) in registrations.drain() {
-        registration.task.abort();
-    }
-    drop(registrations);
+    let (_transition, _) = state.safety.lifecycle.begin_transition().await;
+    shutdown_native_services(&state).await;
     state.schwab.clear_access_token().await;
-    storage::clear_schwab_refresh_token()?;
+    let result = storage::clear_schwab_refresh_token();
+    state.safety.disarm_all().await;
+    state.safety.lifecycle.finish_transition();
+    result?;
     Ok(())
 }
 
@@ -277,6 +289,8 @@ async fn begin_login(app: tauri::AppHandle, state: State<'_, NativeState>) -> Re
     open::that(url.as_str())
         .map_err(|error| AppError::Api(format!("Could not open system browser: {error}")))?;
     let api = state.api.clone();
+    let reconciliation_api = state.api.clone();
+    let reconciliation_db = state.db_path.clone();
     tauri::async_runtime::spawn(async move {
         let result: Result<(), AppError> = async {
             let (mut stream, _) = tokio::time::timeout(std::time::Duration::from_secs(300), listener.accept()).await
@@ -295,6 +309,7 @@ async fn begin_login(app: tauri::AppHandle, state: State<'_, NativeState>) -> Re
         }.await;
         match result {
             Ok(()) => {
+                reconcile_unresolved(reconciliation_api, reconciliation_db).await;
                 let _ = app.emit("auth-changed", serde_json::json!({"authenticated":true}));
             }
             Err(error) => {
@@ -307,8 +322,13 @@ async fn begin_login(app: tauri::AppHandle, state: State<'_, NativeState>) -> Re
 
 #[tauri::command]
 async fn logout(state: State<'_, NativeState>) -> Result<(), AppError> {
+    let (_transition, _) = state.safety.lifecycle.begin_transition().await;
+    shutdown_native_services(&state).await;
     state.api.clear_token().await;
-    storage::delete_secret("refresh_token")?;
+    let result = storage::delete_secret("refresh_token");
+    state.safety.disarm_all().await;
+    state.safety.lifecycle.finish_transition();
+    result?;
     let mut record = audit::AuditRecord::completed(
         "record",
         "credential-vault",
@@ -328,8 +348,17 @@ async fn set_environment(
     environment: TradingEnvironment,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    let (_transition, generation) = state.safety.lifecycle.begin_transition().await;
+    shutdown_native_services(&state).await;
     let environment_key = environment.key().to_string();
     state.api.set_environment(environment).await;
+    state.safety.disarm_all().await;
+    state.safety.lifecycle.finish_transition();
+    let reconcile_api = state.api.clone();
+    let reconcile_db = state.db_path.clone();
+    tauri::async_runtime::spawn(async move {
+        reconcile_unresolved(reconcile_api, reconcile_db).await;
+    });
     let mut record = audit::AuditRecord::completed(
         "record",
         "workspace",
@@ -342,8 +371,70 @@ async fn set_environment(
     );
     record.entity_type = Some("trading-environment".into());
     record.entity_id = Some(environment_key);
+    record.changes = Some(serde_json::json!({"generation": generation}));
     state.audit.record(record);
     Ok(())
+}
+
+async fn shutdown_native_services(state: &NativeState) {
+    let mut handles = Vec::new();
+    {
+        let mut registry = state.bar_streams.lock().await;
+        for (_, stream) in registry.streams.drain() {
+            stream.task.abort();
+            handles.push(stream.task);
+        }
+        registry.subscription_keys.clear();
+        registry.subscription_generations.clear();
+    }
+    {
+        let mut streams = state.quote_streams.lock().await;
+        streams.clear();
+    }
+    {
+        let mut streams = state.quote_provider_tasks.lock().await;
+        for (_, task) in streams.drain() {
+            task.abort();
+            handles.push(task);
+        }
+    }
+    {
+        let mut streams = state.option_streams.lock().await;
+        for (_, registration) in streams.drain() {
+            registration.task.abort();
+            handles.push(registration.task);
+        }
+    }
+    {
+        let mut streams = state.brokerage_streams.lock().await;
+        for task in streams.drain(..) {
+            task.abort();
+            handles.push(task);
+        }
+    }
+    if let Some(task) = state.preference_realtime.lock().await.take() {
+        task.abort();
+        handles.push(task);
+    }
+    state.schwab_streamer.stop().await;
+    state
+        .schwab_streamer
+        .set_quote_symbols(std::iter::empty())
+        .await;
+    state
+        .schwab_streamer
+        .set_option_symbols(std::iter::empty())
+        .await;
+    state
+        .schwab_streamer
+        .set_chart_symbols(std::iter::empty())
+        .await;
+    state.api.clear_brokerage_cache().await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        futures_util::future::join_all(handles),
+    )
+    .await;
 }
 
 #[tauri::command]
@@ -621,6 +712,12 @@ async fn start_bar_stream(
     generation: u64,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    if state.safety.lifecycle.is_transitioning() {
+        return Err(AppError::Validation(
+            "Services are changing environment; resubscribe when ready".into(),
+        ));
+    }
+    let environment_generation = state.safety.lifecycle.generation();
     match provider {
         MarketDataProvider::Tradestation => {
             TradeStation::bar_stream_path(&symbol, &timeframe)?;
@@ -663,6 +760,11 @@ async fn start_bar_stream(
     .unwrap_or_default();
     if provider == MarketDataProvider::Schwab {
         cached_bars.retain(schwab::valid_equity_bar);
+    }
+    if !state.safety.lifecycle.accepts(environment_generation) {
+        return Err(AppError::Validation(
+            "The environment changed while the stream was starting; resubscribe explicitly".into(),
+        ));
     }
     let registry_handle = state.bar_streams.clone();
     let mut cleanup_keys = Vec::new();
@@ -723,6 +825,8 @@ async fn start_bar_stream(
                     environment.clone(),
                     symbol.clone(),
                     timeframe.clone(),
+                    state.safety.lifecycle.clone(),
+                    environment_generation,
                 )),
                 MarketDataProvider::Schwab => {
                     // Register the receiver before sync_schwab_chart_symbols can
@@ -741,6 +845,8 @@ async fn start_bar_stream(
                         environment.clone(),
                         symbol.clone(),
                         timeframe.clone(),
+                        state.safety.lifecycle.clone(),
+                        environment_generation,
                     ))
                 }
             };
@@ -768,6 +874,9 @@ async fn start_bar_stream(
     }
     sync_schwab_chart_symbols(&registry_handle, &state.schwab_streamer).await;
     if let Some((status, bars)) = late_replay {
+        if !state.safety.lifecycle.accepts(environment_generation) {
+            return Ok(());
+        }
         if let Ok(bars) = bars.read() {
             // Live updates take the write lock before emitting, so holding
             // this read lock keeps the bootstrap snapshot ahead of them.
@@ -894,6 +1003,11 @@ async fn start_quote_stream(
     mut symbols: Vec<String>,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    if state.safety.lifecycle.is_transitioning() {
+        return Err(AppError::Validation(
+            "Services are changing environment; resubscribe when ready".into(),
+        ));
+    }
     symbols.sort();
     symbols.dedup();
     if symbols.len() > 100 {
@@ -902,51 +1016,109 @@ async fn start_quote_stream(
         ));
     }
     let environment = state.api.environment().await;
-    let task = match provider {
-        MarketDataProvider::Tradestation => tauri::async_runtime::spawn(run_quote_stream(
-            app,
-            state.api.clone(),
-            subscription_id.clone(),
-            environment,
-            symbols,
-        )),
-        MarketDataProvider::Schwab => {
-            state
-                .schwab_streamer
-                .set_quote_symbols(symbols.clone())
-                .await;
-            tauri::async_runtime::spawn(run_schwab_quote_stream(
-                app,
-                state.schwab.clone(),
-                state.schwab_streamer.clone(),
-                subscription_id.clone(),
-                environment,
-                symbols,
-            ))
-        }
-    };
+    let symbol_set = symbols.iter().cloned().collect::<BTreeSet<_>>();
     let mut current = state.quote_streams.lock().await;
-    if let Some(previous) = current.insert(subscription_id, task) {
-        previous.abort();
+    let previous = current.insert(
+        subscription_id.clone(),
+        QuoteStreamRegistration {
+            provider: provider.clone(),
+            symbols: symbol_set,
+        },
+    );
+    let union_count = current
+        .values()
+        .filter(|registration| registration.provider == provider)
+        .flat_map(|registration| registration.symbols.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .len();
+    if union_count > 100 {
+        if let Some(previous) = previous {
+            current.insert(subscription_id, previous);
+        } else {
+            current.remove(&subscription_id);
+        }
+        return Err(AppError::Validation(
+            "The combined quote stream cannot exceed 100 symbols".into(),
+        ));
     }
+    drop(current);
+    restart_quote_provider(app, &state, provider, environment).await;
     Ok(())
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn stop_quote_stream(
+    app: tauri::AppHandle,
     subscription_id: String,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
-    if let Some(task) = state.quote_streams.lock().await.remove(&subscription_id) {
-        task.abort();
-    }
-    if subscription_id.contains("schwab") {
-        state
-            .schwab_streamer
-            .set_quote_symbols(std::iter::empty())
-            .await;
+    let mut current = state.quote_streams.lock().await;
+    let provider = current.remove(&subscription_id).map(|value| value.provider);
+    drop(current);
+    if let Some(provider) = provider {
+        let environment = state.api.environment().await;
+        restart_quote_provider(app, &state, provider, environment).await;
     }
     Ok(())
+}
+
+async fn restart_quote_provider(
+    app: tauri::AppHandle,
+    state: &NativeState,
+    provider: MarketDataProvider,
+    environment: TradingEnvironment,
+) {
+    if let Some(previous) = state.quote_provider_tasks.lock().await.remove(&provider) {
+        previous.abort();
+    }
+    let subscriptions = state
+        .quote_streams
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, registration)| registration.provider == provider)
+        .map(|(id, registration)| (id.clone(), registration.symbols.clone()))
+        .collect::<Vec<_>>();
+    let union = subscriptions
+        .iter()
+        .flat_map(|(_, symbols)| symbols.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    if provider == MarketDataProvider::Schwab {
+        state
+            .schwab_streamer
+            .set_quote_symbols(union.iter().cloned())
+            .await;
+    }
+    if subscriptions.is_empty() {
+        return;
+    }
+    let environment_generation = state.safety.lifecycle.generation();
+    let task = match provider {
+        MarketDataProvider::Tradestation => tauri::async_runtime::spawn(run_quote_stream(
+            app,
+            state.api.clone(),
+            subscriptions,
+            environment,
+            union.into_iter().collect(),
+            state.safety.lifecycle.clone(),
+            environment_generation,
+        )),
+        MarketDataProvider::Schwab => tauri::async_runtime::spawn(run_schwab_quote_stream(
+            app,
+            state.schwab.clone(),
+            state.schwab_streamer.clone(),
+            subscriptions,
+            environment,
+            union.into_iter().collect(),
+            state.safety.lifecycle.clone(),
+            environment_generation,
+        )),
+    };
+    state
+        .quote_provider_tasks
+        .lock()
+        .await
+        .insert(provider, task);
 }
 
 async fn sync_schwab_option_symbols(
@@ -970,6 +1142,12 @@ async fn start_option_stream(
     mut contract_symbols: Vec<String>,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    if state.safety.lifecycle.is_transitioning() {
+        return Err(AppError::Validation(
+            "Services are changing environment; resubscribe when ready".into(),
+        ));
+    }
+    let environment_generation = state.safety.lifecycle.generation();
     contract_symbols = contract_symbols
         .into_iter()
         .map(|contract| contract.trim().to_uppercase())
@@ -990,6 +1168,8 @@ async fn start_option_stream(
         subscription_id.clone(),
         symbol.to_uppercase(),
         desired,
+        state.safety.lifecycle.clone(),
+        environment_generation,
     ));
     let mut current = state.option_streams.lock().await;
     let mut union = current
@@ -1033,7 +1213,13 @@ async fn start_brokerage_stream(
     account_id: String,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    if state.safety.lifecycle.is_transitioning() {
+        return Err(AppError::Validation(
+            "Services are changing environment; resubscribe when ready".into(),
+        ));
+    }
     let environment = state.api.environment().await;
+    let environment_generation = state.safety.lifecycle.generation();
     state
         .api
         .reset_brokerage_cache(&environment, &account_id)
@@ -1050,6 +1236,8 @@ async fn start_brokerage_stream(
             channel.to_string(),
             environment.clone(),
             state.db_path.clone(),
+            state.safety.lifecycle.clone(),
+            environment_generation,
         )));
     }
     Ok(())
@@ -1071,6 +1259,8 @@ async fn run_brokerage_stream(
     channel: String,
     environment: TradingEnvironment,
     db_path: PathBuf,
+    lifecycle: Arc<safety::ServiceLifecycle>,
+    environment_generation: u64,
 ) {
     let path = if channel == "positions" {
         format!("/brokerage/stream/accounts/{account_id}/{channel}?changes=true")
@@ -1087,6 +1277,9 @@ async fn run_brokerage_stream(
     }
     let mut attempt = 0u32;
     loop {
+        if !lifecycle.accepts(environment_generation) {
+            return;
+        }
         let connecting_state = if attempt == 0 {
             "connecting"
         } else {
@@ -1094,7 +1287,14 @@ async fn run_brokerage_stream(
         };
         api.set_brokerage_stream_state(&environment, &account_id, &channel, connecting_state)
             .await;
-        emit_brokerage_stream_state(&app, &account_id, &channel, connecting_state, None);
+        emit_brokerage_stream_state(
+            &app,
+            &account_id,
+            &channel,
+            connecting_state,
+            None,
+            environment_generation,
+        );
         let connected_at = std::time::Instant::now();
         let mut retry_delay = None;
         match api
@@ -1104,7 +1304,14 @@ async fn run_brokerage_stream(
             Ok(response) => {
                 api.set_brokerage_stream_state(&environment, &account_id, &channel, "streaming")
                     .await;
-                emit_brokerage_stream_state(&app, &account_id, &channel, "streaming", None);
+                emit_brokerage_stream_state(
+                    &app,
+                    &account_id,
+                    &channel,
+                    "streaming",
+                    None,
+                    environment_generation,
+                );
                 let mut bytes = response.bytes_stream();
                 let mut buffer = Vec::new();
                 let mut position_records = HashMap::<String, Value>::new();
@@ -1112,6 +1319,9 @@ async fn run_brokerage_stream(
                 let mut snapshot_complete = false;
                 let mut go_away = false;
                 while let Some(Ok(chunk)) = bytes.next().await {
+                    if !lifecycle.accepts(environment_generation) {
+                        return;
+                    }
                     let values = match decode_stream_values(&mut buffer, &chunk) {
                         Ok(values) => values,
                         Err(_) => break,
@@ -1134,6 +1344,7 @@ async fn run_brokerage_stream(
                                         "positions-snapshot",
                                         PositionsSnapshotEvent {
                                             account_id: account_id.clone(),
+                                            environment_generation,
                                             positions,
                                         },
                                     );
@@ -1161,9 +1372,11 @@ async fn run_brokerage_stream(
                                         "orders-snapshot",
                                         OrdersSnapshotEvent {
                                             account_id: account_id.clone(),
+                                            environment_generation,
                                             orders,
                                         },
                                     );
+                                    reconcile_unresolved(api.clone(), db_path.clone()).await;
                                 }
                                 snapshot_complete = true;
                                 continue;
@@ -1199,6 +1412,7 @@ async fn run_brokerage_stream(
                                     "position-update",
                                     PositionUpdateEvent {
                                         account_id: account_id.clone(),
+                                        environment_generation,
                                         position,
                                     },
                                 );
@@ -1245,6 +1459,7 @@ async fn run_brokerage_stream(
                                     "order-stream-update",
                                     OrderStreamUpdateEvent {
                                         account_id: account_id.clone(),
+                                        environment_generation,
                                         order,
                                     },
                                 );
@@ -1268,6 +1483,7 @@ async fn run_brokerage_stream(
                             "positions-snapshot",
                             PositionsSnapshotEvent {
                                 account_id: account_id.clone(),
+                                environment_generation,
                                 positions,
                             },
                         );
@@ -1296,6 +1512,7 @@ async fn run_brokerage_stream(
                             "orders-snapshot",
                             OrdersSnapshotEvent {
                                 account_id: account_id.clone(),
+                                environment_generation,
                                 orders,
                             },
                         );
@@ -1309,6 +1526,7 @@ async fn run_brokerage_stream(
                     &channel,
                     "reconnecting",
                     Some("TradeStation ended the stream; reconnecting".into()),
+                    environment_generation,
                 );
                 if connected_at.elapsed() >= std::time::Duration::from_secs(30) {
                     attempt = 0;
@@ -1332,6 +1550,7 @@ async fn run_brokerage_stream(
                         &channel,
                         "disconnected",
                         Some(message),
+                        environment_generation,
                     );
                     break;
                 }
@@ -1352,6 +1571,7 @@ async fn run_brokerage_stream(
                     &channel,
                     recovery_state,
                     Some(message),
+                    environment_generation,
                 );
             }
         }
@@ -1359,7 +1579,14 @@ async fn run_brokerage_stream(
         let backoff = std::time::Duration::from_secs(
             (1u64 << attempt.min(5)).min(30) + u64::from(attempt % 3),
         );
-        tokio::time::sleep(retry_delay.unwrap_or(backoff)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(retry_delay.unwrap_or(backoff)) => {}
+            _ = async {
+                while lifecycle.accepts(environment_generation) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            } => return,
+        }
     }
 }
 
@@ -1396,11 +1623,13 @@ fn emit_brokerage_stream_state(
     channel: &str,
     state: &str,
     message: Option<String>,
+    environment_generation: u64,
 ) {
     let _ = app.emit(
         "brokerage-stream-state",
         BrokerageStreamStateEvent {
             account_id: account_id.into(),
+            environment_generation,
             channel: channel.into(),
             state: state.into(),
             message,
@@ -1473,62 +1702,172 @@ async fn confirm_order(
     order: OrderDraft,
     state: State<'_, NativeState>,
 ) -> Result<OrderPreview, AppError> {
+    let environment = state.api.environment().await;
+    let (decision, _) = native_order_risk(&state, &environment, &order).await?;
+    if !decision.allowed {
+        return Ok(OrderPreview {
+            valid: false,
+            summary: "Blocked by native risk policy".into(),
+            estimated_commission: None,
+            initial_margin: None,
+            errors: decision.reasons,
+        });
+    }
     state.api.confirm_order(&order).await
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 async fn place_order(
     order: OrderDraft,
+    client_mutation_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, NativeState>,
-) -> Result<OrderUpdate, AppError> {
+) -> Result<BrokerMutationResult, AppError> {
     let environment = state.api.environment().await;
-    let meta = state.api.symbol_details(&order.symbol).await?;
-    let intent = journal::start_entry_intent(&state.db_path, &environment, &order, &meta)?;
+    let mutation_id = mutation_id(client_mutation_id);
+    let created = safety::create_intent(
+        &state.db_path,
+        safety::NewMutationIntent {
+            id: mutation_id.clone(),
+            environment: environment.clone(),
+            account_id: order.account_id.clone(),
+            kind: "place_order".into(),
+            equivalence_key: place_equivalence_key(&order),
+            symbol: Some(order.symbol.clone()),
+            action: order.side.clone(),
+            quantity: Some(order.quantity as f64),
+            order_type: Some(order.order_type.clone()),
+            limit_price: order.limit_price,
+            stop_price: order.stop_price,
+            take_profit: order.take_profit,
+            stop_loss: order.stop_loss,
+            target_id: None,
+            request: serde_json::to_value(&order)?,
+        },
+    )?;
+    match created {
+        safety::CreateIntent::Existing(record) => return mutation_result_from_intent(&record),
+        safety::CreateIntent::EquivalentBlocked(record) => {
+            let mut result = mutation_result_from_intent(&record)?;
+            result.warnings.push(format!(
+                "Equivalent order is still {}; reconcile it before another submission",
+                record.state.key()
+            ));
+            result.retry_blocked = true;
+            return Ok(result);
+        }
+        safety::CreateIntent::Created => {}
+    }
+    if state.safety.lifecycle.is_transitioning() {
+        return reject_before_submission(
+            &state,
+            &mutation_id,
+            "Trading is unavailable during an environment transition",
+        );
+    }
+    let _account_guard = state
+        .safety
+        .account_lock(&environment, &order.account_id)
+        .await;
+    let (decision, meta) = native_order_risk(&state, &environment, &order).await?;
+    record_risk_decision(&state, &mutation_id, &decision);
+    if !decision.allowed {
+        return reject_before_submission(&state, &mutation_id, &decision.reasons.join("; "));
+    }
+    safety::update_intent(
+        &state.db_path,
+        &mutation_id,
+        safety::MutationState::Submitting,
+        None,
+        None,
+        "complete",
+        "not_required",
+        None,
+        None,
+        false,
+    )?;
+    let journal_intent = journal::start_entry_intent(&state.db_path, &environment, &order, &meta);
     match state.api.place_order(&order).await {
         Ok(update) => {
-            journal::complete_entry_intent(&state.db_path, &intent, &update)?;
+            let (broker_object, serialization_warning) =
+                confirmed_broker_value(&update, "placed order");
+            let journal_result = match &journal_intent {
+                Ok(intent) => journal::complete_entry_intent(&state.db_path, intent, &update),
+                Err(error) => Err(AppError::Api(error.to_string())),
+            };
+            let local_warning = combine_warnings([
+                serialization_warning,
+                journal_result.err().map(|error| {
+                    format!(
+                        "order {} local journal completion failed: {error}",
+                        update.id
+                    )
+                }),
+            ]);
+            let persistence = safety::record_confirmed(
+                &state.db_path,
+                &mutation_id,
+                Some(&update.id),
+                &broker_object,
+                local_warning,
+            );
+            let warnings = persistence.warnings;
+            if !warnings.is_empty() {
+                state.safety.enqueue_reconciliation(&mutation_id).await;
+            }
             let mut record = audit::AuditRecord::completed(
                 "record",
                 "journal",
                 "place-order",
-                "success",
-                format!("Order {} was accepted and journaled", update.id),
+                if warnings.is_empty() {
+                    "success"
+                } else {
+                    "warning"
+                },
+                format!("Broker confirmed order {}", update.id),
             );
             record.entity_type = Some("order".into());
             record.entity_id = Some(update.id.clone());
-            record.changes = Some(serde_json::json!({"draft": order, "order": update}));
+            record.changes = Some(serde_json::json!({
+                "mutationId": mutation_id,
+                "brokerOutcome": "confirmed",
+                "localPersistence": persistence.local_persistence
+            }));
             state.audit.record(record);
+            let _ = app.emit(
+                "broker-mutation-updated",
+                serde_json::json!({"mutationId":mutation_id,"state":"accepted"}),
+            );
             let _ = app.emit(
                 "journal-updated",
                 serde_json::json!({"reason":"entry-intent"}),
             );
             schedule_journal_flush(app.clone(), state.db_path.clone());
-            Ok(update)
+            Ok(BrokerMutationResult {
+                mutation_id,
+                broker_outcome: BrokerOutcome::Confirmed,
+                local_persistence: if warnings.is_empty() {
+                    LocalPersistenceStatus::Complete
+                } else {
+                    LocalPersistenceStatus::Pending
+                },
+                reconciliation_status: if warnings.is_empty() {
+                    ReconciliationStatus::NotRequired
+                } else {
+                    ReconciliationStatus::Required
+                },
+                warnings,
+                broker_order: Some(update),
+                close_result: None,
+                rejection_reason: None,
+                retry_blocked: true,
+            })
         }
         Err(error) => {
-            let _ = journal::fail_entry_intent(&state.db_path, &intent, &error.to_string());
-            let mut record = audit::AuditRecord::completed(
-                "record",
-                "journal",
-                "place-order",
-                "error",
-                format!(
-                    "Order for {} was rejected and the journal intent was marked failed",
-                    order.symbol
-                ),
-            );
-            record.entity_type = Some("order-intent".into());
-            record.entity_id = Some(intent.clone());
-            record.changes = Some(serde_json::json!({"draft": order, "status": "failed"}));
-            record.error = Some(error.to_string());
-            state.audit.record(record);
-            let _ = app.emit(
-                "journal-updated",
-                serde_json::json!({"reason":"entry-rejected"}),
-            );
-            schedule_journal_flush(app, state.db_path.clone());
-            Err(error)
+            if let Ok(intent) = journal_intent {
+                let _ = journal::fail_entry_intent(&state.db_path, &intent, &error.to_string());
+            }
+            mutation_error_result(&state, &app, &mutation_id, error).await
         }
     }
 }
@@ -1538,10 +1877,50 @@ async fn replace_order(
     account_id: String,
     order_id: String,
     new_price: f64,
+    client_mutation_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, NativeState>,
-) -> Result<OrderUpdate, AppError> {
+) -> Result<BrokerMutationResult, AppError> {
     let environment = state.api.environment().await;
+    let mutation_id = mutation_id(client_mutation_id);
+    match safety::create_intent(
+        &state.db_path,
+        safety::NewMutationIntent {
+            id: mutation_id.clone(),
+            environment: environment.clone(),
+            account_id: account_id.clone(),
+            kind: "replace_order".into(),
+            equivalence_key: format!("replace|{order_id}|{new_price:.10}"),
+            symbol: None,
+            action: "Replace".into(),
+            quantity: None,
+            order_type: None,
+            limit_price: Some(new_price),
+            stop_price: Some(new_price),
+            take_profit: None,
+            stop_loss: None,
+            target_id: Some(order_id.clone()),
+            request: serde_json::json!({"orderId":order_id,"newPrice":new_price}),
+        },
+    )? {
+        safety::CreateIntent::Existing(record) => return mutation_result_from_intent(&record),
+        safety::CreateIntent::EquivalentBlocked(record) => {
+            let mut result = mutation_result_from_intent(&record)?;
+            result
+                .warnings
+                .push("An equivalent replacement is unresolved; normal retry is blocked".into());
+            return Ok(result);
+        }
+        safety::CreateIntent::Created => {}
+    }
+    if state.safety.lifecycle.is_transitioning() {
+        return reject_before_submission(
+            &state,
+            &mutation_id,
+            "Trading is unavailable during an environment transition",
+        );
+    }
+    let _account_guard = state.safety.account_lock(&environment, &account_id).await;
     let original = state
         .api
         .orders(&account_id)
@@ -1551,7 +1930,7 @@ async fn replace_order(
     let old_price = original
         .as_ref()
         .and_then(|order| order.price.or(order.stop_price));
-    if let Some(order) = original.as_ref() {
+    let journal_requested_warning = if let Some(order) = original.as_ref() {
         journal::record_order_move(
             &state.db_path,
             &environment,
@@ -1561,8 +1940,24 @@ async fn replace_order(
             new_price,
             "requested",
             Some("Protective replacement submitted"),
-        )?;
-    }
+        )
+        .err()
+        .map(|error| error.to_string())
+    } else {
+        None
+    };
+    safety::update_intent(
+        &state.db_path,
+        &mutation_id,
+        safety::MutationState::Submitting,
+        None,
+        None,
+        "complete",
+        "not_required",
+        None,
+        None,
+        false,
+    )?;
     match state
         .api
         .replace_order(&account_id, &order_id, new_price)
@@ -1570,7 +1965,7 @@ async fn replace_order(
     {
         Ok(update) => {
             let confirmed_price = update.price.or(update.stop_price).unwrap_or(new_price);
-            journal::record_order_move(
+            let local = journal::record_order_move(
                 &state.db_path,
                 &environment,
                 &account_id,
@@ -1579,60 +1974,17 @@ async fn replace_order(
                 confirmed_price,
                 "confirmed",
                 None,
-            )?;
-            let mut record = audit::AuditRecord::completed(
-                "record",
-                "journal",
-                "replace-order",
-                "success",
-                format!("Order {} was replaced", update.id),
             );
-            record.entity_type = Some("order".into());
-            record.entity_id = Some(update.id.clone());
-            record.changes =
-                Some(serde_json::json!({"before": {"price": old_price}, "after": update}));
-            state.audit.record(record);
-            let _ = app.emit(
-                "journal-updated",
-                serde_json::json!({"reason":"protective-order-moved"}),
-            );
-            schedule_journal_flush(app.clone(), state.db_path.clone());
-            Ok(update)
+            let local_warning = journal_requested_warning
+                .or_else(|| local.err().map(|error| error.to_string()))
+                .map(|error| {
+                    format!(
+                        "Broker confirmed replacement, but journal completion is pending: {error}"
+                    )
+                });
+            confirmed_order_result(&state, &app, &mutation_id, update, local_warning).await
         }
-        Err(error) => {
-            if let Some(order) = original.as_ref() {
-                let _ = journal::record_order_move(
-                    &state.db_path,
-                    &environment,
-                    &account_id,
-                    order,
-                    old_price,
-                    new_price,
-                    "failed",
-                    Some(&error.to_string()),
-                );
-            }
-            let mut record = audit::AuditRecord::completed(
-                "record",
-                "journal",
-                "replace-order",
-                "error",
-                format!("Order {order_id} replacement failed"),
-            );
-            record.entity_type = Some("order".into());
-            record.entity_id = Some(order_id.clone());
-            record.changes = Some(
-                serde_json::json!({"before": {"price": old_price}, "requested": {"price": new_price}}),
-            );
-            record.error = Some(error.to_string());
-            state.audit.record(record);
-            let _ = app.emit(
-                "journal-updated",
-                serde_json::json!({"reason":"protective-order-move-failed"}),
-            );
-            schedule_journal_flush(app, state.db_path.clone());
-            Err(error)
-        }
+        Err(error) => mutation_error_result(&state, &app, &mutation_id, error).await,
     }
 }
 
@@ -1640,10 +1992,43 @@ async fn replace_order(
 async fn close_position(
     account_id: String,
     position_id: String,
+    client_mutation_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, NativeState>,
-) -> Result<ClosePositionResult, AppError> {
+) -> Result<BrokerMutationResult, AppError> {
     let environment = state.api.environment().await;
+    let mutation_id = mutation_id(client_mutation_id);
+    match safety::create_intent(
+        &state.db_path,
+        safety::NewMutationIntent {
+            id: mutation_id.clone(),
+            environment: environment.clone(),
+            account_id: account_id.clone(),
+            kind: "close_position".into(),
+            equivalence_key: format!("close|{position_id}"),
+            symbol: None,
+            action: "Close".into(),
+            quantity: None,
+            order_type: Some("Market".into()),
+            limit_price: None,
+            stop_price: None,
+            take_profit: None,
+            stop_loss: None,
+            target_id: Some(position_id.clone()),
+            request: serde_json::json!({"positionId":position_id}),
+        },
+    )? {
+        safety::CreateIntent::Existing(record) => return mutation_result_from_intent(&record),
+        safety::CreateIntent::EquivalentBlocked(record) => {
+            let mut result = mutation_result_from_intent(&record)?;
+            result.warnings.push(
+                "This position already has an unresolved close; reconcile before retrying".into(),
+            );
+            return Ok(result);
+        }
+        safety::CreateIntent::Created => {}
+    }
+    let _account_guard = state.safety.account_lock(&environment, &account_id).await;
     let symbol = state
         .api
         .positions(&account_id)
@@ -1655,19 +2040,35 @@ async fn close_position(
                 .find(|position| position.id == position_id)
         })
         .map(|position| position.symbol);
-    if let Some(symbol) = symbol.as_deref() {
-        let _ = journal::record_close_intent(
+    let close_requested_warning = if let Some(symbol) = symbol.as_deref() {
+        journal::record_close_intent(
             &state.db_path,
             &environment,
             &account_id,
             symbol,
             "requested",
             None,
-        );
-    }
+        )
+        .err()
+        .map(|error| error.to_string())
+    } else {
+        None
+    };
+    safety::update_intent(
+        &state.db_path,
+        &mutation_id,
+        safety::MutationState::Submitting,
+        None,
+        None,
+        "complete",
+        "not_required",
+        None,
+        None,
+        false,
+    )?;
     let result = state.api.close_position(&account_id, &position_id).await;
     if let Ok(value) = result.as_ref() {
-        let _ = journal::record_close_intent(
+        let local = journal::record_close_intent(
             &state.db_path,
             &environment,
             &account_id,
@@ -1678,96 +2079,1280 @@ async fn close_position(
                 "confirmed"
             },
             value.error.as_deref(),
+        )
+        .err()
+        .map(|error| error.to_string())
+        .or(close_requested_warning)
+        .map(|error| {
+            format!(
+                "Broker close result is authoritative, but journal completion is pending: {error}"
+            )
+        });
+        let (broker_object, serialization_warning) =
+            confirmed_broker_value(value, "position close result");
+        let local = combine_warnings([local, serialization_warning]);
+        if value.error.is_none() {
+            let broker_id = value.flatten_order.as_ref().map(|order| order.id.as_str());
+            let persistence = safety::record_confirmed(
+                &state.db_path,
+                &mutation_id,
+                broker_id,
+                &broker_object,
+                local,
+            );
+            let warnings = persistence.warnings;
+            if !warnings.is_empty() {
+                state.safety.enqueue_reconciliation(&mutation_id).await;
+            }
+            return Ok(BrokerMutationResult {
+                mutation_id,
+                broker_outcome: BrokerOutcome::Confirmed,
+                local_persistence: if warnings.is_empty() {
+                    LocalPersistenceStatus::Complete
+                } else {
+                    LocalPersistenceStatus::Pending
+                },
+                reconciliation_status: if warnings.is_empty() {
+                    ReconciliationStatus::NotRequired
+                } else {
+                    ReconciliationStatus::Required
+                },
+                warnings,
+                broker_order: value.flatten_order.clone(),
+                close_result: Some(value.clone()),
+                rejection_reason: None,
+                retry_blocked: true,
+            });
+        }
+        let message = value
+            .error
+            .clone()
+            .unwrap_or_else(|| "Position close requires reconciliation".into());
+        let _ = safety::update_intent(
+            &state.db_path,
+            &mutation_id,
+            safety::MutationState::Unknown,
+            None,
+            Some(&broker_object),
+            if local.is_some() {
+                "pending"
+            } else {
+                "complete"
+            },
+            "required",
+            Some(&message),
+            Some(&message),
+            false,
         );
+        state.safety.enqueue_reconciliation(&mutation_id).await;
+        return Ok(BrokerMutationResult {
+            mutation_id,
+            broker_outcome: BrokerOutcome::Unknown,
+            local_persistence: if local.is_some() {
+                LocalPersistenceStatus::Pending
+            } else {
+                LocalPersistenceStatus::Complete
+            },
+            reconciliation_status: ReconciliationStatus::Required,
+            warnings: vec![format!(
+                "{message}. Do not submit another close until reconciled."
+            )],
+            broker_order: value.flatten_order.clone(),
+            close_result: Some(value.clone()),
+            rejection_reason: None,
+            retry_blocked: true,
+        });
     }
-    let mut record = audit::AuditRecord::completed(
-        "record",
-        "journal",
-        "close-position",
-        if result.is_ok() { "success" } else { "error" },
-        if result.is_ok() {
-            format!("Position {position_id} close was submitted")
-        } else {
-            format!("Position {position_id} close failed")
-        },
-    );
-    record.entity_type = Some("position".into());
-    record.entity_id = Some(position_id);
-    match result.as_ref() {
-        Ok(value) => record.changes = Some(serde_json::to_value(value)?),
-        Err(error) => record.error = Some(error.to_string()),
-    }
-    state.audit.record(record);
-    let _ = app.emit(
-        "journal-updated",
-        serde_json::json!({"reason":"close-position"}),
-    );
-    schedule_journal_flush(app, state.db_path.clone());
-    result
+    mutation_error_result(&state, &app, &mutation_id, result.unwrap_err()).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
 async fn cancel_order(
+    account_id: String,
     order_id: String,
+    client_mutation_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, NativeState>,
-) -> Result<(), AppError> {
+) -> Result<BrokerMutationResult, AppError> {
     let environment = state.api.environment().await;
-    journal::record_cancel_intent(&state.db_path, &environment, &order_id, "requested", None)?;
+    let mutation_id = mutation_id(client_mutation_id);
+    match safety::create_intent(
+        &state.db_path,
+        safety::NewMutationIntent {
+            id: mutation_id.clone(),
+            environment: environment.clone(),
+            account_id: account_id.clone(),
+            kind: "cancel_order".into(),
+            equivalence_key: format!("cancel|{order_id}"),
+            symbol: None,
+            action: "Cancel".into(),
+            quantity: None,
+            order_type: None,
+            limit_price: None,
+            stop_price: None,
+            take_profit: None,
+            stop_loss: None,
+            target_id: Some(order_id.clone()),
+            request: serde_json::json!({"orderId":order_id}),
+        },
+    )? {
+        safety::CreateIntent::Existing(record) => return mutation_result_from_intent(&record),
+        safety::CreateIntent::EquivalentBlocked(record) => {
+            let mut result = mutation_result_from_intent(&record)?;
+            result.warnings.push(
+                "This cancellation is unresolved; verify broker state before another request"
+                    .into(),
+            );
+            return Ok(result);
+        }
+        safety::CreateIntent::Created => {}
+    }
+    let _account_guard = state.safety.account_lock(&environment, &account_id).await;
+    let journal_requested =
+        journal::record_cancel_intent(&state.db_path, &environment, &order_id, "requested", None);
+    safety::update_intent(
+        &state.db_path,
+        &mutation_id,
+        safety::MutationState::Submitting,
+        Some(&order_id),
+        None,
+        "complete",
+        "not_required",
+        None,
+        None,
+        false,
+    )?;
     match state.api.cancel_order(&order_id).await {
         Ok(()) => {
-            journal::record_cancel_intent(
+            let local = journal::record_cancel_intent(
                 &state.db_path,
                 &environment,
                 &order_id,
                 "confirmed",
                 None,
-            )?;
-            let mut record = audit::AuditRecord::completed(
-                "record",
-                "journal",
-                "cancel-order",
-                "success",
-                format!("Order {order_id} cancellation was confirmed"),
             );
-            record.entity_type = Some("order".into());
-            record.entity_id = Some(order_id.clone());
-            record.changes = Some(serde_json::json!({"status": "cancelled"}));
-            state.audit.record(record);
-            let _ = app.emit(
-                "journal-updated",
-                serde_json::json!({"reason":"order-cancelled"}),
-            );
-            schedule_journal_flush(app, state.db_path.clone());
-            Ok(())
-        }
-        Err(error) => {
-            let _ = journal::record_cancel_intent(
+            let warning = journal_requested
+                .err()
+                .or_else(|| local.err())
+                .map(|error| {
+                    format!(
+                        "Broker confirmed cancellation, but journal completion is pending: {error}"
+                    )
+                });
+            let broker_object = serde_json::json!({"id":order_id,"status":"Cancelled"});
+            let persistence = safety::record_confirmed(
                 &state.db_path,
-                &environment,
-                &order_id,
+                &mutation_id,
+                Some(&order_id),
+                &broker_object,
+                warning,
+            );
+            let warnings = persistence.warnings;
+            if !warnings.is_empty() {
+                state.safety.enqueue_reconciliation(&mutation_id).await;
+            }
+            Ok(BrokerMutationResult {
+                mutation_id,
+                broker_outcome: BrokerOutcome::Confirmed,
+                local_persistence: if warnings.is_empty() {
+                    LocalPersistenceStatus::Complete
+                } else {
+                    LocalPersistenceStatus::Pending
+                },
+                reconciliation_status: if warnings.is_empty() {
+                    ReconciliationStatus::NotRequired
+                } else {
+                    ReconciliationStatus::Required
+                },
+                warnings,
+                broker_order: None,
+                close_result: None,
+                rejection_reason: None,
+                retry_blocked: true,
+            })
+        }
+        Err(error) => mutation_error_result(&state, &app, &mutation_id, error).await,
+    }
+}
+
+fn mutation_id(value: Option<String>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
+fn place_equivalence_key(order: &OrderDraft) -> String {
+    format!(
+        "place|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}",
+        order.symbol,
+        order.side,
+        order.quantity,
+        order.order_type,
+        order.limit_price,
+        order.stop_price,
+        order.take_profit,
+        order.stop_loss
+    )
+}
+
+fn mutation_result_from_intent(
+    intent: &safety::MutationIntent,
+) -> Result<BrokerMutationResult, AppError> {
+    let broker_order = intent
+        .broker_object
+        .clone()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let close_result = intent
+        .broker_object
+        .clone()
+        .and_then(|value| serde_json::from_value(value).ok());
+    let broker_outcome = match intent.state {
+        safety::MutationState::Accepted | safety::MutationState::Reconciled => {
+            BrokerOutcome::Confirmed
+        }
+        safety::MutationState::Rejected => BrokerOutcome::Rejected,
+        _ => BrokerOutcome::Unknown,
+    };
+    let local_persistence = match intent.local_persistence.as_str() {
+        "complete" => LocalPersistenceStatus::Complete,
+        "failed" => LocalPersistenceStatus::Failed,
+        _ => LocalPersistenceStatus::Pending,
+    };
+    let reconciliation_status = if intent.manual_review_required {
+        ReconciliationStatus::ManualReviewRequired
+    } else {
+        match intent.reconciliation_status.as_str() {
+            "not_required" => ReconciliationStatus::NotRequired,
+            "reconciling" => ReconciliationStatus::Reconciling,
+            "reconciled" => ReconciliationStatus::Reconciled,
+            "failed" => ReconciliationStatus::Failed,
+            _ => ReconciliationStatus::Required,
+        }
+    };
+    Ok(BrokerMutationResult {
+        mutation_id: intent.id.clone(),
+        retry_blocked: !matches!(broker_outcome, BrokerOutcome::Rejected)
+            || intent.state.blocks_equivalent_retry(),
+        broker_outcome,
+        local_persistence,
+        reconciliation_status,
+        warnings: intent.warning.clone().into_iter().collect(),
+        broker_order,
+        close_result,
+        rejection_reason: intent.error.clone(),
+    })
+}
+
+fn reject_before_submission(
+    state: &NativeState,
+    mutation_id: &str,
+    reason: &str,
+) -> Result<BrokerMutationResult, AppError> {
+    safety::update_intent(
+        &state.db_path,
+        mutation_id,
+        safety::MutationState::Rejected,
+        None,
+        None,
+        "complete",
+        "not_required",
+        None,
+        Some(reason),
+        false,
+    )?;
+    Ok(BrokerMutationResult {
+        mutation_id: mutation_id.into(),
+        broker_outcome: BrokerOutcome::Rejected,
+        local_persistence: LocalPersistenceStatus::Complete,
+        reconciliation_status: ReconciliationStatus::NotRequired,
+        warnings: vec![],
+        broker_order: None,
+        close_result: None,
+        rejection_reason: Some(reason.into()),
+        retry_blocked: false,
+    })
+}
+
+async fn confirmed_order_result(
+    state: &NativeState,
+    app: &tauri::AppHandle,
+    mutation_id: &str,
+    update: OrderUpdate,
+    local_warning: Option<String>,
+) -> Result<BrokerMutationResult, AppError> {
+    let (broker_object, serialization_warning) = confirmed_broker_value(&update, "confirmed order");
+    let local_warning = combine_warnings([local_warning, serialization_warning]);
+    let persistence = safety::record_confirmed(
+        &state.db_path,
+        mutation_id,
+        Some(&update.id),
+        &broker_object,
+        local_warning,
+    );
+    let warnings = persistence.warnings;
+    if !warnings.is_empty() {
+        state.safety.enqueue_reconciliation(mutation_id).await;
+    }
+    let _ = app.emit(
+        "broker-mutation-updated",
+        serde_json::json!({"mutationId":mutation_id,"state":"accepted"}),
+    );
+    Ok(BrokerMutationResult {
+        mutation_id: mutation_id.into(),
+        broker_outcome: BrokerOutcome::Confirmed,
+        local_persistence: if warnings.is_empty() {
+            LocalPersistenceStatus::Complete
+        } else {
+            LocalPersistenceStatus::Pending
+        },
+        reconciliation_status: if warnings.is_empty() {
+            ReconciliationStatus::NotRequired
+        } else {
+            ReconciliationStatus::Required
+        },
+        warnings,
+        broker_order: Some(update),
+        close_result: None,
+        rejection_reason: None,
+        retry_blocked: true,
+    })
+}
+
+fn confirmed_broker_value<T: serde::Serialize>(
+    value: &T,
+    description: &str,
+) -> (Value, Option<String>) {
+    match serde_json::to_value(value) {
+        Ok(value) => (value, None),
+        Err(error) => (
+            Value::Null,
+            Some(format!(
+                "Broker confirmed the {description}, but its local durable representation could not be serialized: {error}"
+            )),
+        ),
+    }
+}
+
+fn combine_warnings<const N: usize>(warnings: [Option<String>; N]) -> Option<String> {
+    let warnings = warnings.into_iter().flatten().collect::<Vec<_>>();
+    (!warnings.is_empty()).then(|| warnings.join("; "))
+}
+
+async fn mutation_error_result(
+    state: &NativeState,
+    app: &tauri::AppHandle,
+    mutation_id: &str,
+    error: AppError,
+) -> Result<BrokerMutationResult, AppError> {
+    let message = error.to_string();
+    let clearly_rejected = matches!(
+        error,
+        AppError::BrokerRejected(_)
+            | AppError::Validation(_)
+            | AppError::AuthenticationRequired
+            | AppError::RateLimited { .. }
+            | AppError::Api(_)
+    );
+    if clearly_rejected {
+        safety::update_intent(
+            &state.db_path,
+            mutation_id,
+            safety::MutationState::Rejected,
+            None,
+            None,
+            "complete",
+            "not_required",
+            None,
+            Some(&message),
+            false,
+        )?;
+        let _ = app.emit(
+            "broker-mutation-updated",
+            serde_json::json!({"mutationId":mutation_id,"state":"rejected"}),
+        );
+        return Ok(BrokerMutationResult {
+            mutation_id: mutation_id.into(),
+            broker_outcome: BrokerOutcome::Rejected,
+            local_persistence: LocalPersistenceStatus::Complete,
+            reconciliation_status: ReconciliationStatus::NotRequired,
+            warnings: vec![],
+            broker_order: None,
+            close_result: None,
+            rejection_reason: Some(message),
+            retry_blocked: false,
+        });
+    }
+    let warning = format!(
+        "Broker outcome is unknown: {message}. Do not retry this action until reconciliation completes."
+    );
+    let _ = safety::update_intent(
+        &state.db_path,
+        mutation_id,
+        safety::MutationState::Unknown,
+        None,
+        None,
+        "complete",
+        "required",
+        Some(&warning),
+        Some(&message),
+        false,
+    );
+    state.safety.enqueue_reconciliation(mutation_id).await;
+    let _ = app.emit(
+        "broker-mutation-updated",
+        serde_json::json!({"mutationId":mutation_id,"state":"reconciling"}),
+    );
+    match reconcile_intent(&state.api, &state.db_path, mutation_id, None).await {
+        Ok(record) => mutation_result_from_intent(&record),
+        Err(reconciliation_error) => {
+            let detail =
+                format!("{warning} Immediate reconciliation also failed: {reconciliation_error}");
+            let _ = safety::update_intent(
+                &state.db_path,
+                mutation_id,
+                safety::MutationState::ReconciliationFailed,
+                None,
+                None,
+                "pending",
                 "failed",
-                Some(&error.to_string()),
+                Some(&detail),
+                Some(&message),
+                false,
             );
-            let mut record = audit::AuditRecord::completed(
-                "record",
-                "journal",
-                "cancel-order",
-                "error",
-                format!("Order {order_id} cancellation failed"),
-            );
-            record.entity_type = Some("order".into());
-            record.entity_id = Some(order_id.clone());
-            record.error = Some(error.to_string());
-            state.audit.record(record);
-            let _ = app.emit(
-                "journal-updated",
-                serde_json::json!({"reason":"order-cancel-failed"}),
-            );
-            schedule_journal_flush(app, state.db_path.clone());
-            Err(error)
+            Ok(BrokerMutationResult {
+                mutation_id: mutation_id.into(),
+                broker_outcome: BrokerOutcome::Unknown,
+                local_persistence: LocalPersistenceStatus::Pending,
+                reconciliation_status: ReconciliationStatus::Failed,
+                warnings: vec![detail],
+                broker_order: None,
+                close_result: None,
+                rejection_reason: None,
+                retry_blocked: true,
+            })
         }
     }
+}
+
+async fn native_order_risk(
+    state: &NativeState,
+    environment: &TradingEnvironment,
+    order: &OrderDraft,
+) -> Result<(safety::RiskDecision, SymbolMeta), AppError> {
+    let policy = safety::load_policy(&state.db_path, environment, &order.account_id)?;
+    let meta = state.api.symbol_details(&order.symbol).await?;
+    let (positions, orders, balances, quotes) = tokio::join!(
+        state.api.positions(&order.account_id),
+        state.api.orders(&order.account_id),
+        state.api.balances(&order.account_id, false),
+        state.api.quotes(std::slice::from_ref(&order.symbol)),
+    );
+    let mut unavailable = Vec::new();
+    let positions = positions.unwrap_or_else(|error| {
+        unavailable.push(format!("fresh positions: {error}"));
+        vec![]
+    });
+    let orders = orders.unwrap_or_else(|error| {
+        unavailable.push(format!("fresh working orders: {error}"));
+        vec![]
+    });
+    let balances = balances.unwrap_or_else(|error| {
+        unavailable.push(format!("fresh account balances: {error}"));
+        vec![]
+    });
+    let market_price = quotes
+        .map(|quotes| {
+            quotes
+                .into_iter()
+                .find(|quote| quote.symbol == order.symbol)
+                .map(|quote| quote.last)
+        })
+        .unwrap_or_else(|error| {
+            unavailable.push(format!("fresh quote: {error}"));
+            None
+        });
+    let mut contract_metadata = HashMap::from([(order.symbol.clone(), meta.clone())]);
+    let metadata_symbols = positions
+        .iter()
+        .map(|position| position.symbol.clone())
+        .filter(|symbol| !contract_metadata.contains_key(symbol))
+        .collect::<BTreeSet<_>>();
+    for (symbol, result) in
+        futures_util::future::join_all(metadata_symbols.into_iter().map(|symbol| {
+            let api = state.api.clone();
+            async move {
+                let result = api.symbol_details(&symbol).await;
+                (symbol, result)
+            }
+        }))
+        .await
+    {
+        match result {
+            Ok(meta) => {
+                contract_metadata.insert(symbol, meta);
+            }
+            Err(error) => unavailable.push(format!("contract metadata for {symbol}: {error}")),
+        }
+    }
+    let recent_count = if policy.order_rate.enabled {
+        let protection_seconds = policy
+            .order_rate
+            .window_seconds
+            .max(policy.order_rate.cooldown_seconds)
+            .max(1);
+        let since = Utc::now() - chrono::Duration::seconds(protection_seconds as i64);
+        safety::recent_accepted_order_count(&state.db_path, environment, &order.account_id, since)
+            .ok()
+    } else {
+        Some(0)
+    };
+    let armed = state
+        .safety
+        .is_live_armed(environment, &order.account_id)
+        .await;
+    let consecutive_losses = if policy.consecutive_loss_cooldown.enabled {
+        match safety::consecutive_losses(&state.db_path, environment, &order.account_id) {
+            Ok(Some(value)) => Some(value),
+            Ok(None) => Some((0, Utc::now())),
+            Err(error) => {
+                unavailable.push(format!("consecutive-loss history: {error}"));
+                None
+            }
+        }
+    } else {
+        Some((0, Utc::now()))
+    };
+    let mut decision = safety::evaluate_risk(
+        &policy,
+        safety::RiskContext {
+            environment,
+            draft: order,
+            meta: &meta,
+            contract_metadata: &contract_metadata,
+            positions: &positions,
+            orders: &orders,
+            balances: &balances,
+            market_price,
+            live_armed: armed,
+            recent_order_count: recent_count,
+            consecutive_losses,
+            now: Utc::now(),
+        },
+    );
+    if decision.risk_increasing
+        && matches!(environment, TradingEnvironment::Live)
+        && !unavailable.is_empty()
+    {
+        decision.reasons.push(format!(
+            "LIVE risk check failed closed because required brokerage data is unavailable ({})",
+            unavailable.join(", ")
+        ));
+        decision.allowed = false;
+    }
+    Ok((decision, meta))
+}
+
+fn record_risk_decision(state: &NativeState, mutation_id: &str, decision: &safety::RiskDecision) {
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "risk",
+        "native-risk-decision",
+        if decision.allowed { "success" } else { "error" },
+        if decision.allowed {
+            "Native risk policy allowed broker submission"
+        } else {
+            "Native risk policy blocked broker submission"
+        },
+    );
+    record.entity_type = Some("broker-mutation".into());
+    record.entity_id = Some(mutation_id.into());
+    record.changes = Some(serde_json::json!({
+        "allowed": decision.allowed,
+        "riskIncreasing": decision.risk_increasing,
+        "reasons": decision.reasons,
+        "estimatedTradeRisk": decision.estimated_trade_risk,
+        "estimatedAggregateRisk": decision.estimated_aggregate_risk
+    }));
+    state.audit.record(record);
+}
+
+async fn reconcile_intent(
+    api: &TradeStation,
+    db_path: &std::path::Path,
+    mutation_id: &str,
+    manual_broker_id: Option<&str>,
+) -> Result<safety::MutationIntent, AppError> {
+    let intent = safety::load_intent(db_path, mutation_id)?
+        .ok_or_else(|| AppError::Validation("Mutation intent was not found".into()))?;
+    if matches!(
+        intent.state,
+        safety::MutationState::Accepted | safety::MutationState::Reconciled
+    ) && intent.local_persistence != "complete"
+        && intent.broker_object.is_some()
+    {
+        safety::update_intent(
+            db_path,
+            mutation_id,
+            intent.state.clone(),
+            intent.broker_id.as_deref(),
+            intent.broker_object.as_ref(),
+            &intent.local_persistence,
+            "reconciling",
+            intent.warning.as_deref(),
+            intent.error.as_deref(),
+            false,
+        )?;
+        match repair_confirmed_local_persistence(api, db_path, &intent).await {
+            Ok(()) => safety::update_intent(
+                db_path,
+                mutation_id,
+                intent.state.clone(),
+                intent.broker_id.as_deref(),
+                intent.broker_object.as_ref(),
+                "complete",
+                "reconciled",
+                None,
+                None,
+                false,
+            )?,
+            Err(error) => {
+                let warning = format!(
+                    "Broker remains confirmed, but local persistence repair failed: {error}"
+                );
+                safety::update_intent(
+                    db_path,
+                    mutation_id,
+                    intent.state.clone(),
+                    intent.broker_id.as_deref(),
+                    intent.broker_object.as_ref(),
+                    "pending",
+                    "failed",
+                    Some(&warning),
+                    Some(&error.to_string()),
+                    false,
+                )?;
+            }
+        }
+        return safety::load_intent(db_path, mutation_id)?
+            .ok_or_else(|| AppError::Api("Reconciled intent disappeared".into()));
+    }
+    safety::update_intent(
+        db_path,
+        mutation_id,
+        safety::MutationState::Reconciling,
+        None,
+        None,
+        &intent.local_persistence,
+        "reconciling",
+        intent.warning.as_deref(),
+        intent.error.as_deref(),
+        false,
+    )?;
+    let orders = api.orders(&intent.account_id).await;
+    let positions = if intent.kind == "close_position" {
+        Some(api.positions(&intent.account_id).await)
+    } else {
+        None
+    };
+    let resolution: Option<Result<OrderUpdate, String>> = match intent.kind.as_str() {
+        "place_order" => {
+            let orders = orders?;
+            let candidates = place_reconciliation_candidates(&intent, &orders, manual_broker_id);
+            if candidates.len() == 1 {
+                Some(Ok(candidates[0].clone()))
+            } else if candidates.len() > 1 {
+                Some(Err(
+                    "Multiple broker orders match this intent; manual review is required".into(),
+                ))
+            } else {
+                None
+            }
+        }
+        "replace_order" => {
+            let orders = orders?;
+            orders
+                .into_iter()
+                .find(|order| {
+                    intent.target_id.as_deref() == Some(order.id.as_str())
+                        && order
+                            .price
+                            .or(order.stop_price)
+                            .zip(intent.limit_price)
+                            .is_some_and(|(actual, requested)| (actual - requested).abs() < 1e-7)
+                })
+                .map(Ok)
+        }
+        "cancel_order" => {
+            let orders = orders?;
+            orders
+                .into_iter()
+                .find(|order| intent.target_id.as_deref() == Some(order.id.as_str()))
+                .and_then(|order| (order.status == "Cancelled").then_some(Ok(order)))
+        }
+        "close_position" => {
+            let positions = positions.expect("close positions request")?;
+            if positions
+                .iter()
+                .all(|position| intent.target_id.as_deref() != Some(position.id.as_str()))
+            {
+                let value = ClosePositionResult {
+                    position_id: intent.target_id.clone().unwrap_or_default(),
+                    symbol: intent.symbol.clone().unwrap_or_default(),
+                    cancelled_order_ids: vec![],
+                    flatten_order: None,
+                    error: None,
+                };
+                safety::update_intent(
+                    db_path,
+                    mutation_id,
+                    safety::MutationState::Reconciled,
+                    None,
+                    Some(&serde_json::to_value(value)?),
+                    &intent.local_persistence,
+                    "reconciled",
+                    intent.warning.as_deref(),
+                    None,
+                    false,
+                )?;
+                return safety::load_intent(db_path, mutation_id)?
+                    .ok_or_else(|| AppError::Api("Reconciled intent disappeared".into()));
+            }
+            None
+        }
+        _ => Some(Err(
+            "Unsupported mutation type requires manual review".into()
+        )),
+    };
+    match resolution {
+        Some(Ok(order)) => {
+            safety::update_intent(
+                db_path,
+                mutation_id,
+                safety::MutationState::Reconciled,
+                Some(&order.id),
+                Some(&serde_json::to_value(&order)?),
+                &intent.local_persistence,
+                "reconciled",
+                intent.warning.as_deref(),
+                None,
+                false,
+            )?;
+        }
+        Some(Err(message)) => {
+            safety::update_intent(
+                db_path,
+                mutation_id,
+                safety::MutationState::ReconciliationFailed,
+                None,
+                None,
+                &intent.local_persistence,
+                "failed",
+                Some(&message),
+                Some(&message),
+                true,
+            )?;
+        }
+        None => {
+            safety::update_intent(
+                db_path,
+                mutation_id,
+                safety::MutationState::Unknown,
+                None,
+                None,
+                &intent.local_persistence,
+                "required",
+                Some("No unambiguous broker match was found; normal retry remains blocked"),
+                intent.error.as_deref(),
+                false,
+            )?;
+        }
+    }
+    safety::load_intent(db_path, mutation_id)?
+        .ok_or_else(|| AppError::Api("Reconciled intent disappeared".into()))
+}
+
+fn place_reconciliation_candidates(
+    intent: &safety::MutationIntent,
+    orders: &[OrderUpdate],
+    manual_broker_id: Option<&str>,
+) -> Vec<OrderUpdate> {
+    let created = DateTime::parse_from_rfc3339(&intent.created_at)
+        .ok()
+        .map(|value| value.with_timezone(&Utc));
+    orders
+        .iter()
+        .filter(|order| {
+            let core_matches = intent.symbol.as_deref() == Some(order.symbol.as_str())
+                && intent.action == order.side
+                && intent.quantity == Some(order.quantity as f64)
+                && intent.order_type.as_deref() == Some(order.order_type.as_str())
+                && intent
+                    .limit_price
+                    .zip(order.price)
+                    .map(|(expected, actual)| (expected - actual).abs() < 1e-7)
+                    .unwrap_or(intent.limit_price.is_none())
+                && intent
+                    .stop_price
+                    .zip(order.stop_price)
+                    .map(|(expected, actual)| (expected - actual).abs() < 1e-7)
+                    .unwrap_or(intent.stop_price.is_none())
+                && intent
+                    .request
+                    .get("duration")
+                    .and_then(Value::as_str)
+                    .zip(order.duration.as_deref())
+                    .map(|(expected, actual)| expected == actual)
+                    .unwrap_or(true);
+            core_matches
+                && manual_broker_id
+                    .map(|id| id == order.id)
+                    .unwrap_or_else(|| {
+                        created.is_some_and(|created| {
+                            DateTime::parse_from_rfc3339(&order.timestamp)
+                                .ok()
+                                .map(|time| {
+                                    (time.with_timezone(&Utc) - created).num_seconds().abs() <= 600
+                                })
+                                .unwrap_or(false)
+                        })
+                    })
+        })
+        .cloned()
+        .collect()
+}
+
+async fn repair_confirmed_local_persistence(
+    api: &TradeStation,
+    db_path: &std::path::Path,
+    intent: &safety::MutationIntent,
+) -> Result<(), AppError> {
+    match intent.kind.as_str() {
+        "place_order" => {
+            let draft: OrderDraft = serde_json::from_value(intent.request.clone())?;
+            let order: OrderUpdate =
+                serde_json::from_value(intent.broker_object.clone().ok_or_else(|| {
+                    AppError::Validation("Confirmed order object is missing".into())
+                })?)?;
+            let meta = api.symbol_details(&draft.symbol).await?;
+            let journal_intent =
+                journal::start_entry_intent(db_path, &intent.environment, &draft, &meta)?;
+            journal::complete_entry_intent(db_path, &journal_intent, &order)
+        }
+        "replace_order" => {
+            let order: OrderUpdate =
+                serde_json::from_value(intent.broker_object.clone().ok_or_else(|| {
+                    AppError::Validation("Confirmed order object is missing".into())
+                })?)?;
+            let new_price = order
+                .price
+                .or(order.stop_price)
+                .or(intent.limit_price)
+                .ok_or_else(|| AppError::Validation("Replacement price is missing".into()))?;
+            journal::record_order_move(
+                db_path,
+                &intent.environment,
+                &intent.account_id,
+                &order,
+                None,
+                new_price,
+                "confirmed",
+                Some("Recovered from durable broker mutation"),
+            )
+        }
+        "cancel_order" => journal::record_cancel_intent(
+            db_path,
+            &intent.environment,
+            intent
+                .target_id
+                .as_deref()
+                .ok_or_else(|| AppError::Validation("Cancelled order ID is missing".into()))?,
+            "confirmed",
+            Some("Recovered from durable broker mutation"),
+        ),
+        "close_position" => {
+            let close: ClosePositionResult =
+                serde_json::from_value(intent.broker_object.clone().ok_or_else(|| {
+                    AppError::Validation("Confirmed close object is missing".into())
+                })?)?;
+            journal::record_close_intent(
+                db_path,
+                &intent.environment,
+                &intent.account_id,
+                &close.symbol,
+                "confirmed",
+                Some("Recovered from durable broker mutation"),
+            )
+        }
+        _ => Err(AppError::Validation(
+            "This confirmed mutation type cannot be repaired automatically".into(),
+        )),
+    }
+}
+
+async fn reconcile_unresolved(api: TradeStation, db_path: PathBuf) {
+    let Ok(intents) = safety::unresolved_intents(&db_path) else {
+        return;
+    };
+    let environment = api.environment().await;
+    for intent in intents {
+        if intent.environment != environment {
+            continue;
+        }
+        if let Err(error) = reconcile_intent(&api, &db_path, &intent.id, None).await {
+            let warning = format!("Automatic reconciliation could not query broker state: {error}");
+            let state = if matches!(
+                intent.state,
+                safety::MutationState::Accepted | safety::MutationState::Reconciled
+            ) {
+                intent.state.clone()
+            } else {
+                safety::MutationState::Unknown
+            };
+            let _ = safety::update_intent(
+                &db_path,
+                &intent.id,
+                state,
+                intent.broker_id.as_deref(),
+                intent.broker_object.as_ref(),
+                &intent.local_persistence,
+                "failed",
+                Some(&warning),
+                Some(&error.to_string()),
+                false,
+            );
+        }
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_risk_policy(
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<safety::RiskPolicyStatus, AppError> {
+    let environment = state.api.environment().await;
+    let policy = safety::load_policy(&state.db_path, &environment, &account_id)?;
+    let armed = state.safety.is_live_armed(&environment, &account_id).await;
+    Ok(state.safety.status(environment, account_id, policy, armed))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn save_risk_policy(
+    account_id: String,
+    policy: safety::RiskPolicy,
+    state: State<'_, NativeState>,
+) -> Result<safety::RiskPolicyStatus, AppError> {
+    let environment = state.api.environment().await;
+    safety::save_policy(&state.db_path, &environment, &account_id, &policy)?;
+    state
+        .safety
+        .set_live_armed(&environment, &account_id, false)
+        .await;
+    Ok(state.safety.status(environment, account_id, policy, false))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn set_live_trading_armed(
+    account_id: String,
+    armed: bool,
+    confirmation: String,
+    state: State<'_, NativeState>,
+) -> Result<safety::RiskPolicyStatus, AppError> {
+    let environment = state.api.environment().await;
+    if armed
+        && matches!(environment, TradingEnvironment::Live)
+        && confirmation.trim() != format!("ARM LIVE {account_id}")
+    {
+        return Err(AppError::Validation(format!(
+            "Type ARM LIVE {account_id} to arm LIVE trading"
+        )));
+    }
+    state
+        .safety
+        .set_live_armed(&environment, &account_id, armed)
+        .await;
+    let policy = safety::load_policy(&state.db_path, &environment, &account_id)?;
+    Ok(state.safety.status(environment, account_id, policy, armed))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn list_broker_mutations(
+    environment: TradingEnvironment,
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<safety::MutationIntent>, AppError> {
+    safety::list_intents(&state.db_path, &environment, &account_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn reconcile_broker_mutation(
+    mutation_id: String,
+    broker_order_id: Option<String>,
+    confirmation: String,
+    state: State<'_, NativeState>,
+) -> Result<BrokerMutationResult, AppError> {
+    if broker_order_id.is_some() && confirmation.trim() != format!("RECONCILE {mutation_id}") {
+        return Err(AppError::Validation(format!(
+            "Type RECONCILE {mutation_id} to apply a manual broker match"
+        )));
+    }
+    let intent = safety::load_intent(&state.db_path, &mutation_id)?
+        .ok_or_else(|| AppError::Validation("Mutation intent was not found".into()))?;
+    if intent.environment != state.api.environment().await {
+        return Err(AppError::Validation(
+            "Switch to the mutation's original environment before reconciling it".into(),
+        ));
+    }
+    let _guard = state
+        .safety
+        .account_lock(&intent.environment, &intent.account_id)
+        .await;
+    let record = reconcile_intent(
+        &state.api,
+        &state.db_path,
+        &mutation_id,
+        broker_order_id.as_deref(),
+    )
+    .await?;
+    mutation_result_from_intent(&record)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn kill_switch(
+    account_id: String,
+    confirmation: String,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<KillSwitchResult, AppError> {
+    let environment = state.api.environment().await;
+    if matches!(environment, TradingEnvironment::Live)
+        && confirmation.trim() != format!("FLATTEN LIVE {account_id}")
+    {
+        return Err(AppError::Validation(format!(
+            "Type FLATTEN LIVE {account_id} to use the LIVE kill switch"
+        )));
+    }
+    let _guard = state.safety.account_lock(&environment, &account_id).await;
+    let (orders, positions) = tokio::join!(
+        state.api.orders(&account_id),
+        state.api.positions(&account_id)
+    );
+    let orders = orders?;
+    let positions = positions?;
+    let mut cancelled_orders = Vec::new();
+    for order in orders
+        .into_iter()
+        .filter(|order| matches!(order.status.as_str(), "Working" | "Pending"))
+    {
+        let mutation_id = uuid::Uuid::new_v4().to_string();
+        let created = safety::create_intent_with_recent_confirmed_guard(
+            &state.db_path,
+            safety::NewMutationIntent {
+                id: mutation_id.clone(),
+                environment: environment.clone(),
+                account_id: account_id.clone(),
+                kind: "cancel_order".into(),
+                equivalence_key: format!("cancel|{}", order.id),
+                symbol: Some(order.symbol.clone()),
+                action: "Cancel".into(),
+                quantity: Some(order.quantity as f64),
+                order_type: Some(order.order_type.clone()),
+                limit_price: order.price,
+                stop_price: order.stop_price,
+                take_profit: None,
+                stop_loss: None,
+                target_id: Some(order.id.clone()),
+                request: serde_json::json!({"killSwitch":true,"orderId":order.id}),
+            },
+            Some(15 * 60),
+        )?;
+        let result = match created {
+            safety::CreateIntent::EquivalentBlocked(record)
+            | safety::CreateIntent::Existing(record) => mutation_result_from_intent(&record)?,
+            safety::CreateIntent::Created => {
+                safety::update_intent(
+                    &state.db_path,
+                    &mutation_id,
+                    safety::MutationState::Submitting,
+                    Some(&order.id),
+                    None,
+                    "complete",
+                    "not_required",
+                    None,
+                    None,
+                    false,
+                )?;
+                match state.api.cancel_order(&order.id).await {
+                    Ok(()) => {
+                        let broker_object = serde_json::json!({"id":order.id,"status":"Cancelled"});
+                        let persistence = safety::record_confirmed(
+                            &state.db_path,
+                            &mutation_id,
+                            Some(&order.id),
+                            &broker_object,
+                            None,
+                        );
+                        let warnings = persistence.warnings;
+                        if !warnings.is_empty() {
+                            state.safety.enqueue_reconciliation(&mutation_id).await;
+                        }
+                        BrokerMutationResult {
+                            mutation_id: mutation_id.clone(),
+                            broker_outcome: BrokerOutcome::Confirmed,
+                            local_persistence: if warnings.is_empty() {
+                                LocalPersistenceStatus::Complete
+                            } else {
+                                LocalPersistenceStatus::Pending
+                            },
+                            reconciliation_status: if warnings.is_empty() {
+                                ReconciliationStatus::NotRequired
+                            } else {
+                                ReconciliationStatus::Required
+                            },
+                            warnings,
+                            broker_order: None,
+                            close_result: None,
+                            rejection_reason: None,
+                            retry_blocked: true,
+                        }
+                    }
+                    Err(error) => mutation_error_result(&state, &app, &mutation_id, error).await?,
+                }
+            }
+        };
+        cancelled_orders.push(KillSwitchItemResult {
+            item_type: "order".into(),
+            item_id: order.id,
+            symbol: Some(order.symbol),
+            result,
+        });
+    }
+    let mut flattened_positions = Vec::new();
+    for position in positions {
+        let mutation_id = uuid::Uuid::new_v4().to_string();
+        let equivalence_key = format!(
+            "close|{}|{:.10}|{:.10}",
+            position.id,
+            position.quantity.abs(),
+            position.average_price
+        );
+        let created = safety::create_intent_with_recent_confirmed_guard(
+            &state.db_path,
+            safety::NewMutationIntent {
+                id: mutation_id.clone(),
+                environment: environment.clone(),
+                account_id: account_id.clone(),
+                kind: "close_position".into(),
+                equivalence_key,
+                symbol: Some(position.symbol.clone()),
+                action: "Close".into(),
+                quantity: Some(position.quantity.abs()),
+                order_type: Some("Market".into()),
+                limit_price: None,
+                stop_price: None,
+                take_profit: None,
+                stop_loss: None,
+                target_id: Some(position.id.clone()),
+                request: serde_json::json!({"killSwitch":true,"positionId":position.id}),
+            },
+            Some(15 * 60),
+        )?;
+        let result = match created {
+            safety::CreateIntent::EquivalentBlocked(record)
+            | safety::CreateIntent::Existing(record) => mutation_result_from_intent(&record)?,
+            safety::CreateIntent::Created => {
+                safety::update_intent(
+                    &state.db_path,
+                    &mutation_id,
+                    safety::MutationState::Submitting,
+                    None,
+                    None,
+                    "complete",
+                    "not_required",
+                    None,
+                    None,
+                    false,
+                )?;
+                match state.api.close_position(&account_id, &position.id).await {
+                    Ok(close) if close.error.is_none() => {
+                        let broker_order = close.flatten_order.clone();
+                        let (broker_object, serialization_warning) =
+                            confirmed_broker_value(&close, "kill-switch close result");
+                        let persistence = safety::record_confirmed(
+                            &state.db_path,
+                            &mutation_id,
+                            broker_order.as_ref().map(|order| order.id.as_str()),
+                            &broker_object,
+                            serialization_warning,
+                        );
+                        let warnings = persistence.warnings;
+                        if !warnings.is_empty() {
+                            state.safety.enqueue_reconciliation(&mutation_id).await;
+                        }
+                        BrokerMutationResult {
+                            mutation_id: mutation_id.clone(),
+                            broker_outcome: BrokerOutcome::Confirmed,
+                            local_persistence: if warnings.is_empty() {
+                                LocalPersistenceStatus::Complete
+                            } else {
+                                LocalPersistenceStatus::Pending
+                            },
+                            reconciliation_status: if warnings.is_empty() {
+                                ReconciliationStatus::NotRequired
+                            } else {
+                                ReconciliationStatus::Required
+                            },
+                            warnings,
+                            broker_order,
+                            close_result: Some(close),
+                            rejection_reason: None,
+                            retry_blocked: true,
+                        }
+                    }
+                    Ok(close) => {
+                        let message = close.error.clone().unwrap_or_default();
+                        let broker_object = serde_json::to_value(&close).unwrap_or(Value::Null);
+                        let _ = safety::update_intent(
+                            &state.db_path,
+                            &mutation_id,
+                            safety::MutationState::Unknown,
+                            None,
+                            Some(&broker_object),
+                            "complete",
+                            "required",
+                            Some(&message),
+                            Some(&message),
+                            false,
+                        );
+                        BrokerMutationResult {
+                            mutation_id: mutation_id.clone(),
+                            broker_outcome: BrokerOutcome::Unknown,
+                            local_persistence: LocalPersistenceStatus::Complete,
+                            reconciliation_status: ReconciliationStatus::Required,
+                            warnings: vec![message],
+                            broker_order: close.flatten_order.clone(),
+                            close_result: Some(close),
+                            rejection_reason: None,
+                            retry_blocked: true,
+                        }
+                    }
+                    Err(error) => mutation_error_result(&state, &app, &mutation_id, error).await?,
+                }
+            }
+        };
+        flattened_positions.push(KillSwitchItemResult {
+            item_type: "position".into(),
+            item_id: position.id,
+            symbol: Some(position.symbol),
+            result,
+        });
+    }
+    Ok(KillSwitchResult {
+        environment,
+        account_id,
+        already_flat: cancelled_orders.is_empty() && flattened_positions.is_empty(),
+        cancelled_orders,
+        flattened_positions,
+    })
 }
 
 #[tauri::command]
@@ -2724,6 +4309,7 @@ fn emit_stream_state(
             subscription_id: subscription_id.into(),
             provider: provider.clone(),
             environment: environment.clone(),
+            environment_generation: 0,
             channel: channel.into(),
             state: state.into(),
             message,
@@ -3066,7 +4652,12 @@ async fn run_schwab_bar_stream(
     environment: TradingEnvironment,
     symbol: String,
     timeframe: String,
+    lifecycle: Arc<safety::ServiceLifecycle>,
+    environment_generation: u64,
 ) {
+    if !lifecycle.accepts(environment_generation) {
+        return;
+    }
     let (current_state, current_message) = streamer.connection_state().await;
     let initial_state = if current_state == "disconnected" {
         "connecting"
@@ -3130,6 +4721,9 @@ async fn run_schwab_bar_stream(
     let mut live_minutes = BTreeMap::new();
     let mut last_equity_tick = None;
     loop {
+        if !lifecycle.accepts(environment_generation) {
+            return;
+        }
         tokio::select! {
             result = &mut bootstrap, if bootstrap_pending => {
                 bootstrap_pending = false;
@@ -3375,13 +4969,23 @@ async fn run_schwab_bar_stream(
     }
 }
 
+fn quote_consumers(subscriptions: &[(String, BTreeSet<String>)], symbol: &str) -> Vec<String> {
+    subscriptions
+        .iter()
+        .filter(|(_, symbols)| symbols.contains(symbol))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 async fn run_schwab_quote_stream(
     app: tauri::AppHandle,
     api: Schwab,
     streamer: SchwabStreamer,
-    subscription_id: String,
+    subscriptions: Vec<(String, BTreeSet<String>)>,
     environment: TradingEnvironment,
     symbols: Vec<String>,
+    lifecycle: Arc<safety::ServiceLifecycle>,
+    environment_generation: u64,
 ) {
     let desired = symbols
         .iter()
@@ -3389,59 +4993,77 @@ async fn run_schwab_quote_stream(
         .collect::<std::collections::HashSet<_>>();
     if let Ok(quotes) = api.quotes(&symbols).await {
         for quote in quotes {
-            let _ = app.emit(
-                "quote-update",
-                QuoteUpdateEvent {
-                    subscription_id: subscription_id.clone(),
-                    provider: MarketDataProvider::Schwab,
-                    environment: environment.clone(),
-                    quote,
-                },
-            );
+            if !lifecycle.accepts(environment_generation) {
+                return;
+            }
+            for subscription_id in quote_consumers(&subscriptions, &quote.symbol) {
+                let _ = app.emit(
+                    "quote-update",
+                    QuoteUpdateEvent {
+                        subscription_id,
+                        provider: MarketDataProvider::Schwab,
+                        environment: environment.clone(),
+                        environment_generation,
+                        quote: quote.clone(),
+                    },
+                );
+            }
         }
     }
     let mut receiver = streamer.subscribe();
     let (current_state, current_message) = streamer.connection_state().await;
-    emit_stream_state(
-        &app,
-        &subscription_id,
-        &MarketDataProvider::Schwab,
-        &environment,
-        "quotes",
-        if current_state == "disconnected" {
-            "connecting"
-        } else {
-            &current_state
-        },
-        current_message,
-        None,
-        None,
-        None,
-    );
+    for (subscription_id, _) in &subscriptions {
+        emit_stream_state(
+            &app,
+            subscription_id,
+            &MarketDataProvider::Schwab,
+            &environment,
+            "quotes",
+            if current_state == "disconnected" {
+                "connecting"
+            } else {
+                &current_state
+            },
+            current_message.clone(),
+            None,
+            None,
+            None,
+        );
+    }
     loop {
+        if !lifecycle.accepts(environment_generation) {
+            return;
+        }
         match receiver.recv().await {
-            Ok(SchwabStreamEvent::State { state, message }) => emit_stream_state(
-                &app,
-                &subscription_id,
-                &MarketDataProvider::Schwab,
-                &environment,
-                "quotes",
-                &state,
-                message,
-                None,
-                None,
-                None,
-            ),
+            Ok(SchwabStreamEvent::State { state, message }) => {
+                for (subscription_id, _) in &subscriptions {
+                    emit_stream_state(
+                        &app,
+                        subscription_id,
+                        &MarketDataProvider::Schwab,
+                        &environment,
+                        "quotes",
+                        &state,
+                        message.clone(),
+                        None,
+                        None,
+                        None,
+                    );
+                }
+            }
             Ok(SchwabStreamEvent::Quote(quote)) if desired.contains(&quote.symbol) => {
-                let _ = app.emit(
-                    "quote-update",
-                    QuoteUpdateEvent {
-                        subscription_id: subscription_id.clone(),
-                        provider: MarketDataProvider::Schwab,
-                        environment: environment.clone(),
-                        quote,
-                    },
-                );
+                for subscription_id in quote_consumers(&subscriptions, &quote.symbol) {
+                    let _ = app.emit(
+                        "quote-update",
+                        QuoteUpdateEvent {
+                            subscription_id,
+                            provider: MarketDataProvider::Schwab,
+                            environment: environment.clone(),
+                            environment_generation,
+                            quote: quote.clone(),
+                        },
+                    );
+                }
             }
             Ok(_) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -3456,6 +5078,8 @@ async fn run_schwab_option_stream(
     subscription_id: String,
     symbol: String,
     desired: BTreeSet<String>,
+    lifecycle: Arc<safety::ServiceLifecycle>,
+    environment_generation: u64,
 ) {
     let mut receiver = streamer.subscribe();
     let (current_state, current_message) = streamer.connection_state().await;
@@ -3464,6 +5088,7 @@ async fn run_schwab_option_stream(
         OptionStreamStateEvent {
             subscription_id: subscription_id.clone(),
             symbol: symbol.clone(),
+            environment_generation,
             state: if current_state == "streaming" {
                 "connecting".into()
             } else {
@@ -3473,6 +5098,9 @@ async fn run_schwab_option_stream(
         },
     );
     loop {
+        if !lifecycle.accepts(environment_generation) {
+            return;
+        }
         match receiver.recv().await {
             Ok(SchwabStreamEvent::State { state, message }) => {
                 let _ = app.emit(
@@ -3480,6 +5108,7 @@ async fn run_schwab_option_stream(
                     OptionStreamStateEvent {
                         subscription_id: subscription_id.clone(),
                         symbol: symbol.clone(),
+                        environment_generation,
                         state,
                         message,
                     },
@@ -3491,6 +5120,7 @@ async fn run_schwab_option_stream(
                     OptionStreamStateEvent {
                         subscription_id: subscription_id.clone(),
                         symbol: symbol.clone(),
+                        environment_generation,
                         state,
                         message,
                     },
@@ -3501,6 +5131,7 @@ async fn run_schwab_option_stream(
                     "option-update",
                     OptionUpdateEvent {
                         subscription_id: subscription_id.clone(),
+                        environment_generation,
                         contract,
                     },
                 );
@@ -3512,6 +5143,7 @@ async fn run_schwab_option_stream(
                     OptionStreamStateEvent {
                         subscription_id: subscription_id.clone(),
                         symbol: symbol.clone(),
+                        environment_generation,
                         state: "stale".into(),
                         message: Some(format!("Option stream skipped {skipped} updates")),
                     },
@@ -3533,9 +5165,14 @@ async fn run_bar_stream(
     environment: TradingEnvironment,
     symbol: String,
     timeframe: String,
+    lifecycle: Arc<safety::ServiceLifecycle>,
+    environment_generation: u64,
 ) {
     let mut attempt = 0u32;
     loop {
+        if !lifecycle.accepts(environment_generation) {
+            return;
+        }
         emit_shared_stream_state(
             &app,
             &subscribers,
@@ -3595,6 +5232,9 @@ async fn run_bar_stream(
                 let mut terminate_stream = false;
                 let mut termination_message = None;
                 while let Some(chunk) = bytes.next().await {
+                    if !lifecycle.accepts(environment_generation) {
+                        return;
+                    }
                     let chunk = match chunk {
                         Ok(chunk) => chunk,
                         Err(error) => {
@@ -3787,16 +5427,25 @@ async fn run_bar_stream(
         let backoff = std::time::Duration::from_secs(
             (1u64 << attempt.min(5)).min(30) + u64::from(attempt % 3),
         );
-        tokio::time::sleep(retry_delay.unwrap_or(backoff)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(retry_delay.unwrap_or(backoff)) => {}
+            _ = async {
+                while lifecycle.accepts(environment_generation) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            } => return,
+        }
     }
 }
 
 async fn run_quote_stream(
     app: tauri::AppHandle,
     api: TradeStation,
-    subscription_id: String,
+    subscriptions: Vec<(String, BTreeSet<String>)>,
     environment: TradingEnvironment,
     symbols: Vec<String>,
+    lifecycle: Arc<safety::ServiceLifecycle>,
+    environment_generation: u64,
 ) {
     let path = format!("/marketdata/stream/quotes/{}", symbols.join(","));
     let mut attempt = 0u32;
@@ -3808,33 +5457,44 @@ async fn run_quote_stream(
         .map(|quote| (quote.symbol.clone(), quote))
         .collect();
     for quote in quotes.values() {
-        let _ = app.emit(
-            "quote-update",
-            QuoteUpdateEvent {
-                subscription_id: subscription_id.clone(),
-                provider: MarketDataProvider::Tradestation,
-                environment: environment.clone(),
-                quote: quote.clone(),
-            },
-        );
+        if !lifecycle.accepts(environment_generation) {
+            return;
+        }
+        for subscription_id in quote_consumers(&subscriptions, &quote.symbol) {
+            let _ = app.emit(
+                "quote-update",
+                QuoteUpdateEvent {
+                    subscription_id,
+                    provider: MarketDataProvider::Tradestation,
+                    environment: environment.clone(),
+                    environment_generation,
+                    quote: quote.clone(),
+                },
+            );
+        }
     }
     loop {
-        emit_stream_state(
-            &app,
-            &subscription_id,
-            &MarketDataProvider::Tradestation,
-            &environment,
-            "quotes",
-            if attempt == 0 {
-                "connecting"
-            } else {
-                "reconnecting"
-            },
-            None,
-            None,
-            None,
-            None,
-        );
+        if !lifecycle.accepts(environment_generation) {
+            return;
+        }
+        for (subscription_id, _) in &subscriptions {
+            emit_stream_state(
+                &app,
+                subscription_id,
+                &MarketDataProvider::Tradestation,
+                &environment,
+                "quotes",
+                if attempt == 0 {
+                    "connecting"
+                } else {
+                    "reconnecting"
+                },
+                None,
+                None,
+                None,
+                None,
+            );
+        }
         let connected_at = std::time::Instant::now();
         let mut retry_delay = None;
         match api
@@ -3842,22 +5502,27 @@ async fn run_quote_stream(
             .await
         {
             Ok(response) => {
-                emit_stream_state(
-                    &app,
-                    &subscription_id,
-                    &MarketDataProvider::Tradestation,
-                    &environment,
-                    "quotes",
-                    "streaming",
-                    None,
-                    None,
-                    None,
-                    None,
-                );
+                for (subscription_id, _) in &subscriptions {
+                    emit_stream_state(
+                        &app,
+                        subscription_id,
+                        &MarketDataProvider::Tradestation,
+                        &environment,
+                        "quotes",
+                        "streaming",
+                        None,
+                        None,
+                        None,
+                        None,
+                    );
+                }
                 let mut bytes = response.bytes_stream();
                 let mut buffer = Vec::new();
                 let mut go_away = false;
                 while let Some(Ok(chunk)) = bytes.next().await {
+                    if !lifecycle.accepts(environment_generation) {
+                        return;
+                    }
                     let values = match decode_stream_values(&mut buffer, &chunk) {
                         Ok(values) => values,
                         Err(_) => break,
@@ -3871,33 +5536,38 @@ async fn run_quote_stream(
                             break;
                         }
                         if let Some(quote) = tradestation::merge_quote_update(&mut quotes, &value) {
-                            let _ = app.emit(
-                                "quote-update",
-                                QuoteUpdateEvent {
-                                    subscription_id: subscription_id.clone(),
-                                    provider: MarketDataProvider::Tradestation,
-                                    environment: environment.clone(),
-                                    quote,
-                                },
-                            );
+                            for subscription_id in quote_consumers(&subscriptions, &quote.symbol) {
+                                let _ = app.emit(
+                                    "quote-update",
+                                    QuoteUpdateEvent {
+                                        subscription_id,
+                                        provider: MarketDataProvider::Tradestation,
+                                        environment: environment.clone(),
+                                        environment_generation,
+                                        quote: quote.clone(),
+                                    },
+                                );
+                            }
                         }
                     }
                     if go_away {
                         break;
                     }
                 }
-                emit_stream_state(
-                    &app,
-                    &subscription_id,
-                    &MarketDataProvider::Tradestation,
-                    &environment,
-                    "quotes",
-                    "reconnecting",
-                    Some("TradeStation ended the stream; reconnecting".into()),
-                    None,
-                    None,
-                    None,
-                );
+                for (subscription_id, _) in &subscriptions {
+                    emit_stream_state(
+                        &app,
+                        subscription_id,
+                        &MarketDataProvider::Tradestation,
+                        &environment,
+                        "quotes",
+                        "reconnecting",
+                        Some("TradeStation ended the stream; reconnecting".into()),
+                        None,
+                        None,
+                        None,
+                    );
+                }
                 if connected_at.elapsed() >= std::time::Duration::from_secs(30) {
                     attempt = 0;
                 }
@@ -3907,29 +5577,38 @@ async fn run_quote_stream(
                 if rate_limited {
                     retry_delay = Some(tradestation::rate_limit_delay(&error));
                 }
-                emit_stream_state(
-                    &app,
-                    &subscription_id,
-                    &MarketDataProvider::Tradestation,
-                    &environment,
-                    "quotes",
-                    if rate_limited {
-                        "rate-limited"
-                    } else {
-                        "reconnecting"
-                    },
-                    Some(error.to_string()),
-                    None,
-                    None,
-                    None,
-                );
+                for (subscription_id, _) in &subscriptions {
+                    emit_stream_state(
+                        &app,
+                        subscription_id,
+                        &MarketDataProvider::Tradestation,
+                        &environment,
+                        "quotes",
+                        if rate_limited {
+                            "rate-limited"
+                        } else {
+                            "reconnecting"
+                        },
+                        Some(error.to_string()),
+                        None,
+                        None,
+                        None,
+                    );
+                }
             }
         }
         attempt = attempt.saturating_add(1);
         let backoff = std::time::Duration::from_secs(
             (1u64 << attempt.min(5)).min(30) + u64::from(attempt % 3),
         );
-        tokio::time::sleep(retry_delay.unwrap_or(backoff)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(retry_delay.unwrap_or(backoff)) => {}
+            _ = async {
+                while lifecycle.accepts(environment_generation) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            } => return,
+        }
     }
 }
 
@@ -3941,6 +5620,7 @@ pub fn run() {
             std::fs::create_dir_all(&app_dir)?;
             let db_path = app_dir.join("northstar.sqlite3");
             journal::init(&db_path)?;
+            safety::init(&db_path)?;
             if let Err(error) = audit::init(&db_path) {
                 tracing::error!(%error, "Could not initialize the audit log");
             }
@@ -3948,17 +5628,27 @@ pub fn run() {
             let api = TradeStation::new()?.with_audit(audit.clone());
             let schwab = Schwab::new()?.with_audit(audit.clone());
             let schwab_streamer = SchwabStreamer::new(schwab.clone());
+            let safety = Arc::new(safety::SafetyService::new(db_path.clone()));
+            let startup_api = api.clone();
+            let startup_db = db_path.clone();
             app.manage(NativeState {
                 audit,
                 api,
                 schwab,
                 schwab_streamer,
                 db_path,
+                safety,
                 bar_streams: Arc::new(tokio::sync::Mutex::new(BarStreamRegistry::default())),
                 quote_streams: tokio::sync::Mutex::new(HashMap::new()),
+                quote_provider_tasks: tokio::sync::Mutex::new(HashMap::new()),
                 option_streams: tokio::sync::Mutex::new(HashMap::new()),
                 brokerage_streams: tokio::sync::Mutex::new(Vec::new()),
                 preference_realtime: tokio::sync::Mutex::new(None),
+            });
+            tauri::async_runtime::spawn(async move {
+                if startup_api.token().await.is_ok() {
+                    reconcile_unresolved(startup_api, startup_db).await;
+                }
             });
             Ok(())
         })
@@ -4002,6 +5692,12 @@ pub fn run() {
             replace_order,
             close_position,
             cancel_order,
+            get_risk_policy,
+            save_risk_policy,
+            set_live_trading_armed,
+            list_broker_mutations,
+            reconcile_broker_mutation,
+            kill_switch,
             load_workspace,
             save_workspace,
             get_trading_today_cache,
@@ -4314,6 +6010,181 @@ mod stream_tests {
         // second selection cannot replace the final A -> B -> C choice.
         assert!(!registry.accept_generation("chart-1", 100));
         assert!(!registry.accept_generation("chart-1", 99));
+    }
+
+    #[test]
+    fn quote_consumers_receive_union_without_one_consumer_clearing_another() {
+        let mut subscriptions = vec![
+            ("chart".into(), BTreeSet::from(["MES".into(), "MNQ".into()])),
+            (
+                "watchlist".into(),
+                BTreeSet::from(["MNQ".into(), "MCL".into()]),
+            ),
+        ];
+        assert_eq!(
+            quote_consumers(&subscriptions, "MNQ"),
+            vec!["chart".to_string(), "watchlist".to_string()]
+        );
+        subscriptions.retain(|(id, _)| id != "chart");
+        assert_eq!(
+            quote_consumers(&subscriptions, "MNQ"),
+            vec!["watchlist".to_string()]
+        );
+        assert_eq!(
+            quote_consumers(&subscriptions, "MCL"),
+            vec!["watchlist".to_string()]
+        );
+    }
+
+    #[test]
+    fn restart_reconciliation_finds_one_strong_match_without_resubmission() {
+        let path = std::env::temp_dir().join(format!(
+            "northstar-restart-reconcile-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        safety::init(&path).unwrap();
+        let created_at = Utc::now().to_rfc3339();
+        assert!(matches!(
+            safety::create_intent(
+                &path,
+                safety::NewMutationIntent {
+                    id: "restart-1".into(),
+                    environment: TradingEnvironment::Sim,
+                    account_id: "SIM-1".into(),
+                    kind: "place_order".into(),
+                    equivalence_key: "place|MESZ26|Buy|1|Limit".into(),
+                    symbol: Some("MESZ26".into()),
+                    action: "Buy".into(),
+                    quantity: Some(1.0),
+                    order_type: Some("Limit".into()),
+                    limit_price: Some(6000.0),
+                    stop_price: None,
+                    take_profit: Some(6002.0),
+                    stop_loss: Some(5998.0),
+                    target_id: None,
+                    request: serde_json::json!({"duration":"DAY"}),
+                },
+            )
+            .unwrap(),
+            safety::CreateIntent::Created
+        ));
+        safety::update_intent(
+            &path,
+            "restart-1",
+            safety::MutationState::Unknown,
+            None,
+            None,
+            "complete",
+            "required",
+            None,
+            Some("timeout after transmission"),
+            false,
+        )
+        .unwrap();
+        let intent = safety::load_intent(&path, "restart-1").unwrap().unwrap();
+        let broker_order = OrderUpdate {
+            id: "91234".into(),
+            symbol: "MESZ26".into(),
+            side: "Buy".into(),
+            order_type: "Limit".into(),
+            quantity: 1,
+            price: Some(6000.0),
+            stop_price: None,
+            status: "Working".into(),
+            timestamp: created_at,
+            account_id: Some("SIM-1".into()),
+            filled_quantity: Some(0.0),
+            remaining_quantity: Some(1.0),
+            average_fill_price: None,
+            duration: Some("DAY".into()),
+            closed_at: None,
+            commission: None,
+            stop_loss: Some(5998.0),
+            take_profit: Some(6002.0),
+            raw_status: None,
+            status_description: None,
+            open_or_close: Some("Open".into()),
+            group_name: None,
+            related_orders: vec![],
+        };
+        let submit_calls = 0;
+        let candidates = place_reconciliation_candidates(&intent, &[broker_order.clone()], None);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|order| order.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![broker_order.id.as_str()]
+        );
+        assert_eq!(submit_calls, 0);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn ambiguous_reconciliation_candidates_require_manual_review() {
+        let intent = safety::MutationIntent {
+            id: "m1".into(),
+            environment: TradingEnvironment::Sim,
+            account_id: "SIM-1".into(),
+            kind: "place_order".into(),
+            equivalence_key: "same".into(),
+            symbol: Some("MESZ26".into()),
+            action: "Buy".into(),
+            quantity: Some(1.0),
+            order_type: Some("Market".into()),
+            limit_price: None,
+            stop_price: None,
+            take_profit: None,
+            stop_loss: None,
+            target_id: None,
+            broker_id: None,
+            state: safety::MutationState::Unknown,
+            local_persistence: "complete".into(),
+            reconciliation_status: "required".into(),
+            manual_review_required: false,
+            warning: None,
+            error: None,
+            request: serde_json::json!({"duration":"DAY"}),
+            broker_object: None,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+        let order = |id: &str| OrderUpdate {
+            id: id.into(),
+            symbol: "MESZ26".into(),
+            side: "Buy".into(),
+            order_type: "Market".into(),
+            quantity: 1,
+            price: None,
+            stop_price: None,
+            status: "Pending".into(),
+            timestamp: Utc::now().to_rfc3339(),
+            account_id: Some("SIM-1".into()),
+            filled_quantity: Some(0.0),
+            remaining_quantity: Some(1.0),
+            average_fill_price: None,
+            duration: Some("DAY".into()),
+            closed_at: None,
+            commission: None,
+            stop_loss: None,
+            take_profit: None,
+            raw_status: None,
+            status_description: None,
+            open_or_close: Some("Open".into()),
+            group_name: None,
+            related_orders: vec![],
+        };
+        assert_eq!(
+            place_reconciliation_candidates(&intent, &[order("1"), order("2")], None).len(),
+            2
+        );
+        assert_eq!(
+            place_reconciliation_candidates(&intent, &[order("1"), order("2")], Some("2"))
+                .iter()
+                .map(|order| order.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2"]
+        );
     }
 
     #[test]
