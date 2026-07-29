@@ -4,7 +4,7 @@ import { emit, emitTo, listen } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { availableMonitors, cursorPosition, getAllWindows, getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Activity, BarChart3, Bell, BellRing, BookOpen, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download,
+  Activity, BarChart3, Bell, BellRing, BookOpen, CalendarDays, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Crosshair, Download,
   GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
   Magnet, MousePointer2, Palette, PanelsTopLeft, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingDown, TrendingUp,
@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
 import { ChartPaneGrid } from "./components/ChartPaneGrid";
+import { ChartPaneErrorBoundary } from "./components/ChartPaneErrorBoundary";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { AuditLogModal } from "./components/AuditLogModal";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
@@ -43,10 +44,11 @@ import { defaultPointAndFigureSettings, defaultRenkoSettings, normalizePointAndF
 import { instrumentKey, rememberRecentSymbol, reorderWatchlist } from "./lib/watchlist";
 import { acceptsBarEvent, acceptsDetachedBarGeneration, isBarStateEvent, isSameBarMarket } from "./lib/streamEvents";
 import { activeDrawingAlerts, applyDrawingPatch, trackDrawingAlertTransitions, type ActiveDrawingAlert, type DrawingAlertTrackerState } from "./lib/drawingAlerts";
-import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
+import { chartLayoutCapacity, chartPaneMountPlan, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
 import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./lib/economicEvents";
+import { crosshairEventsForTarget, type ChartCrosshairUpdate, type CrosshairSyncEvent } from "./lib/crosshair";
 import {
   DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS,
   chicagoDateKey,
@@ -90,7 +92,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -498,6 +500,12 @@ function TradingApp() {
   const vwapRangeTimersRef = useRef(new Map<string, number>());
   const vwapDataEpochRef = useRef("");
   const chartCaptureRefs = useRef(new Map<string, TradingChartHandle>());
+  const activeCrosshairEventsRef = useRef(new Map<string, CrosshairSyncEvent>());
+  const latestCrosshairOrderRef = useRef(new Map<string, number>());
+  const pendingCrosshairBroadcastsRef = useRef(new Map<string, CrosshairSyncEvent>());
+  const crosshairBroadcastFrameRef = useRef<number | null>(null);
+  const crosshairBroadcastChainRef = useRef<Promise<void>>(Promise.resolve());
+  const lastLocalCrosshairOrderRef = useRef(0);
   const [entryScreenshotCandidates, setEntryScreenshotCandidates] = useState<EntryScreenshotCandidate[]>([]);
   const entryScreenshotCandidatesRef = useRef<EntryScreenshotCandidate[]>([]);
   const screenshotCapturingRef = useRef(new Set<string>());
@@ -515,6 +523,13 @@ function TradingApp() {
   const chartLayout = normalizedChartLayout(windowState.chartLayout);
   const visibleTabIds = (windowState.visibleTabIds ?? [activeTab.id]).filter((id) => windowState.tabIds.includes(id)).slice(0, chartLayoutCapacity(chartLayout));
   const visibleTabs = visibleTabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab));
+  const visibleTabIdsKey = visibleTabIds.join("|");
+  const [mountedVisibleTabIds, setMountedVisibleTabIds] = useState(visibleTabIds);
+  const mountedVisibleTabIdsRef = useRef(mountedVisibleTabIds);
+  mountedVisibleTabIdsRef.current = mountedVisibleTabIds;
+  const retainedMountedTabIds = mountedVisibleTabIds.filter((id) => visibleTabIds.includes(id));
+  const renderedVisibleTabIds = retainedMountedTabIds.length ? retainedMountedTabIds : visibleTabIds.slice(0, 1);
+  const renderedVisibleTabs = renderedVisibleTabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab));
   const activeMarket = tabMarkets[activeTab.id];
   const market = isSameBarMarket(activeMarket, activeTab.symbol.provider, activeTab.symbol.symbol, activeTab.timeframe)
     ? activeMarket
@@ -532,6 +547,16 @@ function TradingApp() {
     const timer = window.setInterval(updateDate, 60_000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    const target = [...visibleTabIds];
+    const current = mountedVisibleTabIdsRef.current;
+    const plan = chartPaneMountPlan(current, target);
+    if (plan.immediate !== current) setMountedVisibleTabIds(plan.immediate);
+    if (!plan.deferred) return;
+    const frame = requestAnimationFrame(() => setMountedVisibleTabIds(plan.deferred!));
+    return () => cancelAnimationFrame(frame);
+  }, [visibleTabIdsKey]);
 
   useEffect(() => {
     if (currentWindowId !== MAIN_WINDOW_ID || (!tradingTodayOpen && !workspace.settings.chartEconomicEvents.enabled)) return;
@@ -607,6 +632,41 @@ function TradingApp() {
   gexMarketsRef.current = gexMarkets;
   gexCoverageRef.current = gexCoverage;
   entryRuleTabSignalsRef.current = entryRuleTabSignals;
+
+  useEffect(() => {
+    if (!workspace.settings.crosshairSyncEnabled) {
+      clearCrosshairSyncState(true);
+      return;
+    }
+    [...activeCrosshairEventsRef.current.values()].forEach((event) => {
+      const sourceWindow = workspace.windows.find((item) => item.id === event.sourceWindowId);
+      const sourceTab = workspace.tabs.find((item) => item.id === event.sourceTabId);
+      const sourceVisible = sourceWindow
+        ? (sourceWindow.visibleTabIds ?? [sourceWindow.activeTabId]).includes(event.sourceTabId)
+        : false;
+      const valid = sourceWindow?.tabIds.includes(event.sourceTabId)
+        && sourceVisible
+        && sourceTab
+        && instrumentKey(sourceTab.symbol) === instrumentKey(event);
+      if (valid) return;
+      const clear: CrosshairSyncEvent = {
+        sourceWindowId: event.sourceWindowId,
+        sourceTabId: event.sourceTabId,
+        provider: event.provider,
+        symbol: event.symbol,
+        order: nextCrosshairOrder(),
+        visible: false,
+      };
+      applyCrosshairSyncEvent(clear);
+      if (event.sourceWindowId === currentWindowId) queueCrosshairBroadcast(clear);
+    });
+  }, [workspace.settings.crosshairSyncEnabled, workspace.tabs, workspace.windows]);
+
+  useEffect(() => () => {
+    if (crosshairBroadcastFrameRef.current != null) cancelAnimationFrame(crosshairBroadcastFrameRef.current);
+    crosshairBroadcastFrameRef.current = null;
+    pendingCrosshairBroadcastsRef.current.clear();
+  }, []);
 
   const activeQuote = quotes[instrumentKey(activeTab.symbol)] ?? (api.isNative
     ? { provider: activeTab.symbol.provider, symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
@@ -1091,6 +1151,17 @@ function TradingApp() {
       setWorkspace(next);
       syncWorkspaceToOpenWindows(next);
     }).then((unlisten) => cleanups.push(unlisten));
+    listen<CrosshairSyncEvent[] | CrosshairSyncEvent>("chart-crosshair-sync", ({ payload }) => {
+      if (!workspaceRef.current.settings.crosshairSyncEnabled) return;
+      const events = Array.isArray(payload) ? payload : [payload];
+      crosshairEventsForTarget(events, currentWindowId).forEach(applyCrosshairSyncEvent);
+    }).then((unlisten) => cleanups.push(unlisten));
+    listen<CrosshairSyncEvent[] | CrosshairSyncEvent>("chart-crosshair-proposal", ({ payload }) => {
+      if (currentWindowId !== MAIN_WINDOW_ID || !workspaceRef.current.settings.crosshairSyncEnabled) return;
+      const events = crosshairEventsForTarget(Array.isArray(payload) ? payload : [payload], currentWindowId)
+        .filter(applyCrosshairSyncEvent);
+      if (events.length) void sendCrosshairBatchToDetachedWindows(events);
+    }).then((unlisten) => cleanups.push(unlisten));
     listen<TradingTodaySyncEvent>("trading-today-sync", ({ payload }) => {
       if (currentWindowId === MAIN_WINDOW_ID) return;
       setTradingTodayDate(payload.displayDate);
@@ -1116,6 +1187,9 @@ function TradingApp() {
           tabId, symbol: signal.symbol, timeframe: signal.timeframe, sides: signal.sides,
         }));
         if (signals.length) await emitTo(payload.windowId, "entry-rule-tab-signal", { action: "trigger", signals } satisfies EntryRuleTabSignalEvent).catch(() => undefined);
+        if (workspaceRef.current.settings.crosshairSyncEnabled && activeCrosshairEventsRef.current.size) {
+          await emitTo(payload.windowId, "chart-crosshair-sync", [...activeCrosshairEventsRef.current.values()]).catch(() => undefined);
+        }
       })();
     }).then((unlisten) => cleanups.push(unlisten));
     listen<WindowMarketSyncEvent>("window-market-sync", ({ payload }) => {
@@ -1936,6 +2010,108 @@ function TradingApp() {
     const firstIndex = Math.max(0, Math.min(tabBars.length - 1, Math.floor(range.from)));
     const lastIndex = Math.max(firstIndex, Math.min(tabBars.length - 1, Math.ceil(range.to)));
     queueVwapRange(tab.symbol.symbol, tabBars[firstIndex].time, tabBars[lastIndex].time + 60);
+  }
+
+  function nextCrosshairOrder(): number {
+    const highResolution = typeof performance !== "undefined" ? performance.timeOrigin + performance.now() : Number.NaN;
+    const current = Number.isFinite(highResolution) ? highResolution : Date.now();
+    const next = Math.max(current, lastLocalCrosshairOrderRef.current + 0.001);
+    lastLocalCrosshairOrderRef.current = next;
+    return next;
+  }
+
+  function queueCrosshairBroadcast(event: CrosshairSyncEvent) {
+    if (!api.isNative) return;
+    pendingCrosshairBroadcastsRef.current.set(instrumentKey(event), event);
+    if (crosshairBroadcastFrameRef.current != null) return;
+    crosshairBroadcastFrameRef.current = requestAnimationFrame(() => {
+      crosshairBroadcastFrameRef.current = null;
+      const batch = [...pendingCrosshairBroadcastsRef.current.values()];
+      pendingCrosshairBroadcastsRef.current.clear();
+      if (!batch.length) return;
+      crosshairBroadcastChainRef.current = crosshairBroadcastChainRef.current
+        .catch(() => undefined)
+        .then(() => currentWindowId === MAIN_WINDOW_ID
+          ? sendCrosshairBatchToDetachedWindows(batch)
+          : emitTo(MAIN_WINDOW_ID, "chart-crosshair-proposal", batch));
+    });
+  }
+
+  async function sendCrosshairBatchToDetachedWindows(events: CrosshairSyncEvent[]): Promise<void> {
+    await Promise.all(workspaceRef.current.windows
+      .filter((window) => window.id !== MAIN_WINDOW_ID)
+      .map(async (window) => {
+        const targeted = crosshairEventsForTarget(events, window.id);
+        if (targeted.length) await emitTo(window.id, "chart-crosshair-sync", targeted).catch(() => undefined);
+      }));
+  }
+
+  function applyCrosshairSyncEvent(event: CrosshairSyncEvent): boolean {
+    const key = instrumentKey(event);
+    const latestOrder = latestCrosshairOrderRef.current.get(key);
+    if (!Number.isFinite(event.order) || latestOrder != null && event.order < latestOrder) return false;
+    if (event.visible && (!Number.isFinite(event.sourceTime) || !Number.isFinite(event.price))) return false;
+    latestCrosshairOrderRef.current.set(key, event.order);
+    if (event.visible) activeCrosshairEventsRef.current.set(key, event);
+    else activeCrosshairEventsRef.current.delete(key);
+
+    chartCaptureRefs.current.forEach((handle, tabId) => {
+      if (tabId === event.sourceTabId) return;
+      const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
+      if (!tab || instrumentKey(tab.symbol) !== key) return;
+      if (event.visible) handle.applySyncedCrosshair(event.sourceTime, event.price);
+      else handle.clearSyncedCrosshair();
+    });
+    return true;
+  }
+
+  function publishChartCrosshair(tab: ChartTabState, update: ChartCrosshairUpdate) {
+    if (!workspaceRef.current.settings.crosshairSyncEnabled) return;
+    const event: CrosshairSyncEvent = {
+      sourceWindowId: currentWindowId,
+      sourceTabId: tab.id,
+      provider: tab.symbol.provider,
+      symbol: tab.symbol.symbol,
+      order: nextCrosshairOrder(),
+      ...update,
+    };
+    applyCrosshairSyncEvent(event);
+    queueCrosshairBroadcast(event);
+  }
+
+  function registerChartHandle(tab: ChartTabState, handle: TradingChartHandle | null) {
+    if (!handle) {
+      chartCaptureRefs.current.delete(tab.id);
+      return;
+    }
+    chartCaptureRefs.current.set(tab.id, handle);
+    if (!workspaceRef.current.settings.crosshairSyncEnabled) return;
+    const event = activeCrosshairEventsRef.current.get(instrumentKey(tab.symbol));
+    if (!event || event.sourceTabId === tab.id) return;
+    if (event.visible) handle.applySyncedCrosshair(event.sourceTime, event.price);
+  }
+
+  function clearCrosshairSyncState(publishLocalClears: boolean) {
+    const localEvents = publishLocalClears
+      ? [...activeCrosshairEventsRef.current.values()].filter((event) => event.sourceWindowId === currentWindowId && event.visible)
+      : [];
+    if (crosshairBroadcastFrameRef.current != null) cancelAnimationFrame(crosshairBroadcastFrameRef.current);
+    crosshairBroadcastFrameRef.current = null;
+    pendingCrosshairBroadcastsRef.current.clear();
+    chartCaptureRefs.current.forEach((handle) => handle.clearSyncedCrosshair());
+    activeCrosshairEventsRef.current.clear();
+    localEvents.forEach((event) => {
+      const clear: CrosshairSyncEvent = {
+        sourceWindowId: event.sourceWindowId,
+        sourceTabId: event.sourceTabId,
+        provider: event.provider,
+        symbol: event.symbol,
+        order: nextCrosshairOrder(),
+        visible: false,
+      };
+      applyCrosshairSyncEvent(clear);
+      queueCrosshairBroadcast(clear);
+    });
   }
 
   const visibleVwapKey = visibleTabs.map((tab) => `${tab.id}:${tab.symbol.symbol}:${tab.timeframe}:${tab.chartKind}:${tab.indicators.map((indicator) => `${indicator.id}-${indicator.visible}`).join(",")}:${tabMarkets[tab.id]?.bars.length ?? 0}`).join("|");
@@ -3445,7 +3621,7 @@ function TradingApp() {
       ? `${gexStatusLabel(gexIsStale ? "stale" : gexMarket.status)}${Object.keys(gexMarket.contracts).length ? ` · ${gexCoverage[tab.symbol.symbol] ?? 0}/${Object.keys(gexMarket.contracts).length}` : ""}`
       : tab.gex.enabled && supportsGex(tab.symbol) ? "Loading" : undefined;
     return <TradingChart
-      ref={(handle) => { if (handle) chartCaptureRefs.current.set(tab.id, handle); else chartCaptureRefs.current.delete(tab.id); }}
+      ref={(handle) => registerChartHandle(tab, handle)}
       bars={tabMarket.bars}
       vwapBars={vwapMarkets[tab.symbol.symbol]?.bars ?? []}
       kind={tab.chartKind}
@@ -3491,6 +3667,8 @@ function TradingApp() {
       onDeleteDrawing={(id) => updateSymbolDrawings(tab.symbol.symbol, (items) => items.filter((item) => item.id !== id))}
       initialVisibleRange={viewRangesRef.current.get(tab.id)}
       onVisibleRangeChange={(range) => requestVisibleVwap(tab.id, range)}
+      crosshairSyncEnabled={workspace.settings.crosshairSyncEnabled}
+      onCrosshairSyncChange={(update) => publishChartCrosshair(tab, update)}
       onTimezoneChange={(chartTimezone) => updateTab(tab.id, { chartTimezone })}
       onLoadOlder={() => loadOlder(tab.id)}
       loadingOlder={tabMarket.loadingOlder}
@@ -3527,6 +3705,16 @@ function TradingApp() {
           <small className="chart-layout-hint">Drag dividers to resize · double-click to reset</small>
         </div></>}
       </div>
+      <IconButton
+        label="Sync crosshairs"
+        active={workspace.settings.crosshairSyncEnabled}
+        onClick={() => updateWorkspace({
+          settings: {
+            ...workspace.settings,
+            crosshairSyncEnabled: !workspace.settings.crosshairSyncEnabled,
+          },
+        })}
+      ><Crosshair size={17} /></IconButton>
       <div className="toolbar-popover-anchor chart-style-anchor">
         <button className={`text-tool-button chart-style-button ${chartStyleOpen ? "active" : ""}`} aria-haspopup="menu" aria-expanded={chartStyleOpen} onClick={() => { setIndicatorOpen(false); setAlertOpen(false); setChartLayoutOpen(false); setChartStyleOpen((value) => !value); }}><ChartStyleGlyph kind={activeTab.chartKind} /><span>{chartStyles.find((style) => style.kind === activeTab.chartKind)?.label}</span><ChevronDown size={13} /></button>
         {chartStyleOpen && <><button className="popover-backdrop" aria-label="Close chart style menu" onClick={() => setChartStyleOpen(false)} /><div className="popover chart-style-popover" role="menu" aria-label="Chart style">
@@ -3634,7 +3822,13 @@ function TradingApp() {
       <ChartPaneGrid
         layout={chartLayout}
         ratios={normalizeChartSplitRatio(chartLayout, windowState.splitRatios?.[chartLayout] ?? defaultChartSplitRatios(chartLayout))}
-        panes={visibleTabs.map((tab) => ({ id: tab.id, label: tab.symbol.symbol, node: renderChartPane(tab) }))}
+        panes={renderedVisibleTabs.map((tab) => ({
+          id: tab.id,
+          label: tab.symbol.symbol,
+          node: <ChartPaneErrorBoundary resetKey={`${tab.id}:${tab.symbol.provider}:${tab.symbol.symbol}:${tab.timeframe}:${tab.chartKind}`}>
+            {renderChartPane(tab)}
+          </ChartPaneErrorBoundary>,
+        }))}
         activePaneId={activeTab.id}
         onFocus={selectTab}
         onRatiosChange={changeChartSplitRatios}

@@ -157,6 +157,18 @@ export function setChartWindowSplitRatio(workspace: WorkspaceState, windowId: st
   return next;
 }
 
+export function chartPaneMountPlan(current: string[], target: string[]): { immediate: string[]; deferred?: string[] } {
+  if (target.length === current.length && target.every((id, index) => id === current[index])) {
+    return { immediate: current };
+  }
+  if (!target.some((id) => !current.includes(id))) return { immediate: target };
+  const retained = current.filter((id) => target.includes(id));
+  return {
+    immediate: retained.length ? retained : target.slice(0, 1),
+    deferred: target,
+  };
+}
+
 export interface ScreenRect { x: number; y: number; width: number; height: number; }
 
 export function claimDetachedWindowCreation(pending: Set<string>, windowId: string): boolean {
@@ -369,6 +381,9 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     entryRules,
     entryRuleAlerts,
     settings: {
+      crosshairSyncEnabled: typeof value.settings?.crosshairSyncEnabled === "boolean"
+        ? value.settings.crosshairSyncEnabled
+        : fallback.settings.crosshairSyncEnabled,
       chartLabels: {
         showEma200TabDots: typeof savedChartLabels?.showEma200TabDots === "boolean"
           ? savedChartLabels.showEma200TabDots
@@ -506,7 +521,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
   const entryRuleAlerts = sameEntryRuleAlerts(current.entryRuleAlerts, incoming.entryRuleAlerts)
     ? current.entryRuleAlerts
     : incoming.entryRuleAlerts;
-  const settings = current.settings.chartLabels.showEma200TabDots === incoming.settings.chartLabels.showEma200TabDots
+  const settings = current.settings.crosshairSyncEnabled === incoming.settings.crosshairSyncEnabled
+    && current.settings.chartLabels.showEma200TabDots === incoming.settings.chartLabels.showEma200TabDots
     && current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
     && current.settings.chartLabels.showRMultiple === incoming.settings.chartLabels.showRMultiple
     && current.settings.chartLabels.fontSize === incoming.settings.chartLabels.fontSize

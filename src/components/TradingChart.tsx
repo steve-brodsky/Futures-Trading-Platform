@@ -7,7 +7,7 @@ import {
 import type { AlertDurationSeconds, AlertSound, Bar, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, EconomicEvent, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown } from "../lib/candleCountdown";
-import { nearestCandleExtreme } from "../lib/crosshair";
+import { nearestCandleExtreme, syncedCrosshairPlotTime, type ChartCrosshairUpdate } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
 import { HorizontalRayPrimitive } from "../lib/horizontalRay";
@@ -75,6 +75,8 @@ interface Props {
   onDeleteDrawing: (id: string) => void;
   initialVisibleRange?: { from: number; to: number };
   onVisibleRangeChange?: (range: { from: number; to: number }) => void;
+  crosshairSyncEnabled: boolean;
+  onCrosshairSyncChange: (update: ChartCrosshairUpdate) => void;
   onTimezoneChange: (timezone: ChartTimezone) => void;
   onLoadOlder: () => void;
 }
@@ -88,6 +90,8 @@ export interface TradingChartCapture {
 
 export interface TradingChartHandle {
   captureEntryScreenshot: () => Promise<TradingChartCapture>;
+  applySyncedCrosshair: (sourceTime: number, price: number) => void;
+  clearSyncedCrosshair: () => void;
 }
 
 const asTime = (time: number) => time as Time;
@@ -111,7 +115,7 @@ type PositionDragKind = "body" | "entry" | "stop" | "target" | "start" | "end";
 
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, crosshairSyncEnabled, onCrosshairSyncChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const economicEventTooltipId = useId();
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -132,6 +136,11 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const sourceTimeByPlotTimeRef = useRef<Map<number, number>>(new Map());
   const plotPointsRef = useRef<Array<{ plotTime: number; sourceTime: number }>>([]);
   const magnetEnabledRef = useRef(magnetEnabled);
+  const crosshairSyncEnabledRef = useRef(crosshairSyncEnabled);
+  const crosshairSyncChangeRef = useRef(onCrosshairSyncChange);
+  const syncedCrosshairRef = useRef<{ sourceTime: number; price: number } | null>(null);
+  const installedPlotTimesRef = useRef(new Set<number>());
+  const applySyncedCrosshairRef = useRef<() => void>(() => undefined);
   const activeToolRef = useRef(activeTool);
   const drawingsRef = useRef(drawings);
   const economicEventsRef = useRef(economicEvents);
@@ -197,6 +206,19 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   ]));
   const tradeLineMetrics = buildTradeLineMetrics(tradeLines.map((line) => ({ ...line, price: displayPrices.get(line.id) ?? line.price })), pointValue, currentPrice, projectedEntryPrice);
 
+  applySyncedCrosshairRef.current = () => {
+    const requested = syncedCrosshairRef.current;
+    const chart = chartRef.current;
+    const priceSeries = priceRef.current;
+    if (!requested || !chart || !priceSeries) return;
+    const plotTime = syncedCrosshairPlotTime(requested.sourceTime, plotPointsRef.current, kind, timeframe, barsRef.current.at(-1)?.time);
+    if (plotTime == null || !installedPlotTimesRef.current.has(plotTime)) {
+      chart.clearCrosshairPosition();
+      return;
+    }
+    chart.setCrosshairPosition(roundToTick(requested.price, minMove), asTime(plotTime), priceSeries);
+  };
+
   useImperativeHandle(ref, () => ({
     captureEntryScreenshot: async () => {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -255,6 +277,15 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       if (approximateDataUrlBytes(dataUrl) > ENTRY_SCREENSHOT_MAX_BYTES) throw new Error("The entry chart exceeds the 5 MB cloud limit.");
       return { dataUrl, width: output.width, height: output.height, capturedAt: new Date().toISOString() };
     },
+    applySyncedCrosshair: (sourceTime: number, price: number) => {
+      if (!Number.isFinite(sourceTime) || !Number.isFinite(price)) return;
+      syncedCrosshairRef.current = { sourceTime, price };
+      applySyncedCrosshairRef.current();
+    },
+    clearSyncedCrosshair: () => {
+      syncedCrosshairRef.current = null;
+      chartRef.current?.clearCrosshairPosition();
+    },
   }));
 
   barsRef.current = bars;
@@ -263,6 +294,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   sourceTimeByPlotTimeRef.current = sourceTimeMap;
   plotPointsRef.current = plotPoints;
   magnetEnabledRef.current = magnetEnabled;
+  crosshairSyncEnabledRef.current = crosshairSyncEnabled;
+  crosshairSyncChangeRef.current = onCrosshairSyncChange;
   activeToolRef.current = activeTool;
   drawingsRef.current = drawings;
   economicEventsRef.current = economicEvents;
@@ -430,10 +463,16 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         }, null);
         setHoveredGex(nearest && nearest.distance <= 10 ? nearest.level : null);
       } else setHoveredGex(null);
-      if (!param.time) return setHovered(null);
+      if (!param.time || !param.point) {
+        setHovered(null);
+        if (!settingCrosshair && param.sourceEvent && crosshairSyncEnabledRef.current) {
+          crosshairSyncChangeRef.current({ visible: false });
+        }
+        return;
+      }
       const bar = displayItemsRef.current.get(Number(param.time)) ?? null;
       setHovered(bar);
-      if (settingCrosshair || !param.sourceEvent || !param.point) return;
+      if (settingCrosshair || !param.sourceEvent) return;
       let snappedPrice: number | null = null;
       if (magnetEnabledRef.current && (kind === "candles" || kind === "renko") && bar) {
         const highY = priceSeries.priceToCoordinate(bar.high);
@@ -453,6 +492,13 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       settingCrosshair = true;
       chart.setCrosshairPosition(snappedPrice, param.time, priceSeries);
       settingCrosshair = false;
+      if (crosshairSyncEnabledRef.current) {
+        crosshairSyncChangeRef.current({
+          visible: true,
+          sourceTime: sourceTimeByPlotTimeRef.current.get(Number(param.time)) ?? Number(param.time),
+          price: snappedPrice,
+        });
+      }
     });
     chart.subscribeClick((param) => {
       if (!param.point) { setDrawingMenu(null); setSelectedPositionId(null); return; }
@@ -528,6 +574,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
 
     previousBars.current = [];
     previousPlotPoints.current = [];
+    installedPlotTimesRef.current.clear();
     firstData.current = true;
     const syncLabels = () => syncTradeLabelsRef.current();
     const resizeObserver = new ResizeObserver(syncLabels);
@@ -539,7 +586,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       resizeObserver.disconnect();
       host.current?.removeEventListener("wheel", syncLabels);
       host.current?.removeEventListener("pointermove", syncLabels);
-      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null; gexPrimitiveRef.current = null;
+      chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; installedPlotTimesRef.current.clear(); indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null; gexPrimitiveRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone, renkoSettings.brickSizeTicks, renkoSettings.priceSource, renkoSettings.reversalBricks, pointAndFigureSettings.boxSizeTicks, pointAndFigureSettings.priceSource, pointAndFigureSettings.reversalBoxes]);
 
@@ -752,6 +799,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     setShowScrollToLatest(Boolean(visibleRange && Number(visibleRange.to) < displayItems.length - 1));
     previousBars.current = bars;
     previousPlotPoints.current = plotPoints;
+    installedPlotTimesRef.current = new Set(plotPoints.map((item) => item.plotTime));
+    applySyncedCrosshairRef.current();
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   }, [bars, kind, chartGeneration, displayItems, renkoBricks, pointAndFigureColumns, pointAndFigureSettings.boxSizeTicks, minMove]);
 

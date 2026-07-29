@@ -570,6 +570,7 @@ export interface ContractRollAlertSettings {
 }
 
 export interface WorkspaceSettings {
+  crosshairSyncEnabled: boolean;
   chartLabels: ChartLabelSettings;
   chartSessions: ChartSessionSettings;
   chartEconomicEvents: ChartEconomicEventSettings;

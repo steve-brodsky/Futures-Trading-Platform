@@ -6,7 +6,7 @@ import { DEFAULT_CHART_SESSION_SETTINGS } from "./chartSessions";
 import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./economicEvents";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
-import { chartLayoutCapacity, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAX_CHART_TABS, moveTab, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
+import { chartLayoutCapacity, chartPaneMountPlan, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAX_CHART_TABS, moveTab, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./chartWorkspace";
 import { DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS } from "./contractRoll";
 
 const fallback: WorkspaceState = {
@@ -17,7 +17,7 @@ const fallback: WorkspaceState = {
   drawings: {},
   gexSelections: {},
   watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
-  settings: { chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
 
 describe("chart workspace", () => {
@@ -209,6 +209,17 @@ describe("chart workspace", () => {
     expect(invalid.settings.orderTicket).toMatchObject({ sizingMode: "contracts", riskSizingPolicy: "strict", riskAmount: undefined });
   });
 
+  it("defaults legacy crosshair sync off and preserves an explicit saved toggle", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, settings: { ...fallback.settings, crosshairSyncEnabled: undefined } }, fallback);
+    expect(legacy.settings.crosshairSyncEnabled).toBe(false);
+
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, crosshairSyncEnabled: true },
+    }, fallback);
+    expect(saved.settings.crosshairSyncEnabled).toBe(true);
+  });
+
   it("normalizes contract rollover alert audio settings for legacy and invalid saves", () => {
     const legacy = normalizeChartWorkspace({
       ...fallback,
@@ -244,6 +255,18 @@ describe("chart workspace", () => {
     }, fallback);
     const result = stabilizeChartWorkspace(current, broadcast);
     expect(result.settings.chartLabels).toEqual({ showEma200TabDots: false, showDollarAmount: true, showRMultiple: false, fontSize: 13 });
+    expect(result.settings).not.toBe(current.settings);
+  });
+
+  it("accepts a crosshair-sync toggle from another chart window", () => {
+    const current = normalizeChartWorkspace(fallback, fallback);
+    const broadcast = normalizeChartWorkspace({
+      ...current,
+      revision: 2,
+      settings: { ...current.settings, crosshairSyncEnabled: true },
+    }, fallback);
+    const result = stabilizeChartWorkspace(current, broadcast);
+    expect(result.settings.crosshairSyncEnabled).toBe(true);
     expect(result.settings).not.toBe(current.settings);
   });
 
@@ -557,5 +580,22 @@ describe("chart workspace", () => {
     const result = stabilizeChartWorkspace(current, incoming);
     expect(result.drawings.MES).not.toBe(current.drawings.MES);
     expect(result.drawings.MES[0]).toMatchObject({ alert: { direction: "below" } });
+  });
+
+  it("stages newly visible panes so chart canvases mount after the layout frame", () => {
+    expect(chartPaneMountPlan(["chart-1"], ["chart-1", "chart-2"])).toEqual({
+      immediate: ["chart-1"],
+      deferred: ["chart-1", "chart-2"],
+    });
+    expect(chartPaneMountPlan(["chart-1", "chart-2"], ["chart-1"])).toEqual({
+      immediate: ["chart-1"],
+    });
+  });
+
+  it("keeps one retained pane mounted while replacing another visible pane", () => {
+    expect(chartPaneMountPlan(["chart-1", "chart-2"], ["chart-1", "chart-3"])).toEqual({
+      immediate: ["chart-1"],
+      deferred: ["chart-1", "chart-3"],
+    });
   });
 });

@@ -41,6 +41,7 @@ function workspace(): WorkspaceState {
     entryRules: defaultEntryRules(),
     entryRuleAlerts: defaultEntryRuleAlerts(),
     settings: {
+      crosshairSyncEnabled: false,
       chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 12 },
       chartSessions: DEFAULT_CHART_SESSION_SETTINGS,
       chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS,
@@ -61,6 +62,7 @@ describe("cloud preferences", () => {
     expect(serialized).toContain("commissionPerContractSide");
     expect(profile.categories.chart_display.sessionShading).toEqual(original.settings.chartSessions);
     expect(profile.categories.chart_display.economicEvents).toEqual(original.settings.chartEconomicEvents);
+    expect(profile.categories.chart_display.crosshairSyncEnabled).toBe(false);
     expect(profile.categories.order_entry.entryRuleAlerts).toEqual(original.entryRuleAlerts);
     expect(profile.categories.order_entry.contractRollAlerts).toEqual(original.settings.contractRollAlerts);
     expect(profile.categories.alerts.entryRules).toBeUndefined();
@@ -99,6 +101,7 @@ describe("cloud preferences", () => {
       windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", splitRatios: { "two-columns": [0.7] }, detached: false, x: 999, y: 999 }],
       settings: {
         ...local.settings,
+        crosshairSyncEnabled: true,
         chartSessions: { ...local.settings.chartSessions, colorMode: "by-session", asiaColor: "#112233" },
         chartEconomicEvents: { ...local.settings.chartEconomicEvents, enabled: true, impactVisibility: { ...local.settings.chartEconomicEvents.impactVisibility, low: false } },
         contractRollAlerts: { audioEnabled: false, sound: "pulse", durationSeconds: 3 },
@@ -109,6 +112,7 @@ describe("cloud preferences", () => {
     expect(merged.watchlist.map((item) => item.symbol)).toEqual(["MNQU26"]);
     expect(merged.recentSymbols.map((item) => item.symbol)).toEqual(["AAPL"]);
     expect(merged.settings.journal.commissionPerContractSide).toBe(1.25);
+    expect(merged.settings.crosshairSyncEnabled).toBe(true);
     expect(merged.settings.chartSessions).toMatchObject({ colorMode: "by-session", asiaColor: "#112233" });
     expect(merged.settings.chartEconomicEvents).toEqual({ enabled: true, impactVisibility: { high: true, medium: true, low: false, unrated: true } });
     expect(merged.settings.contractRollAlerts).toEqual({ audioEnabled: false, sound: "pulse", durationSeconds: 3 });
@@ -132,6 +136,7 @@ describe("cloud preferences", () => {
   it("normalizes malformed downloaded values", () => {
     const local = workspace();
     const profile = cloudPreferenceProfile(local);
+    profile.categories.chart_display.crosshairSyncEnabled = "yes";
     profile.categories.chart_display.fontSize = 900;
     profile.categories.chart_display.sessionShading = { colorMode: "invalid", asiaColor: "red" };
     profile.categories.chart_display.economicEvents = { enabled: "yes", impactVisibility: { high: false, medium: "yes" } };
@@ -143,6 +148,7 @@ describe("cloud preferences", () => {
     };
     profile.categories.order_entry.entryRuleAlerts = { long: { enabled: true, sound: "invalid", durationSeconds: 99 } };
     const merged = applyCloudPreferenceProfile(local, profile);
+    expect(merged.settings.crosshairSyncEnabled).toBe(false);
     expect(merged.settings.chartLabels.fontSize).toBe(16);
     expect(merged.settings.chartSessions).toEqual(DEFAULT_CHART_SESSION_SETTINGS);
     expect(merged.settings.chartEconomicEvents).toEqual({ enabled: false, impactVisibility: { high: false, medium: true, low: true, unrated: true } });

@@ -70,6 +70,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
         symbols: workspace.watchlist.map((instrument) => instrument.symbol),
       },
       chart_display: {
+        crosshairSyncEnabled: workspace.settings.crosshairSyncEnabled,
         ...workspace.settings.chartLabels,
         sessionShading: { ...workspace.settings.chartSessions },
         economicEvents: {
@@ -175,6 +176,9 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     // alerts.entryRules fallback preserves profiles written by older clients.
     entryRuleAlerts: normalizeEntryRuleAlerts(orderEntry?.entryRuleAlerts ?? alerts?.entryRules ?? current.entryRuleAlerts),
     settings: {
+      crosshairSyncEnabled: typeof chartDisplay?.crosshairSyncEnabled === "boolean"
+        ? chartDisplay.crosshairSyncEnabled
+        : current.settings.crosshairSyncEnabled,
       chartLabels: { ...current.settings.chartLabels, ...chartDisplay },
       chartSessions: { ...current.settings.chartSessions, ...sessionShading },
       chartEconomicEvents: {
