@@ -298,13 +298,10 @@ pub struct RiskPolicyStatus {
     pub environment: TradingEnvironment,
     pub account_id: String,
     pub policy: RiskPolicy,
-    pub live_armed: bool,
-    pub session_id: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct RiskContext<'a> {
-    pub environment: &'a TradingEnvironment,
     pub draft: &'a OrderDraft,
     pub meta: &'a SymbolMeta,
     pub contract_metadata: &'a HashMap<String, SymbolMeta>,
@@ -312,7 +309,6 @@ pub struct RiskContext<'a> {
     pub orders: &'a [OrderUpdate],
     pub balances: &'a [AccountBalance],
     pub market_price: Option<f64>,
-    pub live_armed: bool,
     pub recent_order_count: Option<u32>,
     pub consecutive_losses: Option<(u32, DateTime<Utc>)>,
     pub now: DateTime<Utc>,
@@ -379,20 +375,16 @@ impl ServiceLifecycle {
 
 pub struct SafetyService {
     account_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    live_armed: Mutex<HashSet<String>>,
     pending_reconciliation: Mutex<HashSet<String>>,
     pub lifecycle: Arc<ServiceLifecycle>,
-    session_id: String,
 }
 
 impl SafetyService {
     pub fn new(_db_path: PathBuf) -> Self {
         Self {
             account_locks: Mutex::new(HashMap::new()),
-            live_armed: Mutex::new(HashSet::new()),
             pending_reconciliation: Mutex::new(HashSet::new()),
             lifecycle: Arc::new(ServiceLifecycle::default()),
-            session_id: uuid::Uuid::new_v4().to_string(),
         }
     }
 
@@ -412,34 +404,6 @@ impl SafetyService {
         lock.lock_owned().await
     }
 
-    pub async fn set_live_armed(
-        &self,
-        environment: &TradingEnvironment,
-        account_id: &str,
-        armed: bool,
-    ) {
-        let key = account_key(environment, account_id);
-        let mut values = self.live_armed.lock().await;
-        if armed && matches!(environment, TradingEnvironment::Live) {
-            values.insert(key);
-        } else {
-            values.remove(&key);
-        }
-    }
-
-    pub async fn is_live_armed(&self, environment: &TradingEnvironment, account_id: &str) -> bool {
-        matches!(environment, TradingEnvironment::Live)
-            && self
-                .live_armed
-                .lock()
-                .await
-                .contains(&account_key(environment, account_id))
-    }
-
-    pub async fn disarm_all(&self) {
-        self.live_armed.lock().await.clear();
-    }
-
     pub async fn enqueue_reconciliation(&self, mutation_id: &str) {
         self.pending_reconciliation
             .lock()
@@ -452,14 +416,11 @@ impl SafetyService {
         environment: TradingEnvironment,
         account_id: String,
         policy: RiskPolicy,
-        armed: bool,
     ) -> RiskPolicyStatus {
         RiskPolicyStatus {
             environment,
             account_id,
             policy,
-            live_armed: armed,
-            session_id: self.session_id.clone(),
         }
     }
 }
@@ -908,9 +869,6 @@ pub fn evaluate_risk(policy: &RiskPolicy, context: RiskContext<'_>) -> RiskDecis
         }
     }
 
-    if matches!(context.environment, TradingEnvironment::Live) && !context.live_armed {
-        reasons.push("LIVE trading is not armed for this account and application session".into());
-    }
     if policy.max_quantity_per_order.enabled && draft.quantity > policy.max_quantity_per_order.value
     {
         reasons.push(format!(
@@ -1532,7 +1490,6 @@ mod tests {
         let decision = evaluate_risk(
             &policy,
             RiskContext {
-                environment: &TradingEnvironment::Live,
                 draft: &draft,
                 meta: &meta(),
                 contract_metadata: &HashMap::from([("MESZ26".into(), meta())]),
@@ -1540,7 +1497,6 @@ mod tests {
                 orders: &[],
                 balances: &[],
                 market_price: Some(6000.0),
-                live_armed: true,
                 recent_order_count: Some(0),
                 consecutive_losses: Some((0, Utc::now())),
                 now: Utc::now(),
@@ -1578,7 +1534,6 @@ mod tests {
         let reducing = evaluate_risk(
             &policy,
             RiskContext {
-                environment: &TradingEnvironment::Live,
                 draft: &close,
                 meta: &meta(),
                 contract_metadata: &HashMap::from([("MESZ26".into(), meta())]),
@@ -1586,7 +1541,6 @@ mod tests {
                 orders: &[],
                 balances: &[],
                 market_price: Some(6000.0),
-                live_armed: false,
                 recent_order_count: None,
                 consecutive_losses: None,
                 now: Utc::now(),
@@ -1594,6 +1548,29 @@ mod tests {
         );
         assert!(reducing.allowed);
         assert!(!reducing.risk_increasing);
+    }
+
+    #[test]
+    fn live_risk_increasing_orders_do_not_require_session_arming() {
+        let order = draft();
+        let decision = evaluate_risk(
+            &RiskPolicy::default(),
+            RiskContext {
+                draft: &order,
+                meta: &meta(),
+                contract_metadata: &HashMap::from([("MESZ26".into(), meta())]),
+                positions: &[],
+                orders: &[],
+                balances: &[],
+                market_price: Some(6000.0),
+                recent_order_count: Some(0),
+                consecutive_losses: Some((0, Utc::now())),
+                now: Utc::now(),
+            },
+        );
+
+        assert!(decision.risk_increasing);
+        assert!(decision.allowed, "{:?}", decision.reasons);
     }
 
     #[test]
@@ -1611,7 +1588,6 @@ mod tests {
             evaluate_risk(
                 &RiskPolicy::default(),
                 RiskContext {
-                    environment: &TradingEnvironment::Sim,
                     draft,
                     meta: &contract,
                     contract_metadata: &metadata,
@@ -1619,7 +1595,6 @@ mod tests {
                     orders: &[],
                     balances: &[],
                     market_price: Some(6000.0),
-                    live_armed: true,
                     recent_order_count: Some(0),
                     consecutive_losses: Some((0, evaluated_at)),
                     now: evaluated_at,
@@ -1805,7 +1780,6 @@ mod tests {
         let decision = evaluate_risk(
             &policy,
             RiskContext {
-                environment: &TradingEnvironment::Live,
                 draft: &order,
                 meta: &meta(),
                 contract_metadata: &metadata,
@@ -1813,7 +1787,6 @@ mod tests {
                 orders: &[],
                 balances: &[balance],
                 market_price: Some(6000.0),
-                live_armed: true,
                 recent_order_count: Some(1),
                 consecutive_losses: Some((2, Utc::now())),
                 now: Utc::now(),

@@ -14,7 +14,7 @@ const nativeRecordCommands = new Set([
   "configure_journal", "disconnect_journal", "set_journal_backfill_start", "reset_journal_now",
   "set_journal_commission", "save_journal_entry_screenshot", "update_journal_annotation",
   "ingest_journal_orders", "place_order", "replace_order", "close_position", "cancel_order",
-  "save_risk_policy", "set_live_trading_armed", "reconcile_broker_mutation", "kill_switch",
+  "save_risk_policy", "reconcile_broker_mutation", "kill_switch",
 ]);
 
 async function native<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -182,7 +182,7 @@ const rawApi = {
   async riskPolicy(accountId: string): Promise<RiskPolicyStatus> {
     if (isTauri) return native("get_risk_policy", { accountId });
     return {
-      environment: "sim", accountId, liveArmed: false, sessionId: "browser-demo",
+      environment: "sim", accountId,
       policy: {
         maxQuantityPerOrder: { enabled: false, value: 1 },
         maxTotalOpenContracts: { enabled: false, value: 1 },
@@ -199,10 +199,6 @@ const rawApi = {
   async saveRiskPolicy(accountId: string, policy: RiskPolicy): Promise<RiskPolicyStatus> {
     if (isTauri) return native("save_risk_policy", { accountId, policy });
     return { ...(await this.riskPolicy(accountId)), policy };
-  },
-  async setLiveTradingArmed(accountId: string, armed: boolean, confirmation: string): Promise<RiskPolicyStatus> {
-    if (isTauri) return native("set_live_trading_armed", { accountId, armed, confirmation });
-    return { ...(await this.riskPolicy(accountId)), liveArmed: armed };
   },
   async brokerMutations(environment: TradingEnvironment, accountId: string): Promise<BrokerMutationIntent[]> {
     return isTauri ? native("list_broker_mutations", { environment, accountId }) : [];

@@ -255,7 +255,6 @@ async fn logout_schwab(state: State<'_, NativeState>) -> Result<(), AppError> {
     shutdown_native_services(&state).await;
     state.schwab.clear_access_token().await;
     let result = storage::clear_schwab_refresh_token();
-    state.safety.disarm_all().await;
     state.safety.lifecycle.finish_transition();
     result?;
     Ok(())
@@ -346,7 +345,6 @@ async fn logout(state: State<'_, NativeState>) -> Result<(), AppError> {
     shutdown_native_services(&state).await;
     state.api.clear_token().await;
     let result = storage::delete_secret("refresh_token");
-    state.safety.disarm_all().await;
     state.safety.lifecycle.finish_transition();
     result?;
     let mut record = audit::AuditRecord::completed(
@@ -376,7 +374,6 @@ async fn set_environment(
     shutdown_native_services(&state).await;
     let environment_key = environment.key().to_string();
     state.api.set_environment(environment).await;
-    state.safety.disarm_all().await;
     state.safety.lifecycle.finish_transition();
     let reconcile_api = state.api.clone();
     let reconcile_db = state.db_path.clone();
@@ -2667,10 +2664,6 @@ async fn native_order_risk(
     } else {
         Some(0)
     };
-    let armed = state
-        .safety
-        .is_live_armed(environment, &order.account_id)
-        .await;
     let consecutive_losses = if policy.consecutive_loss_cooldown.enabled {
         match safety::consecutive_losses(&state.db_path, environment, &order.account_id) {
             Ok(Some(value)) => Some(value),
@@ -2686,7 +2679,6 @@ async fn native_order_risk(
     let mut decision = safety::evaluate_risk(
         &policy,
         safety::RiskContext {
-            environment,
             draft: order,
             meta: &meta,
             contract_metadata: &contract_metadata,
@@ -2694,7 +2686,6 @@ async fn native_order_risk(
             orders: &orders,
             balances: &balances,
             market_price,
-            live_armed: armed,
             recent_order_count: recent_count,
             consecutive_losses,
             now: Utc::now(),
@@ -3092,8 +3083,7 @@ async fn get_risk_policy(
 ) -> Result<safety::RiskPolicyStatus, AppError> {
     let environment = state.api.environment().await;
     let policy = safety::load_policy(&state.db_path, &environment, &account_id)?;
-    let armed = state.safety.is_live_armed(&environment, &account_id).await;
-    Ok(state.safety.status(environment, account_id, policy, armed))
+    Ok(state.safety.status(environment, account_id, policy))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -3104,35 +3094,7 @@ async fn save_risk_policy(
 ) -> Result<safety::RiskPolicyStatus, AppError> {
     let environment = state.api.environment().await;
     safety::save_policy(&state.db_path, &environment, &account_id, &policy)?;
-    state
-        .safety
-        .set_live_armed(&environment, &account_id, false)
-        .await;
-    Ok(state.safety.status(environment, account_id, policy, false))
-}
-
-#[tauri::command(rename_all = "camelCase")]
-async fn set_live_trading_armed(
-    account_id: String,
-    armed: bool,
-    confirmation: String,
-    state: State<'_, NativeState>,
-) -> Result<safety::RiskPolicyStatus, AppError> {
-    let environment = state.api.environment().await;
-    if armed
-        && matches!(environment, TradingEnvironment::Live)
-        && confirmation.trim() != format!("ARM LIVE {account_id}")
-    {
-        return Err(AppError::Validation(format!(
-            "Type ARM LIVE {account_id} to arm LIVE trading"
-        )));
-    }
-    state
-        .safety
-        .set_live_armed(&environment, &account_id, armed)
-        .await;
-    let policy = safety::load_policy(&state.db_path, &environment, &account_id)?;
-    Ok(state.safety.status(environment, account_id, policy, armed))
+    Ok(state.safety.status(environment, account_id, policy))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5756,7 +5718,6 @@ pub fn run() {
             cancel_order,
             get_risk_policy,
             save_risk_policy,
-            set_live_trading_armed,
             list_broker_mutations,
             reconcile_broker_mutation,
             kill_switch,

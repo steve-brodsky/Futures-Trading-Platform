@@ -3733,7 +3733,6 @@ function TradingApp() {
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
       {!isDetached && <button className={`environment-badge ${environment}`} title="TradeStation futures environment" onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
-      {!isDetached && environment === "live" && <button className={`risk-arm-chip ${riskStatus?.liveArmed ? "armed" : "disarmed"}`} disabled={environmentTransitioning} title="Session-only LIVE trading arm state" onClick={() => setSettingsOpen(true)}><LockKeyhole size={12} />{riskStatus?.liveArmed ? "LIVE ARMED" : "LIVE DISARMED"}</button>}
       <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => activeTab.symbol.provider === "schwab" ? setSettingsOpen(true) : setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
@@ -4244,20 +4243,9 @@ function RiskSafetySettings({ account, environment, status, transitioning, onSta
     try {
       const next = await api.saveRiskPolicy(account.id, policy);
       onStatus(next);
-      onNotify("Native risk policy saved. LIVE trading was disarmed.");
+      onNotify("Native risk policy saved.");
     } catch (error) { onNotify(String(error)); }
     finally { setSaving(false); }
-  };
-  const toggleArmed = async () => {
-    const armed = !status.liveArmed;
-    const confirmation = armed && environment === "live"
-      ? window.prompt(`Type ARM LIVE ${account.id} to arm LIVE trading for this session.`) ?? ""
-      : "";
-    if (armed && environment === "live" && confirmation !== `ARM LIVE ${account.id}`) return;
-    try {
-      onStatus(await api.setLiveTradingArmed(account.id, armed, confirmation));
-      onNotify(armed ? "LIVE trading armed for this application session." : "LIVE trading disarmed.");
-    } catch (error) { onNotify(String(error)); }
   };
   const runKillSwitch = async () => {
     const required = environment === "live" ? `FLATTEN LIVE ${account.id}` : "FLATTEN";
@@ -4293,7 +4281,6 @@ function RiskSafetySettings({ account, environment, status, transitioning, onSta
 
   return <section className="settings-section risk-safety-settings" aria-labelledby="native-risk-settings">
     <header><span>Safety</span><h3 id="native-risk-settings">Native risk & recovery</h3><p>Rust-enforced account limits. Every rule is disabled until explicitly enabled.</p></header>
-    <div className={`risk-arm-state ${status.liveArmed ? "armed" : "disarmed"}`}><LockKeyhole size={15} /><span><strong>{environment === "live" ? (status.liveArmed ? "LIVE trading armed" : "LIVE trading disarmed") : "SIM environment"}</strong><small>{environment === "live" ? "Arming expires on environment change, logout, or app restart." : "LIVE will require a new typed confirmation."}</small></span>{environment === "live" && <button type="button" disabled={transitioning || saving} onClick={toggleArmed}>{status.liveArmed ? "Disarm" : "Arm LIVE"}</button>}</div>
     <RiskLimitRow label="Maximum quantity per order" limit={policy.maxQuantityPerOrder} step={1} onChange={(patch) => updateLimit("maxQuantityPerOrder", patch)} />
     <RiskLimitRow label="Maximum total open contracts" limit={policy.maxTotalOpenContracts} step={1} onChange={(patch) => updateLimit("maxTotalOpenContracts", patch)} />
     <RiskLimitRow label="Maximum risk per trade ($)" limit={policy.maxRiskPerTrade} step={1} onChange={(patch) => updateLimit("maxRiskPerTrade", patch)} />

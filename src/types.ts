@@ -360,8 +360,6 @@ export interface RiskPolicyStatus {
   environment: TradingEnvironment;
   accountId: string;
   policy: RiskPolicy;
-  liveArmed: boolean;
-  sessionId: string;
 }
 
 export interface KillSwitchItemResult {
