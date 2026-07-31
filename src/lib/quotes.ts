@@ -1,13 +1,5 @@
 import type { Bar, Quote, Timeframe } from "../types";
-
-const timeframeSeconds: Partial<Record<Timeframe, number>> = {
-  "1m": 60,
-  "5m": 5 * 60,
-  "15m": 15 * 60,
-  "30m": 30 * 60,
-  "1h": 60 * 60,
-  "4h": 4 * 60 * 60,
-};
+import { timeframeSeconds } from "./timeframes";
 
 /** Locate the completed session close immediately before the current futures session. */
 export function previousSessionClose(bars: Bar[], timeframe: Timeframe): number | undefined {
@@ -17,7 +9,7 @@ export function previousSessionClose(bars: Bar[], timeframe: Timeframe): number 
     const latest = valid.at(-1)!;
     return latest.realtime && valid.length > 1 ? valid.at(-2)!.close : latest.close;
   }
-  const interval = timeframeSeconds[timeframe];
+  const interval = timeframeSeconds(timeframe);
   if (!interval) return undefined;
   const sessionBreak = Math.max(30 * 60, interval * 1.5);
   for (let index = valid.length - 1; index > 0; index -= 1) {

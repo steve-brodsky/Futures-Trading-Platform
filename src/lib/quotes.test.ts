@@ -36,6 +36,11 @@ describe("previous session close", () => {
     expect(previousSessionClose(bars, "5m")).toBe(101);
   });
 
+  it("uses custom-minute spacing when locating a session break", () => {
+    const bars = [bar(0, 100), bar(2_700, 101), bar(10_000, 102)];
+    expect(previousSessionClose(bars, "45m")).toBe(101);
+  });
+
   it("uses the prior daily bar while the latest daily bar is realtime", () => {
     expect(previousSessionClose([bar(0, 100), bar(86_400, 104, true)], "D")).toBe(100);
     expect(previousSessionClose([bar(0, 100)], "D")).toBe(100);

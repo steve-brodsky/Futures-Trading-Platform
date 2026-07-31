@@ -13,6 +13,7 @@ function workspace(): WorkspaceState {
   return {
     revision: 4,
     environment: "live",
+    customMinuteTimeframes: [],
     tabs: [{
       id: "chart-1",
       symbol: { provider: "tradestation", symbol: "@MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: 0.25, pointValue: 5 },
@@ -55,10 +56,12 @@ function workspace(): WorkspaceState {
 describe("cloud preferences", () => {
   it("serializes only explicitly synchronized fields", () => {
     const original = workspace();
+    original.customMinuteTimeframes = [7, 45];
     const profile = cloudPreferenceProfile(original);
     const serialized = JSON.stringify(profile);
     expect(serialized).toContain("MESU26");
     expect(profile.categories.chart_workspace.recentSymbols).toEqual(original.recentSymbols);
+    expect(profile.categories.chart_workspace.customMinuteTimeframes).toEqual([7, 45]);
     expect(serialized).toContain("commissionPerContractSide");
     expect(profile.categories.chart_display.sessionShading).toEqual(original.settings.chartSessions);
     expect(profile.categories.chart_display.economicEvents).toEqual(original.settings.chartEconomicEvents);
@@ -122,6 +125,17 @@ describe("cloud preferences", () => {
     expect(merged.confirmOrders).toBe(false);
     expect(merged.windows[0]).toMatchObject({ x: 120, y: 90, width: 1400, height: 900, maximized: true });
     expect(merged.windows[0].splitRatios?.["two-columns"]).toEqual([0.42]);
+  });
+
+  it("round-trips saved custom timeframes without replacing an active session-only interval", () => {
+    const local = workspace();
+    local.tabs[0].timeframe = "7m";
+    const remote = workspace();
+    remote.customMinuteTimeframes = [45];
+    remote.tabs[0].timeframe = "45m";
+    const merged = applyCloudPreferenceProfile(local, cloudPreferenceProfile(remote), [7]);
+    expect(merged.customMinuteTimeframes).toEqual([45]);
+    expect(merged.tabs[0].timeframe).toBe("7m");
   });
 
   it("round-trips Schwab index metadata through cloud preferences", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Bar, ChartTabState, Timeframe } from "../types";
+import type { AlertTimeframe, Bar, ChartTabState, Timeframe } from "../types";
 import {
   defaultEma200Alert,
   deriveEma200TabPositions,
@@ -22,7 +22,7 @@ function bars(last = 101): Bar[] {
   }));
 }
 
-function tab(id: string, symbol: string, timeframe: Timeframe, enabled: Timeframe[]): ChartTabState {
+function tab(id: string, symbol: string, timeframe: Timeframe, enabled: AlertTimeframe[]): ChartTabState {
   const ema200Alert = defaultEma200Alert();
   enabled.forEach((item) => { ema200Alert[item].enabled = true; });
   return {

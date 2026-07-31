@@ -4,6 +4,7 @@ import { candleEndTime, formatCandleCountdown } from "./candleCountdown";
 describe("candle countdown", () => {
   it("counts down intraday candles from their opening timestamp", () => {
     expect(candleEndTime(1_000, "5m")).toBe(1_300);
+    expect(candleEndTime(1_000, "45m")).toBe(3_700);
     expect(formatCandleCountdown(1_000, "5m", 1_001_000)).toBe("04:59");
     expect(formatCandleCountdown(1_000, "4h", 1_593_000)).toBe("03:50:07");
   });

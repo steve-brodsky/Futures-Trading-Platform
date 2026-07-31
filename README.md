@@ -11,7 +11,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 
 - Candlestick, line, area, fixed-tick Renko, and Point & Figure charts powered by TradingView Lightweight Charts.
 - Per-tab Renko and Point & Figure construction settings, including close or deterministic high/low input and configurable reversal thresholds.
-- `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, daily, weekly, and monthly timeframes.
+- `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, daily, weekly, monthly, and user-defined 1–1,440 minute timeframes with optional preference sync.
 - Shared streaming bars across matching charts, EMA alerts, and VWAP consumers, plus a deduplicated quote stream for charts, contracts, and the watchlist.
 - Provider-aware symbol search and mixed futures/equity/index watchlists, with TradeStation routing futures and Schwab routing equities, ETFs, and indexes.
 - One shared Schwab Streamer connection for equity, ETF, and index candles and quotes, including extended-hours history and local `1h`/`4h` aggregation on New York calendar boundaries.

@@ -5,6 +5,7 @@ import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
 import { demoAccounts, demoBalance, demoBodBalance, demoOptionChain, demoOptionExpirations, demoOrders, demoPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
 import { CME_HOURS_URL, demoTradingTodaySnapshot, NYSE_HOURS_URL, TRADING_ECONOMICS_CALENDAR_URL } from "./tradingToday";
+import { timeframeSeconds } from "./timeframes";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -102,7 +103,8 @@ const rawApi = {
   async bars(provider: MarketDataProvider, symbol: string, timeframe: Timeframe): Promise<Bar[]> {
     if (isTauri) return native("get_bars", { provider, symbol, timeframe });
     const base = provider === "schwab" ? (symbol === "SPY" ? 632 : 215) : symbol.startsWith("MNQ") ? 23010 : symbol.startsWith("MCL") ? 67 : symbol.startsWith("MGC") ? 3450 : symbol.startsWith("MYM") ? 44920 : 6218;
-    return makeDemoBars(360, base, provider === "schwab" ? 0.12 : symbol.startsWith("MCL") ? 0.04 : symbol.startsWith("MGC") ? 0.7 : 1);
+    const intervalSeconds = timeframe === "M" ? 30 * 86_400 : timeframeSeconds(timeframe) ?? 60;
+    return makeDemoBars(360, base, provider === "schwab" ? 0.12 : symbol.startsWith("MCL") ? 0.04 : symbol.startsWith("MGC") ? 0.7 : 1, intervalSeconds);
   },
   async cachedBars(provider: MarketDataProvider, symbol: string, timeframe: Timeframe): Promise<Bar[]> {
     return isTauri ? native("load_cached_bars", { provider, symbol, timeframe }) : this.bars(provider, symbol, timeframe);

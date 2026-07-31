@@ -4,6 +4,7 @@ import type {
 import type { Bar } from "../types";
 import type { Timeframe } from "../types";
 import { nySessionVwap } from "./indicators";
+import { timeframeSeconds } from "./timeframes";
 
 export interface NySessionVwapPoint {
   time: number;
@@ -151,7 +152,7 @@ export class NySessionVwapPrimitive implements ISeriesPrimitive<Time> {
   }
 
   setData(sourceBars: Bar[], chartTimes: number[], color: string, timeframe: Timeframe) {
-    const finalBarSeconds = ({ "1m": 60, "5m": 300, "15m": 900, "30m": 1_800, "1h": 3_600, "4h": 14_400 } as Partial<Record<Timeframe, number>>)[timeframe] ?? 0;
+    const finalBarSeconds = timeframeSeconds(timeframe) ?? 0;
     if (this.sourceBars === sourceBars
       && this.sourceChartTimes === chartTimes
       && this.color === color

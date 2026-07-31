@@ -385,13 +385,13 @@ impl Schwab {
         timeframe: &str,
         before: Option<i64>,
     ) -> Result<Vec<Bar>, AppError> {
+        if minute_interval(timeframe).is_some() {
+            let source = self
+                .price_history(symbol, "day", 10, "minute", 1, before, None)
+                .await?;
+            return Ok(aggregate_bars(&source, timeframe));
+        }
         match timeframe {
-            "1m" | "5m" | "15m" | "30m" | "1h" | "4h" => {
-                let source = self
-                    .price_history(symbol, "day", 10, "minute", 1, before, None)
-                    .await?;
-                Ok(aggregate_bars(&source, timeframe))
-            }
             "D" | "W" | "M" => {
                 let mut daily = self
                     .price_history(symbol, "year", 20, "daily", 1, before, None)
@@ -510,35 +510,44 @@ pub fn aggregate_bars(source: &[Bar], timeframe: &str) -> Vec<Bar> {
 }
 
 pub fn bucket_start(epoch: i64, timeframe: &str) -> Option<i64> {
-    if timeframe == "1m" {
+    let interval = minute_interval(timeframe);
+    if interval == Some(1) {
         return Some(epoch.div_euclid(60) * 60);
     }
     let local = new_york_local(epoch)?;
     let date = local.date();
-    let naive = match timeframe {
-        "5m" | "15m" | "30m" | "1h" | "4h" => {
-            let minutes = match timeframe {
-                "5m" => 5,
-                "15m" => 15,
-                "30m" => 30,
-                "1h" => 60,
-                "4h" => 240,
-                _ => unreachable!(),
-            };
-            let minute_of_day = local.hour() * 60 + local.minute();
-            let bucket = minute_of_day / minutes * minutes;
-            date.and_hms_opt(bucket / 60, bucket % 60, 0)?
+    let naive = if let Some(minutes) = interval {
+        let minute_of_day = local.hour() * 60 + local.minute();
+        let minutes = u32::try_from(minutes).ok()?;
+        let bucket = minute_of_day / minutes * minutes;
+        date.and_hms_opt(bucket / 60, bucket % 60, 0)?
+    } else {
+        match timeframe {
+            "D" => date.and_hms_opt(0, 0, 0)?,
+            "W" => {
+                let monday =
+                    date - chrono::Duration::days(local.weekday().num_days_from_monday() as i64);
+                monday.and_hms_opt(0, 0, 0)?
+            }
+            "M" => date.with_day(1)?.and_hms_opt(0, 0, 0)?,
+            _ => return None,
         }
-        "D" => date.and_hms_opt(0, 0, 0)?,
-        "W" => {
-            let monday =
-                date - chrono::Duration::days(local.weekday().num_days_from_monday() as i64);
-            monday.and_hms_opt(0, 0, 0)?
-        }
-        "M" => date.with_day(1)?.and_hms_opt(0, 0, 0)?,
-        _ => return None,
     };
     Some(new_york_epoch(naive))
+}
+
+fn minute_interval(timeframe: &str) -> Option<usize> {
+    match timeframe {
+        "1h" => return Some(60),
+        "4h" => return Some(240),
+        _ => {}
+    }
+    let value = timeframe.strip_suffix('m')?;
+    if value.is_empty() || value.starts_with('0') {
+        return None;
+    }
+    let minutes = value.parse::<usize>().ok()?;
+    (1..=1_440).contains(&minutes).then_some(minutes)
 }
 
 pub fn current_new_york_day_range(now: i64) -> Option<(i64, i64)> {
@@ -1003,6 +1012,56 @@ fn truncate(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arbitrary_minute_intervals_align_to_new_york_midnight() {
+        let source = new_york_epoch(
+            NaiveDate::from_ymd_opt(2026, 7, 20)
+                .unwrap()
+                .and_hms_opt(9, 37, 0)
+                .unwrap(),
+        );
+        let seven = new_york_local(bucket_start(source, "7m").unwrap()).unwrap();
+        let forty_five = new_york_local(bucket_start(source, "45m").unwrap()).unwrap();
+        let daily_minutes = new_york_local(bucket_start(source, "1440m").unwrap()).unwrap();
+        assert_eq!((seven.hour(), seven.minute()), (9, 34));
+        assert_eq!((forty_five.hour(), forty_five.minute()), (9, 0));
+        assert_eq!((daily_minutes.hour(), daily_minutes.minute()), (0, 0));
+        for value in ["0m", "01m", "1441m", "7.5m"] {
+            assert!(
+                minute_interval(value).is_none(),
+                "{value} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn arbitrary_minute_aggregation_preserves_ohlcv() {
+        let start = new_york_epoch(
+            NaiveDate::from_ymd_opt(2026, 7, 20)
+                .unwrap()
+                .and_hms_opt(9, 34, 0)
+                .unwrap(),
+        );
+        let result = aggregate_bars(
+            &[
+                bar(start, 10.0, 11.0, 9.0, 10.5, 100.0),
+                bar(start + 60, 10.5, 12.0, 10.0, 11.5, 125.0),
+            ],
+            "7m",
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            (
+                result[0].open,
+                result[0].high,
+                result[0].low,
+                result[0].close,
+                result[0].volume
+            ),
+            (10.0, 12.0, 9.0, 11.5, 225.0)
+        );
+    }
 
     #[test]
     fn instrument_search_matches_symbols_and_descriptions() {

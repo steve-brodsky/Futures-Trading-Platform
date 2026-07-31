@@ -10,6 +10,7 @@ import { normalizeChartWorkspace } from "./chartWorkspace";
 import { normalizeEma200Alert } from "./emaAlerts";
 import { normalizeEntryRuleAlerts } from "./entryRuleAlerts";
 import { normalizeContractRollAlertSettings } from "./contractRoll";
+import { parseMinuteTimeframe } from "./timeframes";
 
 export const CLOUD_PREFERENCE_CATEGORIES: CloudPreferenceCategory[] = [
   "chart_workspace",
@@ -58,6 +59,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       chart_workspace: {
         tabs: workspace.tabs.map(cloudTab),
         windows: workspace.windows.map(cloudWindow),
+        customMinuteTimeframes: [...workspace.customMinuteTimeframes],
         recentSymbols: workspace.recentSymbols.map((instrument) => ({ ...instrument })),
         gexSelections: workspace.gexSelections,
       },
@@ -118,7 +120,7 @@ export function profileFromRecords(records: CloudPreferenceRecord[]): CloudPrefe
   return { schemaVersion: 1, categories };
 }
 
-export function applyCloudPreferenceProfile(current: WorkspaceState, profile: CloudPreferenceProfile): WorkspaceState {
+export function applyCloudPreferenceProfile(current: WorkspaceState, profile: CloudPreferenceProfile, sessionCustomMinuteTimeframes: number[] = []): WorkspaceState {
   const categories = profile.categories;
   const chartWorkspace = object(categories.chart_workspace);
   const currentTabs = new Map(current.tabs.map((tab) => [tab.id, tab]));
@@ -159,6 +161,9 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
   const journalFees = object(categories.journal_fees);
   const candidate: WorkspaceState = {
     ...current,
+    customMinuteTimeframes: Array.isArray(chartWorkspace?.customMinuteTimeframes)
+      ? chartWorkspace.customMinuteTimeframes as number[]
+      : current.customMinuteTimeframes,
     tabs: tabs as unknown as ChartTabState[],
     windows: remoteWindows as unknown as ChartWindowState[],
     gexSelections: remoteGexSelections as WorkspaceState["gexSelections"],
@@ -198,9 +203,19 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
       },
     },
   };
-  const normalized = normalizeChartWorkspace(candidate, current);
+  const normalized = normalizeChartWorkspace(candidate, current, sessionCustomMinuteTimeframes);
+  const savedCustomMinutes = new Set(normalized.customMinuteTimeframes);
+  const sessionCustomMinutes = new Set(sessionCustomMinuteTimeframes);
+  const tabsWithTransientTimeframes = normalized.tabs.map((tab) => {
+    const local = currentTabs.get(tab.id);
+    const minutes = local && parseMinuteTimeframe(local.timeframe);
+    return minutes != null && sessionCustomMinutes.has(minutes) && !savedCustomMinutes.has(minutes)
+      ? { ...tab, timeframe: local!.timeframe }
+      : tab;
+  });
   return {
     ...normalized,
+    tabs: tabsWithTransientTimeframes,
     environment: current.environment,
     rightPanelOpen: current.rightPanelOpen,
     bottomTab: current.bottomTab,

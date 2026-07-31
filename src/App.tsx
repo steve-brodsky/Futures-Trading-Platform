@@ -17,6 +17,7 @@ import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
 import { AuditLogModal } from "./components/AuditLogModal";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { TradingTodayModal, type TradingTodaySource } from "./components/TradingTodayModal";
+import { CustomTimeframeModal, type CustomTimeframeEntry } from "./components/CustomTimeframeModal";
 import { api } from "./lib/bridge";
 import { mutationPresentation } from "./lib/mutationResults";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
@@ -58,9 +59,9 @@ import {
   equityIndexContractRoot,
 } from "./lib/contractRoll";
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import { minuteTimeframe, normalizeCustomMinuteTimeframes, orderedToolbarTimeframes, parseMinuteTimeframe, removeCustomMinuteTimeframe as removeCustomMinuteTimeframeFromWorkspace, saveCustomMinuteTimeframe, workspaceForPersistence } from "./lib/timeframes";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
-const timeframes: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
   { kind: "candles", label: "Candles", description: "Time-based OHLC" },
@@ -89,6 +90,7 @@ const newYorkClock = new Intl.DateTimeFormat("en-US", {
 const defaultWorkspace: WorkspaceState = {
   revision: 0,
   environment: "sim",
+  customMinuteTimeframes: [],
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net", expirationDisplay: "aggregate" } }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
@@ -247,8 +249,16 @@ function gexStatusLabel(status: GexMarketStatus): string {
   return ({ loading: "Loading", live: "Live", hybrid: "Hybrid", "rest-only": "REST only", delayed: "Delayed", stale: "Stale", error: "Error" })[status];
 }
 
-async function syncWorkspaceToOpenWindows(workspace: WorkspaceState): Promise<void> {
-  await Promise.all(workspace.windows.map((window) => emitTo(window.id, "workspace-sync", workspace).catch(() => undefined)));
+interface TimeframeSessionSyncEvent {
+  customMinuteTimeframes: number[];
+  persistentTimeframes: Record<string, Timeframe>;
+}
+
+async function syncWorkspaceToOpenWindows(workspace: WorkspaceState, session: TimeframeSessionSyncEvent): Promise<void> {
+  await Promise.all(workspace.windows.map(async (window) => {
+    await emitTo(window.id, "timeframe-session-sync", session).catch(() => undefined);
+    await emitTo(window.id, "workspace-sync", workspace).catch(() => undefined);
+  }));
 }
 
 async function restoreMainWindowGeometry(state: ChartWindowState): Promise<void> {
@@ -362,6 +372,13 @@ function TradingApp() {
   const workspaceRef = useRef(workspace);
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false);
   const environment = workspace.environment;
+  const [sessionCustomMinuteTimeframes, setSessionCustomMinuteTimeframes] = useState<number[]>([]);
+  const sessionCustomMinuteTimeframesRef = useRef<number[]>([]);
+  const persistentTimeframesRef = useRef(new Map<string, Timeframe>());
+  const [customTimeframeOpen, setCustomTimeframeOpen] = useState(false);
+  const customTimeframeButtonRef = useRef<HTMLButtonElement>(null);
+  const toolbarTimeframes = useMemo(() => orderedToolbarTimeframes([...workspace.customMinuteTimeframes, ...sessionCustomMinuteTimeframes]), [workspace.customMinuteTimeframes, sessionCustomMinuteTimeframes]);
+  const customTimeframeEntries = useMemo<CustomTimeframeEntry[]>(() => normalizeCustomMinuteTimeframes([...workspace.customMinuteTimeframes, ...sessionCustomMinuteTimeframes]).map((minutes) => ({ minutes, saved: workspace.customMinuteTimeframes.includes(minutes) })), [workspace.customMinuteTimeframes, sessionCustomMinuteTimeframes]);
   const [tabMarkets, setTabMarkets] = useState<Record<string, TabMarketState>>({});
   const tabMarketsRef = useRef(tabMarkets);
   const [vwapMarkets, setVwapMarkets] = useState<Record<string, VwapMarketState>>({});
@@ -770,8 +787,8 @@ function TradingApp() {
     : { provider: "tradestation", symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
   const activeOrderMinMove = activeTradeMeta?.minMove ?? activeTab.symbol.minMove;
   const cloudPreferenceKey = useMemo(
-    () => JSON.stringify(cloudPreferenceProfile(workspace)),
-    [workspace],
+    () => JSON.stringify(cloudPreferenceProfile(workspaceForPersistence(workspace, sessionCustomMinuteTimeframes, persistentTimeframesRef.current))),
+    [workspace, sessionCustomMinuteTimeframes],
   );
 
   useEffect(() => {
@@ -789,7 +806,7 @@ function TradingApp() {
   }
 
   function matchingAlertTabs(symbol: string, timeframe: Timeframe): ChartTabState[] {
-    return workspaceRef.current.tabs.filter((tab) => tab.symbol.symbol === symbol && tab.ema200Alert[timeframe].enabled);
+    return workspaceRef.current.tabs.filter((tab) => tab.symbol.symbol === symbol && tab.ema200Alert[timeframe as keyof typeof tab.ema200Alert]?.enabled === true);
   }
 
   function applyEntryRuleTabSignal(event: EntryRuleTabSignalEvent) {
@@ -885,7 +902,8 @@ function TradingApp() {
       const evaluation = evaluateEma200Cross(nextBars, previousSide);
       if (evaluation.side) alertSidesRef.current.set(ownerKey, evaluation.side);
       if (!previousSide || !evaluation.direction || evaluation.price == null || evaluation.ema == null) return;
-      const config = tab.ema200Alert[payload.timeframe];
+      const config = tab.ema200Alert[payload.timeframe as AlertTimeframe];
+      if (!config) return;
       playAlertSound(config.sound, config.durationSeconds);
       const direction = evaluation.direction === "above" ? "above" : "below";
       const message = `${payload.symbol} ${payload.timeframe} crossed ${direction} EMA 200 at ${formatPrice(evaluation.price)} (EMA ${formatPrice(evaluation.ema)}).`;
@@ -964,6 +982,8 @@ function TradingApp() {
   useEffect(() => {
     Promise.all([api.loadWorkspace(), api.authStatus(), api.schwabAuthStatus()]).then(async ([saved, auth, schwabAuth]) => {
       const normalized = normalizeChartWorkspace(saved, defaultWorkspace);
+      persistentTimeframesRef.current = new Map(normalized.tabs.map((tab) => [tab.id, tab.timeframe]));
+      workspaceRef.current = normalized;
       await api.setEnvironment(normalized.environment);
       await api.setJournalCommission(normalized.settings.journal.commissionPerContractSide);
       if (currentWindowId === MAIN_WINDOW_ID) {
@@ -1137,20 +1157,42 @@ function TradingApp() {
         setBrokerageStreamStates((current) => ({ ...current, [payload.channel]: payload.state }));
       }).then((unlisten) => cleanups.push(unlisten));
     }
+    listen<TimeframeSessionSyncEvent>("timeframe-session-sync", ({ payload }) => {
+      const customMinuteTimeframes = normalizeCustomMinuteTimeframes(payload.customMinuteTimeframes);
+      sessionCustomMinuteTimeframesRef.current = customMinuteTimeframes;
+      setSessionCustomMinuteTimeframes(customMinuteTimeframes);
+      persistentTimeframesRef.current = new Map(Object.entries(payload.persistentTimeframes ?? {}) as Array<[string, Timeframe]>);
+    }).then((unlisten) => cleanups.push(unlisten));
+    listen<TimeframeSessionSyncEvent>("timeframe-session-proposal", ({ payload }) => {
+      if (currentWindowId !== MAIN_WINDOW_ID) return;
+      const customMinuteTimeframes = normalizeCustomMinuteTimeframes(payload.customMinuteTimeframes);
+      sessionCustomMinuteTimeframesRef.current = customMinuteTimeframes;
+      setSessionCustomMinuteTimeframes(customMinuteTimeframes);
+      Object.entries(payload.persistentTimeframes ?? {}).forEach(([tabId, timeframe]) => persistentTimeframesRef.current.set(tabId, timeframe));
+    }).then((unlisten) => cleanups.push(unlisten));
     listen<WorkspaceState>("workspace-sync", ({ payload }) => {
       if (payload.revision <= workspaceRef.current.revision) return;
-      const next = stabilizeChartWorkspace(workspaceRef.current, normalizeChartWorkspace(payload, defaultWorkspace));
+      const next = stabilizeChartWorkspace(workspaceRef.current, normalizeChartWorkspace(payload, defaultWorkspace, sessionCustomMinuteTimeframesRef.current));
       markDetachedMarketReplacements(workspaceRef.current, next);
       workspaceRef.current = next;
       setWorkspace(next);
     }).then((unlisten) => cleanups.push(unlisten));
     listen<WorkspaceState>("workspace-proposal", ({ payload }) => {
       if (currentWindowId !== MAIN_WINDOW_ID) return;
-      const normalized = { ...normalizeChartWorkspace(payload, defaultWorkspace), revision: Math.max(workspaceRef.current.revision + 1, Date.now()) };
+      payload.tabs.forEach((tab) => {
+        const minutes = parseMinuteTimeframe(tab.timeframe);
+        const transient = minutes != null && sessionCustomMinuteTimeframesRef.current.includes(minutes) && !workspaceRef.current.customMinuteTimeframes.includes(minutes);
+        if (transient) {
+          if (!persistentTimeframesRef.current.has(tab.id)) persistentTimeframesRef.current.set(tab.id, workspaceRef.current.tabs.find((item) => item.id === tab.id)?.timeframe ?? "1m");
+        } else {
+          persistentTimeframesRef.current.set(tab.id, tab.timeframe);
+        }
+      });
+      const normalized = { ...normalizeChartWorkspace(payload, defaultWorkspace, sessionCustomMinuteTimeframesRef.current), revision: Math.max(workspaceRef.current.revision + 1, Date.now()) };
       const next = stabilizeChartWorkspace(workspaceRef.current, normalized);
       workspaceRef.current = next;
       setWorkspace(next);
-      syncWorkspaceToOpenWindows(next);
+      syncWorkspaceToOpenWindows(next, timeframeSessionPayload());
     }).then((unlisten) => cleanups.push(unlisten));
     listen<CrosshairSyncEvent[] | CrosshairSyncEvent>("chart-crosshair-sync", ({ payload }) => {
       if (!workspaceRef.current.settings.crosshairSyncEnabled) return;
@@ -1174,6 +1216,7 @@ function TradingApp() {
     listen<{ windowId: string }>("workspace-window-ready", ({ payload }) => {
       if (currentWindowId !== MAIN_WINDOW_ID) return;
       void (async () => {
+        await emitTo(payload.windowId, "timeframe-session-sync", timeframeSessionPayload()).catch(() => undefined);
         await emitTo(payload.windowId, "workspace-sync", workspaceRef.current).catch(() => undefined);
         await emitTo(payload.windowId, "window-market-sync", marketSyncForWindow(payload.windowId)).catch(() => undefined);
         await emitTo(payload.windowId, "gex-market-sync", { markets: gexMarketsRef.current } satisfies GexMarketSyncEvent).catch(() => undefined);
@@ -2225,9 +2268,9 @@ function TradingApp() {
   useEffect(() => {
     if (!workspaceLoaded) return;
     if (currentWindowId !== MAIN_WINDOW_ID) return;
-    const timer = window.setTimeout(() => api.saveWorkspace(workspace), 250);
+    const timer = window.setTimeout(() => api.saveWorkspace(workspaceForPersistence(workspace, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current)), 250);
     return () => clearTimeout(timer);
-  }, [workspace, workspaceLoaded]);
+  }, [workspace, workspaceLoaded, sessionCustomMinuteTimeframes]);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
@@ -2446,12 +2489,13 @@ function TradingApp() {
         setPreferenceSync({ state: "idle", message: auth.configured ? "Reconnect Supabase to resume preference sync." : "Connect Supabase to sync preferences." });
         return;
       }
-      const requested = cloudPreferenceProfile(workspaceRef.current);
+      const persistedCurrent = workspaceForPersistence(workspaceRef.current, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current);
+      const requested = cloudPreferenceProfile(persistedCurrent);
       const result = await api.syncPreferences(requested);
       const remote = profileFromRecords(result.records);
       const current = workspaceRef.current;
-      const currentProfile = cloudPreferenceProfile(current);
-      const mergedProfile = cloudPreferenceProfile(current);
+      const currentProfile = cloudPreferenceProfile(workspaceForPersistence(current, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current));
+      const mergedProfile = structuredClone(currentProfile);
       let deferredLocalEdit = false;
       const eligible = new Set(result.records.flatMap((record) => {
         const category = record.category;
@@ -2464,11 +2508,11 @@ function TradingApp() {
       }));
       let mergedWorkspace = current;
       if (JSON.stringify(mergedProfile) !== JSON.stringify(currentProfile)) {
-        mergedWorkspace = stabilizeChartWorkspace(current, applyCloudPreferenceProfile(current, mergedProfile));
+        mergedWorkspace = stabilizeChartWorkspace(current, applyCloudPreferenceProfile(current, mergedProfile, sessionCustomMinuteTimeframesRef.current));
         markDetachedMarketReplacements(current, mergedWorkspace);
         workspaceRef.current = mergedWorkspace;
         setWorkspace(mergedWorkspace);
-        syncWorkspaceToOpenWindows(mergedWorkspace);
+        syncWorkspaceToOpenWindows(mergedWorkspace, timeframeSessionPayload());
         if (mergedWorkspace.settings.journal.commissionPerContractSide !== current.settings.journal.commissionPerContractSide) {
           await api.setJournalCommission(mergedWorkspace.settings.journal.commissionPerContractSide);
         }
@@ -2483,7 +2527,7 @@ function TradingApp() {
         // The native sync may have accepted a remote row while this request was
         // in flight. Re-record the current value and immediately coalesce one
         // follow-up sync so that the user's newer local edit cannot be lost.
-        await api.saveWorkspace(mergedWorkspace);
+        await api.saveWorkspace(workspaceForPersistence(mergedWorkspace, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current));
         preferenceSyncPendingRef.current = true;
       }
       preferenceSyncAttemptRef.current = 0;
@@ -2684,6 +2728,70 @@ function TradingApp() {
     });
   }, [entryScreenshotCandidates, workspace.tabs, visibleTabIds.join("|"), selectedAccount?.id, environment, positions, orders, currentTime]);
 
+  function timeframeSessionPayload(): TimeframeSessionSyncEvent {
+    return {
+      customMinuteTimeframes: [...sessionCustomMinuteTimeframesRef.current],
+      persistentTimeframes: Object.fromEntries(persistentTimeframesRef.current),
+    };
+  }
+
+  function replaceSessionCustomTimeframes(update: (current: number[]) => number[]) {
+    const next = normalizeCustomMinuteTimeframes(update(sessionCustomMinuteTimeframesRef.current));
+    sessionCustomMinuteTimeframesRef.current = next;
+    setSessionCustomMinuteTimeframes(next);
+  }
+
+  function isTransientTimeframe(timeframe: Timeframe, current = workspaceRef.current): boolean {
+    const minutes = parseMinuteTimeframe(timeframe);
+    return minutes != null
+      && sessionCustomMinuteTimeframesRef.current.includes(minutes)
+      && !current.customMinuteTimeframes.includes(minutes);
+  }
+
+  function selectTimeframe(timeframe: Timeframe) {
+    const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === activeTab.id);
+    if (!currentTab) return;
+    if (isTransientTimeframe(timeframe)) {
+      if (!persistentTimeframesRef.current.has(currentTab.id)) persistentTimeframesRef.current.set(currentTab.id, isTransientTimeframe(currentTab.timeframe) ? "1m" : currentTab.timeframe);
+    } else {
+      persistentTimeframesRef.current.set(currentTab.id, timeframe);
+    }
+    updateActiveTab({ timeframe });
+  }
+
+  function addCustomTimeframe(minutes: number, saved: boolean) {
+    const timeframe = minuteTimeframe(minutes);
+    const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === activeTab.id);
+    if (!currentTab) return;
+    if (saved) {
+      replaceSessionCustomTimeframes((current) => current.filter((item) => item !== minutes));
+      persistentTimeframesRef.current.set(currentTab.id, timeframe);
+    } else {
+      if (!isTransientTimeframe(currentTab.timeframe)) persistentTimeframesRef.current.set(currentTab.id, currentTab.timeframe);
+      replaceSessionCustomTimeframes((current) => [...current, minutes]);
+    }
+    commitWorkspace((current) => ({
+      ...current,
+      customMinuteTimeframes: saved ? normalizeCustomMinuteTimeframes([...current.customMinuteTimeframes, minutes]) : current.customMinuteTimeframes,
+      tabs: current.tabs.map((tab) => tab.id === activeTab.id ? { ...tab, timeframe } : tab),
+    }));
+    setCustomTimeframeOpen(false);
+  }
+
+  function promoteCustomTimeframe(minutes: number) {
+    const timeframe = minuteTimeframe(minutes);
+    replaceSessionCustomTimeframes((current) => current.filter((item) => item !== minutes));
+    workspaceRef.current.tabs.forEach((tab) => { if (tab.timeframe === timeframe) persistentTimeframesRef.current.set(tab.id, timeframe); });
+    commitWorkspace((current) => saveCustomMinuteTimeframe(current, minutes));
+  }
+
+  function removeCustomTimeframe(minutes: number) {
+    const timeframe = minuteTimeframe(minutes);
+    replaceSessionCustomTimeframes((current) => current.filter((item) => item !== minutes));
+    workspaceRef.current.tabs.forEach((tab) => { if (tab.timeframe === timeframe) persistentTimeframesRef.current.set(tab.id, "1m"); });
+    commitWorkspace((current) => removeCustomMinuteTimeframeFromWorkspace(current, minutes));
+  }
+
   function commitWorkspace(update: (current: WorkspaceState) => WorkspaceState) {
     setWorkspace((current) => {
       const next = currentWindowId === MAIN_WINDOW_ID
@@ -2691,8 +2799,10 @@ function TradingApp() {
         : update(current);
       markDetachedMarketReplacements(current, next);
       workspaceRef.current = next;
-      if (currentWindowId === MAIN_WINDOW_ID) syncWorkspaceToOpenWindows(next);
-      else emitTo(MAIN_WINDOW_ID, "workspace-proposal", next).catch(() => undefined);
+      if (currentWindowId === MAIN_WINDOW_ID) syncWorkspaceToOpenWindows(next, timeframeSessionPayload());
+      else void emitTo(MAIN_WINDOW_ID, "timeframe-session-proposal", timeframeSessionPayload())
+        .then(() => emitTo(MAIN_WINDOW_ID, "workspace-proposal", next))
+        .catch(() => undefined);
       return next;
     });
   }
@@ -2851,7 +2961,7 @@ function TradingApp() {
     });
   }
 
-  function updateTimeframeAlert(timeframe: Timeframe, patch: Partial<TimeframeAlertConfig>) {
+  function updateTimeframeAlert(timeframe: AlertTimeframe, patch: Partial<TimeframeAlertConfig>) {
     updateActiveTab({ ema200Alert: { ...activeTab.ema200Alert, [timeframe]: { ...activeTab.ema200Alert[timeframe], ...patch } } });
   }
 
@@ -2863,6 +2973,7 @@ function TradingApp() {
   function addTab() {
     if (workspace.tabs.length >= MAX_CHART_TABS) return showToast(`A maximum of ${MAX_CHART_TABS} chart tabs is supported.`);
     const id = `chart-${crypto.randomUUID()}`;
+    persistentTimeframesRef.current.set(id, persistentTimeframesRef.current.get(activeTab.id) ?? (isTransientTimeframe(activeTab.timeframe) ? "1m" : activeTab.timeframe));
     commitWorkspace((current) => focusChartTab({
       ...current,
       tabs: [...current.tabs, cloneChartTab(activeTab, id)],
@@ -2883,6 +2994,7 @@ function TradingApp() {
 
   async function closeTab(tabId: string) {
     if (workspace.tabs.length === 1) return;
+    persistentTimeframesRef.current.delete(tabId);
     const ownerBefore = workspaceRef.current.windows.find((item) => item.tabIds.includes(tabId));
     const removedWindow = ownerBefore?.id !== MAIN_WINDOW_ID && ownerBefore?.tabIds.length === 1 ? ownerBefore.id : undefined;
     commitWorkspace((current) => {
@@ -2969,6 +3081,7 @@ function TradingApp() {
         showToast(`Could not show detached chart: ${String(error)}`);
         return;
       }
+      await emitTo(state.id, "timeframe-session-sync", timeframeSessionPayload()).catch(() => undefined);
       await emitTo(state.id, "workspace-sync", workspaceRef.current).catch(() => undefined);
       liveState.tabIds.forEach((tabId) => {
         const range = viewRangesRef.current.get(tabId);
@@ -3087,7 +3200,7 @@ function TradingApp() {
             windows: workspaceRef.current.windows.map((item) => geometryById.get(item.id) ?? item),
           };
           workspaceRef.current = next;
-          await api.saveWorkspace(next).catch(() => undefined);
+          await api.saveWorkspace(workspaceForPersistence(next, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current)).catch(() => undefined);
         }
         await Promise.all(windows.filter((item) => item.label !== MAIN_WINDOW_ID).map((item) => item.destroy()));
       } else {
@@ -3741,7 +3854,7 @@ function TradingApp() {
     <nav className={`toolbar ${hasWindowTabs ? "" : "empty"}`} aria-label="Chart toolbar">
       <button className="symbol-control" onClick={() => { setSearch(""); setSearchOpen(true); }}><Search size={16} /><strong>{activeTab.symbol.symbol}</strong><span>{activeTab.symbol.exchange}</span><ChevronDown size={14} /></button>
       <div className="divider" />
-      <div className="timeframe-group">{timeframes.map((tf) => <button key={tf} className={activeTab.timeframe === tf ? "active" : ""} onClick={() => updateActiveTab({ timeframe: tf })}>{tf}</button>)}</div>
+      <div className="timeframe-scroll"><div className="timeframe-group">{toolbarTimeframes.map((tf) => <button key={tf} className={`timeframe-button ${activeTab.timeframe === tf ? "active" : ""} ${tf === "4h" || tf === "W" ? "compact-optional" : ""}`} onClick={() => selectTimeframe(tf)}>{tf}</button>)}<button ref={customTimeframeButtonRef} className={`timeframe-add-button ${customTimeframeOpen ? "active" : ""}`} type="button" aria-label="Add custom timeframe" aria-haspopup="dialog" aria-expanded={customTimeframeOpen} title="Add custom timeframe" onClick={() => setCustomTimeframeOpen(true)}><Plus size={14} /></button></div></div>
       <div className="divider" />
       <div className="toolbar-popover-anchor chart-layout-anchor">
         <IconButton label="Chart layout" active={chartLayoutOpen || chartLayout !== "single"} onClick={() => { setIndicatorOpen(false); setChartStyleOpen(false); setAlertOpen(false); setChartLayoutOpen((value) => !value); }}><PanelsTopLeft size={17} /></IconButton>
@@ -3910,6 +4023,15 @@ function TradingApp() {
       onRefresh={() => { void refreshTradingToday(); }}
       onOpenSource={openTradingTodaySource}
       onClose={() => setTradingTodayOpen(false)}
+    />}
+
+    {customTimeframeOpen && <CustomTimeframeModal
+      entries={customTimeframeEntries}
+      returnFocusRef={customTimeframeButtonRef}
+      onAdd={addCustomTimeframe}
+      onPromote={promoteCustomTimeframe}
+      onRemove={removeCustomTimeframe}
+      onClose={() => setCustomTimeframeOpen(false)}
     />}
 
     {searchOpen && <Modal title="Select symbol" onClose={closeSymbolPicker} width={620}>

@@ -21,8 +21,9 @@ function noise(index: number) {
   return Math.sin(index * 1.73) * 1.2 + Math.cos(index * 0.37) * 0.8 + Math.sin(index * 0.083) * 2.4;
 }
 
-export function makeDemoBars(count = 360, start = 6218, scale = 1): Bar[] {
-  const now = Math.floor(Date.now() / 60000) * 60;
+export function makeDemoBars(count = 360, start = 6218, scale = 1, intervalSeconds = 60): Bar[] {
+  const interval = Math.max(60, Math.round(intervalSeconds / 60) * 60);
+  const now = Math.floor(Date.now() / (interval * 1_000)) * interval;
   let previous = start;
   return Array.from({ length: count }, (_, index) => {
     const drift = (index * 0.105 + Math.sin(index / 18) * 2.2) * scale;
@@ -31,7 +32,7 @@ export function makeDemoBars(count = 360, start = 6218, scale = 1): Bar[] {
     const high = Math.max(open, close) + (0.3 + Math.abs(Math.sin(index * 2.1)) * 1.05) * scale;
     const low = Math.min(open, close) - (0.3 + Math.abs(Math.cos(index * 1.4)) * 0.9) * scale;
     previous = close;
-    return { time: now - (count - index) * 60, open, high, low, close, volume: Math.round(180 + Math.abs(noise(index) * 180) + (index % 47 === 0 ? 1200 : 0)) };
+    return { time: now - (count - index) * interval, open, high, low, close, volume: Math.round(180 + Math.abs(noise(index) * 180) + (index % 47 === 0 ? 1200 : 0)) };
   });
 }
 

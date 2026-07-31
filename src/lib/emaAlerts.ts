@@ -1,7 +1,7 @@
-import type { AlertDurationSeconds, AlertSound, Bar, ChartTabState, Ema200AlertConfig, MarketDataProvider, Timeframe, TimeframeAlertConfig } from "../types";
+import type { AlertDurationSeconds, AlertSound, AlertTimeframe, Bar, ChartTabState, Ema200AlertConfig, MarketDataProvider, Timeframe, TimeframeAlertConfig } from "../types";
 import { ema } from "./indicators";
 
-export const ALERT_TIMEFRAMES: Timeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
+export const ALERT_TIMEFRAMES: AlertTimeframe[] = ["1m", "5m", "15m", "30m", "1h", "4h", "D", "W", "M"];
 export const ALERT_SOUNDS: Array<{ value: AlertSound; label: string }> = [
   { value: "chime", label: "Chime" },
   { value: "bell", label: "Bell" },
@@ -22,7 +22,7 @@ export function defaultEma200Alert(): Ema200AlertConfig {
 }
 
 export function normalizeEma200Alert(value: unknown): Ema200AlertConfig {
-  const source = value && typeof value === "object" ? value as Partial<Record<Timeframe, Partial<TimeframeAlertConfig>>> : {};
+  const source = value && typeof value === "object" ? value as Partial<Record<AlertTimeframe, Partial<TimeframeAlertConfig>>> : {};
   return Object.fromEntries(ALERT_TIMEFRAMES.map((timeframe) => {
     const saved = source[timeframe];
     const sound = sounds.has(saved?.sound as AlertSound) ? saved!.sound as AlertSound : "chime";

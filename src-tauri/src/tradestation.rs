@@ -2425,8 +2425,22 @@ pub fn history_spec(timeframe: &str) -> Result<(usize, &'static str, usize), App
         "D" => Ok((1, "Daily", 5_000)),
         "W" => Ok((1, "Weekly", 2_500)),
         "M" => Ok((1, "Monthly", 1_000)),
-        _ => Err(AppError::Validation("Unsupported timeframe".into())),
+        _ => {
+            let interval = custom_minute_interval(timeframe)
+                .ok_or_else(|| AppError::Validation("Unsupported timeframe".into()))?;
+            let bars_back = (500_000 / interval).min(10_000).max(2);
+            Ok((interval, "Minute", bars_back))
+        }
     }
+}
+
+fn custom_minute_interval(timeframe: &str) -> Option<usize> {
+    let value = timeframe.strip_suffix('m')?;
+    if value.is_empty() || value.starts_with('0') {
+        return None;
+    }
+    let minutes = value.parse::<usize>().ok()?;
+    (1..=1_440).contains(&minutes).then_some(minutes)
 }
 
 fn validate_bars_back(interval: usize, unit: &str, bars_back: usize) -> Result<(), AppError> {
@@ -2706,6 +2720,29 @@ fn mask_account(value: &str) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn custom_minute_history_specs_respect_provider_limits() {
+        assert_eq!(history_spec("45m").unwrap(), (45, "Minute", 10_000));
+        assert_eq!(history_spec("90m").unwrap(), (90, "Minute", 5_555));
+        assert_eq!(history_spec("1440m").unwrap(), (1_440, "Minute", 347));
+        for value in ["0m", "01m", "1441m", "7.5m", "7h"] {
+            assert!(history_spec(value).is_err(), "{value} should be rejected");
+        }
+    }
+
+    #[test]
+    fn custom_minute_bars_are_normalized_to_their_open_timestamp() {
+        let value = serde_json::json!({
+            "Epoch": 3_600_000,
+            "Open": 10.0,
+            "High": 12.0,
+            "Low": 9.0,
+            "Close": 11.0,
+            "TotalVolume": 100.0
+        });
+        assert_eq!(bar_from_value(&value, "45m").unwrap().time, 900);
+    }
 
     #[tokio::test]
     async fn concurrent_expired_token_requests_share_exactly_one_refresh() {

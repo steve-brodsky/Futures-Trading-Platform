@@ -12,6 +12,7 @@ import { DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS } from "./contractRoll";
 const fallback: WorkspaceState = {
   revision: 0,
   environment: "sim",
+  customMinuteTimeframes: [],
   tabs: [{ id: "chart-1", symbol: { provider: "tradestation", symbol: "MES", description: "Micro E-mini S&P", exchange: "CME", assetType: "Future", minMove: .25, pointValue: 5 }, timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: [], ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net", expirationDisplay: "aggregate" } }],
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
@@ -21,6 +22,18 @@ const fallback: WorkspaceState = {
 };
 
 describe("chart workspace", () => {
+  it("normalizes saved custom minute timeframes and restores only listed custom tab values", () => {
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      customMinuteTimeframes: [45, 7, 45, 60, 1_441],
+      tabs: [{ ...fallback.tabs[0], timeframe: "45m" }],
+    }, fallback);
+    expect(saved.customMinuteTimeframes).toEqual([7, 45]);
+    expect(saved.tabs[0].timeframe).toBe("45m");
+    const transient = normalizeChartWorkspace({ ...fallback, tabs: [{ ...fallback.tabs[0], timeframe: "7m" }] }, fallback);
+    expect(transient.tabs[0].timeframe).toBe("1m");
+  });
+
   it("keeps unchanged chart references stable across full workspace broadcasts", () => {
     const current = normalizeChartWorkspace(fallback, fallback);
     const broadcast = normalizeChartWorkspace({ ...current, revision: 2, rightPanelOpen: true }, fallback);

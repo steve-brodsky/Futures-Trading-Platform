@@ -12,6 +12,7 @@ import { normalizeDrawingAlert, sameDrawingAlert } from "./drawingAlerts";
 import { normalizeChartSessionSettings } from "./chartSessions";
 import { normalizeChartEconomicEventSettings } from "./economicEvents";
 import { normalizeContractRollAlertSettings } from "./contractRoll";
+import { normalizeCustomMinuteTimeframes, normalizeTimeframe } from "./timeframes";
 
 export const MAX_CHART_TABS = 12;
 export const MAIN_WINDOW_ID = "main";
@@ -240,9 +241,11 @@ export function cloneChartTab(tab: ChartTabState, id: string): ChartTabState {
   };
 }
 
-export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState): WorkspaceState {
+export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState, sessionCustomMinuteTimeframes: number[] = []): WorkspaceState {
   const value = (saved && typeof saved === "object" ? saved : {}) as LegacyWorkspace;
   const fallbackTab = fallback.tabs[0];
+  const customMinuteTimeframes = normalizeCustomMinuteTimeframes(value.customMinuteTimeframes);
+  const allowedMinuteTimeframes = normalizeCustomMinuteTimeframes([...customMinuteTimeframes, ...sessionCustomMinuteTimeframes]);
   const sourceTabs = Array.isArray(value.tabs) && value.tabs.length
     ? value.tabs.slice(0, MAX_CHART_TABS)
     : [{
@@ -268,6 +271,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       ...fallbackTab,
       ...tab,
       id,
+      timeframe: normalizeTimeframe(tab.timeframe, allowedMinuteTimeframes, fallbackTab.timeframe),
       symbol: normalizeSymbolMeta(tab.symbol) ?? { ...fallbackTab.symbol },
       indicators: normalizeIndicators(tab.indicators).map((indicator) => ({ ...indicator })),
       ema200Alert: normalizeEma200Alert(tab.ema200Alert),
@@ -366,6 +370,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   return {
     revision: typeof value.revision === "number" ? value.revision : 0,
     environment: value.environment === "live" || value.environment === "sim" ? value.environment : fallback.environment,
+    customMinuteTimeframes,
     tabs,
     windows: normalizedWindows,
     watchlist,

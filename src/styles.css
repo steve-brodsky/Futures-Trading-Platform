@@ -96,10 +96,14 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .symbol-control strong { font: 600 12px DM Mono, monospace; color: #f2f5f9; }
 .symbol-control span { margin-left: auto; font-size: 9px; color: var(--muted); }
 .divider { width: 1px; height: 22px; margin: 0 5px; background: var(--line); }
-.timeframe-group { display: flex; align-items: center; gap: 1px; }
+.timeframe-scroll { min-width: 0; max-width: min(48vw, 680px); overflow-x: auto; scrollbar-width: none; overscroll-behavior-inline: contain; }
+.timeframe-scroll::-webkit-scrollbar { display: none; }
+.timeframe-group { width: max-content; display: flex; align-items: center; gap: 1px; }
 .timeframe-group button { height: 30px; min-width: 28px; border: 0; border-radius: 4px; background: transparent; font: 600 10px DM Mono, monospace; color: #929dab; cursor: pointer; }
 .timeframe-group button:hover { background: var(--surface-3); color: #e8edf3; }
-.timeframe-group button.active { color: #071217; background: var(--cyan); }
+.timeframe-group .timeframe-button.active { color: #071217; background: var(--cyan); }
+.timeframe-group .timeframe-add-button { min-width: 25px; display: grid; place-items: center; margin-left: 2px; color: #748194; border-left: 1px solid #26303c; border-radius: 0 4px 4px 0; }
+.timeframe-group .timeframe-add-button:hover,.timeframe-group .timeframe-add-button.active { color: var(--cyan); background: rgba(55,213,232,.08); }
 .chart-kinds { display: flex; }
 .chart-style-button { min-width: 116px; justify-content: flex-start; }
 .chart-style-button > span { overflow: hidden; flex: 1; text-align: left; white-space: nowrap; text-overflow: ellipsis; }
@@ -609,6 +613,35 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .modal > header { height: 51px; padding: 0 10px 0 17px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .modal h2 { margin: 0; font-size: 13px; font-weight: 600; }
 .modal > :not(header) { margin-left: 17px; margin-right: 17px; }
+.custom-timeframe-modal { width: 320px; overflow: hidden; }
+.custom-timeframe-modal form { margin: 0 !important; padding: 15px 17px 17px; }
+.custom-timeframe-modal form > p { margin: 0 0 14px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.custom-timeframe-input-label { display: block; margin-bottom: 5px; color: #788697; font: 650 7px DM Mono, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.custom-timeframe-input { height: 39px; display: flex; align-items: center; border: 1px solid #303b49; border-radius: 5px; background: #0d131b; transition: border-color .14s, box-shadow .14s; }
+.custom-timeframe-input:focus-within { border-color: var(--cyan); box-shadow: 0 0 0 2px rgba(55,213,232,.08); }
+.custom-timeframe-input.invalid { border-color: rgba(239,70,111,.72); box-shadow: 0 0 0 2px rgba(239,70,111,.07); }
+.custom-timeframe-input input { min-width: 0; flex: 1; height: 100%; padding: 0 11px; border: 0; outline: 0; color: #edf2f7; background: transparent; font: 600 13px DM Mono, monospace; }
+.custom-timeframe-input input::placeholder { color: #465363; }
+.custom-timeframe-input > span { padding: 0 11px; color: #657286; font: 650 7px DM Mono, monospace; letter-spacing: .08em; }
+.custom-timeframe-message { min-height: 23px; padding-top: 5px; color: #687589; font-size: 8px; }
+.custom-timeframe-message > span[id] { color: #ef7892; }
+.custom-timeframe-save { min-height: 45px; display: flex; align-items: center; gap: 9px; padding: 8px 0; border-top: 1px solid var(--line-soft); cursor: pointer; }
+.custom-timeframe-save input { width: 14px; height: 14px; margin: 0; accent-color: var(--cyan); }
+.custom-timeframe-save > span { display: flex; flex-direction: column; gap: 3px; }
+.custom-timeframe-save strong { color: #d9e0e8; font-size: 9px; font-weight: 550; }
+.custom-timeframe-save small { color: var(--muted); font-size: 8px; }
+.modal.custom-timeframe-modal .custom-timeframe-add { width: 100%; height: 33px; margin: 8px 0 0; }
+.custom-timeframe-existing { max-height: 220px; margin: 0 !important; overflow: auto; border-top: 1px solid var(--line); }
+.custom-timeframe-existing > header { height: 32px; display: flex; align-items: center; justify-content: space-between; padding: 0 17px; color: #778597; font: 650 7px DM Mono, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.custom-timeframe-existing > header span { min-width: 17px; height: 17px; display: grid; place-items: center; border-radius: 9px; color: #8090a4; background: #1a222d; font-size: 7px; }
+.custom-timeframe-row { min-height: 45px; display: flex; align-items: center; justify-content: space-between; padding: 0 11px 0 17px; border-top: 1px solid var(--line-soft); }
+.custom-timeframe-row > span { display: flex; align-items: baseline; gap: 8px; }
+.custom-timeframe-row strong { color: #dfe6ee; font: 650 10px DM Mono, monospace; }
+.custom-timeframe-row small { color: #657387; font: 600 7px DM Mono, monospace; letter-spacing: .06em; text-transform: uppercase; }
+.custom-timeframe-row > div { display: flex; gap: 3px; }
+.custom-timeframe-row button { width: 27px; height: 27px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; color: #7e8b9c; background: transparent; cursor: pointer; }
+.custom-timeframe-row button:hover { color: var(--cyan); background: rgba(55,213,232,.08); }
+.custom-timeframe-row button.danger:hover { color: #ef7892; background: rgba(239,70,111,.08); }
 .drawing-alerts-manager { margin: 0 !important; }
 .drawing-alerts-manager > header { height: 42px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); color: #cbd4de; font-size: 9px; }
 .drawing-alerts-manager > header small { color: var(--muted); font: 500 8px DM Mono, monospace; }
@@ -887,7 +920,7 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 
 @media (max-width: 1180px) {
   .workspace.with-right.right-open { grid-template-columns: 44px minmax(0, 1fr) 292px; }
-  .timeframe-group button:nth-child(6), .timeframe-group button:nth-child(8) { display: none; }
+  .timeframe-group .compact-optional { display: none; }
   .alert-tool-button { padding: 0 8px; }
   .alert-tool-button .tool-label { display: none; }
   .ohlc { display: none; }

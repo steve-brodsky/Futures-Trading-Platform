@@ -6,7 +6,7 @@ const tab = {
   id: "chart-1",
   symbol: { provider: "tradestation", symbol: "MESU26" },
   timeframe: "5m",
-} as ChartTabState;
+} as unknown as ChartTabState;
 
 const event = {
   subscriptionId: "chart-1",

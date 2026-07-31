@@ -1,19 +1,9 @@
 import type { Timeframe } from "../types";
-
-const fixedTimeframeSeconds: Partial<Record<Timeframe, number>> = {
-  "1m": 60,
-  "5m": 5 * 60,
-  "15m": 15 * 60,
-  "30m": 30 * 60,
-  "1h": 60 * 60,
-  "4h": 4 * 60 * 60,
-  D: 24 * 60 * 60,
-  W: 7 * 24 * 60 * 60,
-};
+import { timeframeSeconds } from "./timeframes";
 
 export function candleEndTime(openTime: number, timeframe: Timeframe): number | null {
   if (!Number.isFinite(openTime) || openTime <= 0) return null;
-  const duration = fixedTimeframeSeconds[timeframe];
+  const duration = timeframeSeconds(timeframe);
   if (duration) return openTime + duration;
 
   const open = new Date(openTime * 1000);

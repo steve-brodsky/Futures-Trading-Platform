@@ -1,7 +1,9 @@
 export type TradingEnvironment = "sim" | "live";
 export type MarketDataProvider = "tradestation" | "schwab";
 export type ConnectionState = "demo" | "connecting" | "live" | "stale" | "disconnected" | "auth-required";
-export type Timeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "D" | "W" | "M";
+export type MinuteTimeframe = `${number}m`;
+export type Timeframe = MinuteTimeframe | "1h" | "4h" | "D" | "W" | "M";
+export type AlertTimeframe = "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "D" | "W" | "M";
 export type AlertSound = "chime" | "bell" | "pulse" | "siren";
 export type AlertDurationSeconds = 1 | 3 | 5 | 10;
 export type DrawingAlertDirection = "either" | "above" | "below";
@@ -268,7 +270,7 @@ export interface TimeframeAlertConfig {
   durationSeconds: AlertDurationSeconds;
 }
 
-export type Ema200AlertConfig = Record<Timeframe, TimeframeAlertConfig>;
+export type Ema200AlertConfig = Record<AlertTimeframe, TimeframeAlertConfig>;
 
 export type EntryRuleSide = "long" | "short";
 
@@ -582,6 +584,7 @@ export interface WorkspaceSettings {
 export interface WorkspaceState {
   revision: number;
   environment: TradingEnvironment;
+  customMinuteTimeframes: number[];
   tabs: ChartTabState[];
   windows: ChartWindowState[];
   watchlist: SymbolMeta[];
