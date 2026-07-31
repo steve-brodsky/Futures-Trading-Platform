@@ -1703,7 +1703,9 @@ function TradingApp() {
       const quote = quotes[instrumentKey(tab.symbol)];
       if (!isSameBarMarket(tabMarket, tab.symbol.provider, tab.symbol.symbol, tab.timeframe) || !tabMarket.bars.length || !quote) return [];
       const enabledSides = (["long", "short"] as const).filter((side) => (
-        workspace.entryRuleAlerts[side].enabled && workspace.entryRules[side].children.length > 0
+        workspace.entryRules.allowEntries[side]
+        && workspace.entryRuleAlerts[side].enabled
+        && workspace.entryRules[side].children.length > 0
       ));
       if (!enabledSides.length || enabledSides.some((side) => {
         const price = side === "long" ? quote.ask : quote.bid;

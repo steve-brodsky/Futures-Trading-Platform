@@ -38,7 +38,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 - Automatic or manually selected concrete trade contract when charting a continuous futures symbol. Continuous symbols themselves are never sent as order symbols.
 - CME U.S. equity-index rollover warnings for charts and positions, with daily audio/log alerts, explicit next-contract actions, and a native per-order acknowledgment requirement after the customary roll date.
 - Optional order-review step using TradeStation's confirmation endpoint, including commission and initial-margin estimates when supplied by the API.
-- Long and short entry rules built from nested AND/OR comparisons between market price, SMA, and EMA values.
+- Independent Long/Short entry master switches plus nested AND/OR rules for market price, SMA, EMA, crossover, and time-window conditions.
 - Per-side entry-rule alerts across every open chart, with sound, toast/log output, and persistent Long/Short tab badges.
 - Position and protective-order lines on the chart, including dollar and R-multiple labels.
 - Drag-to-adjust bracket take-profit and stop-loss orders with optimistic UI rollback if TradeStation rejects the replacement.

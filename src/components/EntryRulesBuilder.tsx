@@ -268,11 +268,17 @@ export function EntryRulesBuilder({ rules, alerts, bars, quote, evaluatedAt, onS
       [side]: { ...current[side], enabled: false },
     }));
   };
+  const setSideAllowed = (side: EntryRuleSide, allowed: boolean) => {
+    setDraft((current) => ({
+      ...current,
+      allowEntries: { ...current.allowEntries, [side]: allowed },
+    }));
+  };
   const setAlert = (side: EntryRuleSide, patch: Partial<EntryRuleAlertConfig[EntryRuleSide]>) => {
     setDraftAlerts((current) => ({ ...current, [side]: { ...current[side], ...patch } }));
   };
   return <div className="entry-rules-builder">
-    <p className="entry-rules-intro">Market rules use each open chart's timeframe and live ask for Long or bid for Short. Time windows use their selected timezone. Empty directions stay unrestricted.</p>
+    <p className="entry-rules-intro">Master switches can block an entire entry side. Market rules use each open chart's timeframe and live ask for Long or bid for Short. Time windows use their selected timezone. Empty enabled directions stay unrestricted.</p>
     {(["long", "short"] as const).map((side) => {
       const result = evaluation[side];
       return <section className={`entry-rule-side ${side}`} key={side}>
@@ -282,11 +288,24 @@ export function EntryRulesBuilder({ rules, alerts, bars, quote, evaluatedAt, onS
           <button className="entry-rule-clear" onClick={() => setSide(side, emptyEntryRuleGroup(side))}>Clear</button>
         </header>
         <p className="entry-rule-reason">{result.reason}</p>
-        <div className={`entry-rule-alert-controls ${draftAlerts[side].enabled ? "enabled" : ""}`}>
+        <button
+          type="button"
+          className={`entry-rule-side-toggle ${draft.allowEntries[side] ? "enabled" : "blocked"}`}
+          aria-pressed={draft.allowEntries[side]}
+          onClick={() => setSideAllowed(side, !draft.allowEntries[side])}
+        >
+          <span><strong>Allow {side === "long" ? "Long" : "Short"} entries</strong><small>{draft.allowEntries[side]
+            ? `Detailed rules control ${side === "long" ? "Buy" : "Sell"} entries`
+            : `All ${side === "long" ? "Long" : "Short"} entries are blocked`}</small></span>
+          <span className={`toggle ${draft.allowEntries[side] ? "on" : ""}`} />
+        </button>
+        <div className={`entry-rule-alert-controls ${draftAlerts[side].enabled ? "enabled" : ""} ${!draft.allowEntries[side] ? "paused" : ""}`}>
           <button type="button" className="entry-rule-alert-toggle" disabled={!draft[side].children.length} aria-pressed={draftAlerts[side].enabled} onClick={() => {
             prepareAlertAudio();
             setAlert(side, { enabled: !draftAlerts[side].enabled });
-          }}><span><strong>Alert when allowed</strong><small>{draft[side].children.length ? `Monitor ${side === "long" ? "Long" : "Short"} across every open chart` : "Add a rule condition to enable alerts"}</small></span><span className={`toggle ${draftAlerts[side].enabled ? "on" : ""}`} /></button>
+          }}><span><strong>Alert when allowed</strong><small>{!draft.allowEntries[side]
+            ? draftAlerts[side].enabled ? `Paused while ${side === "long" ? "Long" : "Short"} entries are disabled` : `${side === "long" ? "Long" : "Short"} entry alerts remain off`
+            : draft[side].children.length ? `Monitor ${side === "long" ? "Long" : "Short"} across every open chart` : "Add a rule condition to enable alerts"}</small></span><span className={`toggle ${draftAlerts[side].enabled ? "on" : ""}`} /></button>
           <label><span>Sound</span><select aria-label={`${side} entry alert sound`} disabled={!draftAlerts[side].enabled} value={draftAlerts[side].sound} onChange={(event) => setAlert(side, { sound: event.target.value as AlertSound })}>{ALERT_SOUNDS.map((sound) => <option key={sound.value} value={sound.value}>{sound.label}</option>)}</select></label>
           <label><span>Duration</span><select aria-label={`${side} entry alert duration`} disabled={!draftAlerts[side].enabled} value={draftAlerts[side].durationSeconds} onChange={(event) => setAlert(side, { durationSeconds: Number(event.target.value) as AlertDurationSeconds })}>{ALERT_DURATIONS.map((duration) => <option key={duration} value={duration}>{duration}s</option>)}</select></label>
           <button type="button" className="entry-rule-alert-preview" disabled={!draftAlerts[side].enabled} onClick={() => playAlertSound(draftAlerts[side].sound, draftAlerts[side].durationSeconds)}>Preview</button>

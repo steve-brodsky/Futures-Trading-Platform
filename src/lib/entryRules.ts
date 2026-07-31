@@ -26,7 +26,11 @@ export function emptyEntryRuleGroup(side: EntryRuleSide): EntryRuleGroup {
 }
 
 export function defaultEntryRules(): EntryRules {
-  return { long: emptyEntryRuleGroup("long"), short: emptyEntryRuleGroup("short") };
+  return {
+    allowEntries: { long: true, short: true },
+    long: emptyEntryRuleGroup("long"),
+    short: emptyEntryRuleGroup("short"),
+  };
 }
 
 export function sameEntryRuleOperand(left: EntryRuleOperand, right: EntryRuleOperand): boolean {
@@ -123,11 +127,19 @@ function normalizeSide(value: unknown, side: EntryRuleSide): EntryRuleGroup {
 
 export function normalizeEntryRules(value: unknown): EntryRules {
   const rules = value && typeof value === "object" ? value as Partial<EntryRules> : {};
-  return { long: normalizeSide(rules.long, "long"), short: normalizeSide(rules.short, "short") };
+  const allowEntries = rules.allowEntries && typeof rules.allowEntries === "object"
+    ? rules.allowEntries as Partial<Record<EntryRuleSide, unknown>>
+    : {};
+  return {
+    allowEntries: { long: allowEntries.long !== false, short: allowEntries.short !== false },
+    long: normalizeSide(rules.long, "long"),
+    short: normalizeSide(rules.short, "short"),
+  };
 }
 
 export function hasConfiguredEntryRules(rules: EntryRules): boolean {
-  return rules.long.children.length > 0 || rules.short.children.length > 0;
+  return !rules.allowEntries.long || !rules.allowEntries.short
+    || rules.long.children.length > 0 || rules.short.children.length > 0;
 }
 
 function operandLabel(operand: EntryRuleOperand, side: EntryRuleSide): string {
@@ -334,8 +346,18 @@ export function evaluateEntryRules(
   evaluatedAt: number | Date = Date.now(),
 ): Record<EntryRuleSide, EntryRuleResult> {
   const timestamp = evaluatedAt instanceof Date ? evaluatedAt.getTime() : evaluatedAt;
-  return {
+  const evaluated = {
     long: evaluateSide(rules.long, "long", bars, quote, timestamp),
     short: evaluateSide(rules.short, "short", bars, quote, timestamp),
   };
+  (["long", "short"] as const).forEach((side) => {
+    if (rules.allowEntries[side]) return;
+    evaluated[side] = {
+      ...evaluated[side],
+      allowed: false,
+      status: "blocked",
+      reason: `${side === "long" ? "Long" : "Short"} entries are disabled by the blanket side rule.`,
+    };
+  });
+  return evaluated;
 }

@@ -401,6 +401,7 @@ export interface EntryRuleGroup {
 export type EntryRuleNode = EntryRuleCondition | EntryRuleEmaCrossCondition | EntryRuleTimeWindowCondition | EntryRuleGroup;
 
 export interface EntryRules {
+  allowEntries: Record<EntryRuleSide, boolean>;
   long: EntryRuleGroup;
   short: EntryRuleGroup;
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Bar, EntryRules, EntryRuleTimezone, EntryRuleWeekday, Quote } from "../types";
 import {
-  defaultEntryRules, evaluateEntryRules, MAX_ENTRY_RULE_DEPTH, normalizeEntryRules,
+  defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules, MAX_ENTRY_RULE_DEPTH, normalizeEntryRules,
 } from "./entryRules";
 
 const bars: Bar[] = Array.from({ length: 220 }, (_, index) => ({
@@ -16,6 +16,7 @@ const quote: Quote = { provider: "tradestation", symbol: "MES", last: 321, bid: 
 
 function exampleRules(): EntryRules {
   return {
+    allowEntries: { long: true, short: true },
     long: {
       id: "long-root", kind: "group", combinator: "and", children: [
         { id: "price-ema20", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } },
@@ -40,6 +41,7 @@ function barsFromCloses(closes: number[], realtimeIndex = -1): Bar[] {
 
 function emaCrossRules(direction: "above" | "below" | "either", lookback: number, period = 2): EntryRules {
   return {
+    allowEntries: { long: true, short: true },
     long: {
       id: "long-root", kind: "group", combinator: "and", children: [
         { id: "ema-cross", kind: "emaCross", direction, period, lookback },
@@ -56,6 +58,7 @@ function timeWindowRules(
   timezone: EntryRuleTimezone | "" = "UTC",
 ): EntryRules {
   return {
+    allowEntries: { long: true, short: true },
     long: {
       id: "long-root", kind: "group", combinator: "and", children: [
         { id: "time-window", kind: "timeWindow", startTime, endTime, weekdays, timezone },
@@ -67,13 +70,52 @@ function timeWindowRules(
 
 describe("entry rules", () => {
   it("allows empty Long and Short roots", () => {
-    const result = evaluateEntryRules(defaultEntryRules(), [], quote);
+    const rules = defaultEntryRules();
+    const result = evaluateEntryRules(rules, [], quote);
+    expect(rules.allowEntries).toEqual({ long: true, short: true });
     expect(result.long.allowed).toBe(true);
     expect(result.short.allowed).toBe(true);
   });
 
+  it("blanket-blocks either entry side while preserving detailed node results", () => {
+    const rules = exampleRules();
+    rules.allowEntries.short = false;
+    rules.short.children = [{
+      id: "short-pass", kind: "condition", left: { kind: "marketPrice" }, operator: "above",
+      right: { kind: "movingAverage", average: "SMA", period: 2 },
+    }];
+    const result = evaluateEntryRules(rules, bars, quote);
+    expect(result.long.status).toBe("allowed");
+    expect(result.short).toMatchObject({
+      allowed: false,
+      status: "blocked",
+      reason: "Short entries are disabled by the blanket side rule.",
+      nodeResults: { "short-pass": true },
+    });
+    expect(hasConfiguredEntryRules(rules)).toBe(true);
+  });
+
+  it("blanket-blocks empty, waiting, and nested rule trees until re-enabled", () => {
+    const rules = defaultEntryRules();
+    rules.allowEntries.long = false;
+    expect(evaluateEntryRules(rules, [], quote).long.status).toBe("blocked");
+
+    rules.long.children = [{
+      id: "nested", kind: "group", combinator: "or", children: [{
+        id: "waiting", kind: "condition", left: { kind: "marketPrice" }, operator: "above",
+        right: { kind: "movingAverage", average: "EMA", period: 200 },
+      }],
+    }];
+    const blocked = evaluateEntryRules(rules, bars.slice(0, 10), quote).long;
+    expect(blocked.status).toBe("blocked");
+    expect(blocked.nodeResults.waiting).toBeNull();
+    rules.allowEntries.long = true;
+    expect(evaluateEntryRules(rules, bars.slice(0, 10), quote).long.status).toBe("waiting");
+  });
+
   it("uses ask for Long and bid for Short", () => {
     const rules: EntryRules = {
+      allowEntries: { long: true, short: true },
       long: { id: "long-root", kind: "group", combinator: "and", children: [{ id: "long", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "SMA", period: 2 } }] },
       short: { id: "short-root", kind: "group", combinator: "and", children: [{ id: "short", kind: "condition", left: { kind: "marketPrice" }, operator: "below", right: { kind: "movingAverage", average: "SMA", period: 2 } }] },
     };
@@ -99,6 +141,7 @@ describe("entry rules", () => {
 
   it("uses strict comparisons", () => {
     const rules: EntryRules = {
+      allowEntries: { long: true, short: true },
       long: { id: "long-root", kind: "group", combinator: "and", children: [{ id: "equal", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "SMA", period: 1 } }] },
       short: { id: "short-root", kind: "group", combinator: "and", children: [] },
     };
@@ -176,6 +219,14 @@ describe("entry rules", () => {
     ]) {
       expect(normalizeEntryRules({ ...valid, long: { ...valid.long, children: [invalid] } }).long.children).toEqual([]);
     }
+  });
+
+  it("defaults legacy side switches on and preserves explicit blanket restrictions", () => {
+    const legacy = exampleRules() as Partial<EntryRules>;
+    delete legacy.allowEntries;
+    expect(normalizeEntryRules(legacy).allowEntries).toEqual({ long: true, short: true });
+    expect(normalizeEntryRules({ ...exampleRules(), allowEntries: { long: true, short: false } }).allowEntries)
+      .toEqual({ long: true, short: false });
   });
 
   it("uses inclusive starts and exclusive ends for same-day time windows", () => {

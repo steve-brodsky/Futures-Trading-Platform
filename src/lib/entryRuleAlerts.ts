@@ -91,7 +91,7 @@ export function trackEntryRuleAlertTransitions(
   markets.forEach((market, marketKey) => {
     const evaluation = evaluateEntryRules(rules, market.bars, market.quote, evaluatedAt);
     (["long", "short"] as const).forEach((side) => {
-      if (!alerts[side].enabled || rules[side].children.length === 0) return;
+      if (!rules.allowEntries[side] || !alerts[side].enabled || rules[side].children.length === 0) return;
       const key = `${marketKey}\u0000${side}`;
       const result = evaluation[side];
       const status = market.hasOpenPosition ? "blocked" : result.status;

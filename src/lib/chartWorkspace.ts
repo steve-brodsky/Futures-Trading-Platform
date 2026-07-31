@@ -521,6 +521,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
   }));
   const entryRules = sameEntryRuleNode(current.entryRules.long, incoming.entryRules.long)
     && sameEntryRuleNode(current.entryRules.short, incoming.entryRules.short)
+    && current.entryRules.allowEntries.long === incoming.entryRules.allowEntries.long
+    && current.entryRules.allowEntries.short === incoming.entryRules.allowEntries.short
     ? current.entryRules
     : incoming.entryRules;
   const entryRuleAlerts = sameEntryRuleAlerts(current.entryRuleAlerts, incoming.entryRuleAlerts)

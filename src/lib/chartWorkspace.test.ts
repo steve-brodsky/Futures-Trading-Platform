@@ -468,6 +468,7 @@ describe("chart workspace", () => {
 
   it("defaults legacy workspaces to unrestricted entry rules and disabled alerts", () => {
     const result = normalizeChartWorkspace({ ...fallback, entryRules: undefined, entryRuleAlerts: undefined }, fallback);
+    expect(result.entryRules.allowEntries).toEqual({ long: true, short: true });
     expect(result.entryRules.long.children).toEqual([]);
     expect(result.entryRules.short.children).toEqual([]);
     expect(result.entryRuleAlerts).toEqual(defaultEntryRuleAlerts());
@@ -476,6 +477,23 @@ describe("chart workspace", () => {
       entryRuleAlerts: { ...defaultEntryRuleAlerts(), long: { enabled: true, sound: "bell", durationSeconds: 5 } },
     }, fallback);
     expect(inconsistent.entryRuleAlerts.long).toEqual({ enabled: false, sound: "bell", durationSeconds: 5 });
+  });
+
+  it("persists blanket side restrictions and detects switch-only workspace changes", () => {
+    const restricted = normalizeChartWorkspace({
+      ...fallback,
+      entryRules: { ...fallback.entryRules, allowEntries: { long: true, short: false } },
+    }, fallback);
+    expect(restricted.entryRules.allowEntries).toEqual({ long: true, short: false });
+
+    const unchanged = stabilizeChartWorkspace(restricted, normalizeChartWorkspace({ ...restricted }, fallback));
+    expect(unchanged.entryRules).toBe(restricted.entryRules);
+
+    const enabled = normalizeChartWorkspace({
+      ...restricted,
+      entryRules: { ...restricted.entryRules, allowEntries: { long: true, short: true } },
+    }, fallback);
+    expect(stabilizeChartWorkspace(restricted, enabled).entryRules).not.toBe(restricted.entryRules);
   });
 
   it("stabilizes unchanged EMA cross rules and detects changes to their settings", () => {

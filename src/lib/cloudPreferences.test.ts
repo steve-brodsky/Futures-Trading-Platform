@@ -147,6 +147,14 @@ describe("cloud preferences", () => {
     expect(merged.recentSymbols).toEqual([vix]);
   });
 
+  it("round-trips blanket entry-side restrictions through cloud preferences", () => {
+    const local = workspace();
+    local.entryRules.allowEntries.short = false;
+    const profile = cloudPreferenceProfile(local);
+    const merged = applyCloudPreferenceProfile(workspace(), profile);
+    expect(merged.entryRules.allowEntries).toEqual({ long: true, short: false });
+  });
+
   it("normalizes malformed downloaded values", () => {
     const local = workspace();
     const profile = cloudPreferenceProfile(local);

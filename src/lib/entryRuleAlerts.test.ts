@@ -11,6 +11,7 @@ const quote = (ask: number, bid = ask - 1): Quote => ({
   provider: "tradestation", symbol: "MES", last: ask, bid, ask, change: 0, changePct: 0, delayed: false, halted: false, timestamp: "",
 });
 const rules = (): EntryRules => ({
+  allowEntries: { long: true, short: true },
   long: { id: "long-root", kind: "group", combinator: "and", children: [{
     id: "long-price", kind: "condition", left: { kind: "marketPrice" }, operator: "above",
     right: { kind: "movingAverage", average: "SMA", period: 1 },
@@ -108,6 +109,24 @@ describe("entry rule alerts", () => {
     expect(trackEntryRuleAlertTransitions(state, "same", rules(), defaultEntryRuleAlerts(), [input(101)]).transitions).toEqual([]);
   });
 
+  it("pauses a blanket-blocked side and resumes its preserved alert after re-enabling", () => {
+    const config = enabled();
+    const pausedRules = rules();
+    pausedRules.allowEntries.long = false;
+    const pausedEpoch = entryRuleAlertEpoch("sim", pausedRules, config);
+    const paused = trackEntryRuleAlertTransitions(undefined, pausedEpoch, pausedRules, config, [input(101)]);
+    expect(paused.state.statuses).toEqual({});
+    expect(paused.transitions).toEqual([]);
+
+    const resumedRules = structuredClone(pausedRules);
+    resumedRules.allowEntries.long = true;
+    const resumedEpoch = entryRuleAlertEpoch("sim", resumedRules, config);
+    const primed = trackEntryRuleAlertTransitions(paused.state, resumedEpoch, resumedRules, config, [input(99)]);
+    expect(primed.transitions).toEqual([]);
+    expect(trackEntryRuleAlertTransitions(primed.state, resumedEpoch, resumedRules, config, [input(101)]).transitions)
+      .toHaveLength(1);
+  });
+
   it("silently reprimes when the rule/config epoch changes", () => {
     const config = enabled();
     const prior: EntryRuleAlertTrackerState = { epoch: "old", statuses: { "MES\u00001m\u0000long": "blocked" } };
@@ -125,6 +144,7 @@ describe("entry rule alerts", () => {
 
   it("fires when the clock enters a configured time window", () => {
     const timeRules: EntryRules = {
+      allowEntries: { long: true, short: true },
       long: {
         id: "long-root", kind: "group", combinator: "and", children: [{
           id: "time", kind: "timeWindow", startTime: "09:30", endTime: "16:00",
