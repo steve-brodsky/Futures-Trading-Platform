@@ -28,6 +28,7 @@ import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
 import { calculateContractsForRisk, calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
+import { ENTRY_RULE_UNLOCK_STEPS, generateEntryRuleUnlockCode } from "./lib/entryRuleLock";
 import {
   defaultEntryRuleAlerts, entryRuleAlertEpoch, trackEntryRuleAlertTransitions,
   type EntryRuleAlertTrackerState, type EntryRuleAlertTransition,
@@ -94,7 +95,7 @@ const defaultWorkspace: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net", expirationDisplay: "aggregate" } }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
-  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
+  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
   settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
 
@@ -298,6 +299,57 @@ function Modal({ title, children, onClose, width = 440 }: { title: string; child
   return <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-label={title} style={{ width }}><header><h2>{title}</h2><IconButton label="Close" onClick={onClose}><X size={17} /></IconButton></header>{children}</section></div>;
 }
 
+function EntryRuleUnlockChallenge({ onClose, onUnlocked }: { onClose: () => void; onUnlocked: () => void }) {
+  const [step, setStep] = useState(1);
+  const [code, setCode] = useState(() => generateEntryRuleUnlockCode());
+  const [answer, setAnswer] = useState("");
+  const [error, setError] = useState("");
+
+  const regenerate = () => {
+    setCode(generateEntryRuleUnlockCode());
+    setAnswer("");
+  };
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (answer !== code) {
+      setError("That code did not match. A new code was generated for this step.");
+      regenerate();
+      return;
+    }
+    if (step === ENTRY_RULE_UNLOCK_STEPS) {
+      onUnlocked();
+      return;
+    }
+    setStep((value) => value + 1);
+    setError("");
+    regenerate();
+  };
+
+  return <Modal title="Unlock entry rules" onClose={onClose} width={480}>
+    <form className="entry-rule-unlock" onSubmit={submit}>
+      <div className="entry-rule-unlock-intro"><LockKeyhole size={21} /><span><strong>Pause before changing your plan</strong><small>Enter three different codes. Codes are case-sensitive and cannot be pasted.</small></span></div>
+      <div className="entry-rule-unlock-progress" aria-label={`Unlock step ${step} of ${ENTRY_RULE_UNLOCK_STEPS}`}>
+        {Array.from({ length: ENTRY_RULE_UNLOCK_STEPS }, (_, index) => <i key={index} className={index + 1 < step ? "complete" : index + 1 === step ? "active" : ""} />)}
+        <span>Step {step} of {ENTRY_RULE_UNLOCK_STEPS}</span>
+      </div>
+      <output className="entry-rule-unlock-code" aria-label="Unlock challenge code">{code}</output>
+      <label className="field"><span>Type the code exactly</span><input
+        autoFocus
+        autoComplete="off"
+        spellCheck={false}
+        maxLength={6}
+        value={answer}
+        aria-label="Unlock challenge response"
+        onPaste={(event) => event.preventDefault()}
+        onDrop={(event) => event.preventDefault()}
+        onChange={(event) => { setAnswer(event.target.value); setError(""); }}
+      /></label>
+      {error && <p className="entry-rule-unlock-error" role="alert">{error}</p>}
+      <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button" disabled={answer.length !== 6}>Confirm code</button></div>
+    </form>
+  </Modal>;
+}
+
 function TradeStationCredentials({ clientId, secret, busy, configured, native, showIntro = true, onClientIdChange, onSecretChange, onSave, onConnect }: {
   clientId: string;
   secret: string;
@@ -425,6 +477,8 @@ function TradingApp() {
   const auditHealthRef = useRef(auditHealth);
   const [chartSettingsOpen, setChartSettingsOpen] = useState(false);
   const [entryRulesOpen, setEntryRulesOpen] = useState(false);
+  const [entryRulesLockConfirmOpen, setEntryRulesLockConfirmOpen] = useState(false);
+  const [entryRulesUnlockOpen, setEntryRulesUnlockOpen] = useState(false);
   const [tradingTodayOpen, setTradingTodayOpen] = useState(currentWindowId === MAIN_WINDOW_ID);
   const [tradingTodayDate, setTradingTodayDate] = useState(() => newYorkDateKey());
   const [tradingTodaySnapshot, setTradingTodaySnapshot] = useState<TradingTodaySnapshot | null>(null);
@@ -493,7 +547,6 @@ function TradingApp() {
   const closingPositionTimersRef = useRef(new Map<string, number>());
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
   const [currentTime, setCurrentTime] = useState(() => Date.now());
-  const entryRuleMinute = Math.floor(currentTime / 60_000) * 60_000;
   const subscriptionsRef = useRef(new Map<string, BarSubscription>());
   const barRolloverRefreshRef = useRef(new Map<string, BarRolloverRefreshState>());
   const latestDetachedGenerationRef = useRef(new Map<string, number>());
@@ -691,8 +744,8 @@ function TradingApp() {
     ? { provider: activeTab.symbol.provider, symbol: activeTab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
     : quoteFor(activeTab.symbol.symbol, 0, activeTab.symbol.provider));
   const activeEntryEligibility = useMemo(
-    () => evaluateEntryRules(workspace.entryRules, bars, activeQuote, entryRuleMinute),
-    [workspace.entryRules, bars, activeQuote, entryRuleMinute],
+    () => evaluateEntryRules(workspace.entryRules, bars, activeQuote, currentTime, activeTab.timeframe),
+    [workspace.entryRules, bars, activeQuote, currentTime, activeTab.timeframe],
   );
   const tabStreamKey = workspace.tabs.map((tab) => `${tab.id}:${tab.symbol.provider}:${tab.symbol.symbol}:${tab.timeframe}`).join("|");
   const alertOwnershipKey = workspace.tabs.flatMap((tab) => ALERT_TIMEFRAMES.filter((timeframe) => tab.ema200Alert[timeframe].enabled).map((timeframe) => `${tab.id}:${tab.symbol.symbol}:${timeframe}`)).join("|");
@@ -1727,7 +1780,7 @@ function TradingApp() {
       workspace.entryRules,
       workspace.entryRuleAlerts,
       inputs,
-      entryRuleMinute,
+      currentTime,
     );
     entryRuleAlertTrackerRef.current = tracked.state;
     if (!tracked.transitions.length) return;
@@ -1768,7 +1821,7 @@ function TradingApp() {
     showToast(tracked.transitions.map((transition) => (
       `${transition.symbol} ${transition.timeframe} ${transition.side === "long" ? "Long" : "Short"} entry allowed: ${transition.reason}`
     )).join(" · "));
-  }, [workspaceLoaded, entryRulePositionScope, entryRulePositionsReady, tabStreamKey, workspace.entryRules, workspace.entryRuleAlerts, tabMarkets, quotes, positions, entryRuleMinute]);
+  }, [workspaceLoaded, entryRulePositionScope, entryRulePositionsReady, tabStreamKey, workspace.entryRules, workspace.entryRuleAlerts, tabMarkets, quotes, positions, currentTime]);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
@@ -3396,7 +3449,7 @@ function TradingApp() {
     const sourceQuote = quotes[instrumentKey(tab.symbol)] ?? (api.isNative
       ? { provider: tab.symbol.provider, symbol: tab.symbol.symbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
       : quoteFor(tab.symbol.symbol, 0, tab.symbol.provider));
-    return evaluateEntryRules(workspace.entryRules, sourceBars, sourceQuote);
+    return evaluateEntryRules(workspace.entryRules, sourceBars, sourceQuote, Date.now(), tab.timeframe);
   }
 
   async function openReview(draft: OrderDraft, sourceTabId: string, chartSymbol: string) {
@@ -3848,6 +3901,7 @@ function TradingApp() {
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
       {!isDetached && <button className={`environment-badge ${environment}`} title="TradeStation futures environment" onClick={() => setEnvConfirm(environment === "sim" ? "live" : "sim")}><span />{environment.toUpperCase()}<ChevronDown size={13} /></button>}
+      {!isDetached && workspace.entryRuleLock.enabled && <button className="entry-rule-lock-badge" title="Entry rules are locked" onClick={() => setEntryRulesUnlockOpen(true)}><LockKeyhole size={13} /><span>Rules locked</span></button>}
       <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => activeTab.symbol.provider === "schwab" ? setSettingsOpen(true) : setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
@@ -4150,7 +4204,42 @@ function TradingApp() {
 
     {envConfirm && <Modal title={`Switch to ${envConfirm.toUpperCase()}?`} onClose={() => setEnvConfirm(null)}><div className={`environment-confirm ${envConfirm}`}><Zap size={22} /><div><strong>{envConfirm === "live" ? "Real orders and real money" : "Simulated execution"}</strong><p>{envConfirm === "live" ? "Changing to LIVE clears SIM account data." : "SIM uses a separate account environment and simulated fills."}</p></div></div><div className="modal-actions"><button className="secondary-button" onClick={() => setEnvConfirm(null)}>Cancel</button><button className={envConfirm === "live" ? "danger-button" : "primary-button"} disabled={busy} onClick={confirmEnvironment}>Switch to {envConfirm.toUpperCase()}</button></div></Modal>}
 
-    {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder rules={workspace.entryRules} alerts={workspace.entryRuleAlerts} bars={bars} quote={activeQuote} evaluatedAt={entryRuleMinute} onClose={() => setEntryRulesOpen(false)} onSave={(entryRules, entryRuleAlerts) => { updateWorkspace({ entryRules, entryRuleAlerts }); setEntryRulesOpen(false); showToast("Entry rules and alerts saved."); }} /></Modal>}
+    {entryRulesOpen && <Modal title="Entry rules" onClose={() => setEntryRulesOpen(false)} width={860}><EntryRulesBuilder
+      rules={workspace.entryRules}
+      alerts={workspace.entryRuleAlerts}
+      bars={bars}
+      quote={activeQuote}
+      timeframe={activeTab.timeframe}
+      evaluatedAt={currentTime}
+      locked={workspace.entryRuleLock.enabled}
+      onClose={() => setEntryRulesOpen(false)}
+      onRequestLock={() => setEntryRulesLockConfirmOpen(true)}
+      onRequestUnlock={() => setEntryRulesUnlockOpen(true)}
+      onSave={(entryRules, entryRuleAlerts) => {
+        if (workspaceRef.current.entryRuleLock.enabled) {
+          showToast("Entry rules are locked. Unlock them before saving changes.");
+          return;
+        }
+        updateWorkspace({ entryRules, entryRuleAlerts });
+        setEntryRulesOpen(false);
+        showToast("Entry rules and alerts saved.");
+      }}
+    /></Modal>}
+
+    {entryRulesLockConfirmOpen && <Modal title="Lock saved entry rules?" onClose={() => setEntryRulesLockConfirmOpen(false)}>
+      <div className="entry-rule-lock-confirm"><LockKeyhole size={22} /><span><strong>Editing will require a three-code challenge</strong><p>Your saved rules and alerts will keep controlling entries. This lock applies across SIM, LIVE, charts, accounts, and synchronized devices.</p></span></div>
+      <div className="modal-actions"><button className="secondary-button" onClick={() => setEntryRulesLockConfirmOpen(false)}>Cancel</button><button className="primary-button" onClick={() => {
+        updateWorkspace({ entryRuleLock: { enabled: true, lockedAt: new Date().toISOString() } });
+        setEntryRulesLockConfirmOpen(false);
+        showToast("Entry rules locked.");
+      }}><LockKeyhole size={14} />Lock saved rules</button></div>
+    </Modal>}
+
+    {entryRulesUnlockOpen && <EntryRuleUnlockChallenge onClose={() => setEntryRulesUnlockOpen(false)} onUnlocked={() => {
+      updateWorkspace({ entryRuleLock: { enabled: false } });
+      setEntryRulesUnlockOpen(false);
+      showToast("Entry rules unlocked. Review changes carefully before saving.");
+    }} />}
 
     {drawingAlertsOpen && <Modal title="Active drawing alerts" onClose={() => setDrawingAlertsOpen(false)} width={920}>
       <DrawingAlertsManager

@@ -169,4 +169,21 @@ describe("entry rule alerts", () => {
       triggered.state, epoch, timeRules, config, [input(101)], Date.parse("2026-07-27T09:31:00Z"),
     ).transitions).toEqual([]);
   });
+
+  it("uses each alert chart timeframe for candle-close transitions", () => {
+    const candleRules: EntryRules = {
+      allowEntries: { long: true, short: true },
+      long: { id: "long-root", kind: "group", combinator: "and", children: [{ id: "close", kind: "candleCloseWindow", windowSeconds: 3 }] },
+      short: { id: "short-root", kind: "group", combinator: "and", children: [] },
+    };
+    const config = enabled();
+    const epoch = entryRuleAlertEpoch("sim", candleRules, config);
+    const open = Date.parse("2026-07-31T12:00:00Z") / 1000;
+    const candleInput = { ...input(101), bars: [{ ...bars[0], time: open }], timeframe: "1m" as const };
+    const primed = trackEntryRuleAlertTransitions(undefined, epoch, candleRules, config, [candleInput], Date.parse("2026-07-31T12:00:59Z"));
+    expect(primed.state.statuses["MES\u00001m\u0000long"]).toBe("waiting");
+    const triggered = trackEntryRuleAlertTransitions(primed.state, epoch, candleRules, config, [candleInput], Date.parse("2026-07-31T12:01:00Z"));
+    expect(triggered.transitions).toHaveLength(1);
+    expect(trackEntryRuleAlertTransitions(triggered.state, epoch, candleRules, config, [candleInput], Date.parse("2026-07-31T12:01:03Z")).transitions).toEqual([]);
+  });
 });

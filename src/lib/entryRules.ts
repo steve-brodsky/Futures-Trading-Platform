@@ -1,8 +1,9 @@
 import type {
-  Bar, EntryRuleCondition, EntryRuleEmaCrossCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand,
+  Bar, EntryRuleCandleCloseCondition, EntryRuleCondition, EntryRuleEmaCrossCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand,
   EntryRuleResult, EntryRules, EntryRuleSide, EntryRuleTimeWindowCondition, EntryRuleTimezone,
-  EntryRuleWeekday, Quote,
+  EntryRuleWeekday, Quote, Timeframe,
 } from "../types";
+import { candleEndTime } from "./candleCountdown";
 import { ema, sma } from "./indicators";
 import { entryRuleTimezoneOptions } from "./timezone";
 
@@ -14,6 +15,9 @@ export const MIN_EMA_CROSS_PERIOD = 2;
 export const MAX_EMA_CROSS_PERIOD = 1000;
 export const MIN_EMA_CROSS_LOOKBACK = 1;
 export const MAX_EMA_CROSS_LOOKBACK = 1000;
+export const MIN_CANDLE_CLOSE_WINDOW_SECONDS = 1;
+export const MAX_CANDLE_CLOSE_WINDOW_SECONDS = 300;
+export const DEFAULT_CANDLE_CLOSE_WINDOW_SECONDS = 15;
 export const ALL_ENTRY_RULE_WEEKDAYS: EntryRuleWeekday[] = [0, 1, 2, 3, 4, 5, 6];
 export const ENTRY_RULE_WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
 
@@ -86,6 +90,20 @@ function normalizeSide(value: unknown, side: EntryRuleSide): EntryRuleGroup {
         direction: node.direction as EntryRuleEmaCrossCondition["direction"],
         period: Number(node.period),
         lookback: Number(node.lookback),
+      };
+    }
+
+    if (node.kind === "candleCloseWindow") {
+      if (!Number.isInteger(node.windowSeconds)
+        || Number(node.windowSeconds) < MIN_CANDLE_CLOSE_WINDOW_SECONDS
+        || Number(node.windowSeconds) > MAX_CANDLE_CLOSE_WINDOW_SECONDS) {
+        invalid = true;
+        return null;
+      }
+      return {
+        id: node.id,
+        kind: "candleCloseWindow",
+        windowSeconds: Number(node.windowSeconds),
       };
     }
 
@@ -201,7 +219,21 @@ export function formatEntryRuleCurrentTime(timestamp: number | Date, timezone: E
   return zonedEntryRuleTime(timestamp instanceof Date ? timestamp.getTime() : timestamp, timezone).display;
 }
 
-function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], quote: Quote, timestamp: number): EntryRuleResult {
+export function latestClosedCandleEnd(
+  bars: Bar[],
+  timeframe: Timeframe | undefined,
+  timestamp: number,
+): number | null {
+  if (!timeframe || !Number.isFinite(timestamp)) return null;
+  for (let index = bars.length - 1; index >= 0; index -= 1) {
+    const endSeconds = candleEndTime(bars[index].time, timeframe);
+    const endMilliseconds = endSeconds == null ? null : endSeconds * 1000;
+    if (endMilliseconds != null && endMilliseconds <= timestamp) return endMilliseconds;
+  }
+  return null;
+}
+
+function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], quote: Quote, timestamp: number, timeframe?: Timeframe): EntryRuleResult {
   const nodeResults: Record<string, boolean | null> = {};
   const closes = bars.map((bar) => bar.close);
   // TradeStation's IsRealtime flag describes bars delivered by the live stream;
@@ -281,6 +313,30 @@ function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], qu
     };
   }
 
+  function candleCloseWindow(node: EntryRuleCandleCloseCondition): NodeEvaluation {
+    const closedAt = latestClosedCandleEnd(bars, timeframe, timestamp);
+    if (closedAt == null) {
+      nodeResults[node.id] = null;
+      return { status: "waiting", reason: "Waiting for the chart timeframe and a closed candle." };
+    }
+    const elapsedMilliseconds = timestamp - closedAt;
+    const windowMilliseconds = node.windowSeconds * 1000;
+    const elapsedSeconds = Math.floor(elapsedMilliseconds / 1000);
+    const passed = elapsedMilliseconds >= 0 && elapsedMilliseconds < windowMilliseconds;
+    nodeResults[node.id] = passed;
+    if (passed) {
+      const remainingSeconds = Math.ceil((windowMilliseconds - elapsedMilliseconds) / 1000);
+      return {
+        status: "allowed",
+        reason: `${timeframe} candle closed ${elapsedSeconds}s ago; ${remainingSeconds}s remain in the entry window.`,
+      };
+    }
+    return {
+      status: "blocked",
+      reason: `${node.windowSeconds}s ${timeframe} candle-close entry window expired (${elapsedSeconds}s since close).`,
+    };
+  }
+
   function timeWindow(node: EntryRuleTimeWindowCondition): NodeEvaluation {
     if (!validEntryRuleTime(node.startTime) || !validEntryRuleTime(node.endTime)
       || node.startTime === node.endTime || !validEntryRuleTimezone(node.timezone) || node.weekdays.length === 0) {
@@ -319,7 +375,8 @@ function evaluateSide(root: EntryRuleGroup, side: EntryRuleSide, bars: Bar[], qu
     }
     const results = node.children.map((child) => child.kind === "group" ? group(child)
       : child.kind === "emaCross" ? emaCross(child)
-        : child.kind === "timeWindow" ? timeWindow(child) : condition(child));
+        : child.kind === "candleCloseWindow" ? candleCloseWindow(child)
+          : child.kind === "timeWindow" ? timeWindow(child) : condition(child));
     let status: EntryRuleResult["status"];
     if (node.combinator === "and") {
       status = results.some((result) => result.status === "blocked") ? "blocked"
@@ -344,11 +401,12 @@ export function evaluateEntryRules(
   bars: Bar[],
   quote: Quote,
   evaluatedAt: number | Date = Date.now(),
+  timeframe?: Timeframe,
 ): Record<EntryRuleSide, EntryRuleResult> {
   const timestamp = evaluatedAt instanceof Date ? evaluatedAt.getTime() : evaluatedAt;
   const evaluated = {
-    long: evaluateSide(rules.long, "long", bars, quote, timestamp),
-    short: evaluateSide(rules.short, "short", bars, quote, timestamp),
+    long: evaluateSide(rules.long, "long", bars, quote, timestamp, timeframe),
+    short: evaluateSide(rules.short, "short", bars, quote, timestamp, timeframe),
   };
   (["long", "short"] as const).forEach((side) => {
     if (rules.allowEntries[side]) return;

@@ -41,6 +41,7 @@ function workspace(): WorkspaceState {
     confirmOrders: false,
     entryRules: defaultEntryRules(),
     entryRuleAlerts: defaultEntryRuleAlerts(),
+    entryRuleLock: { enabled: false },
     settings: {
       crosshairSyncEnabled: false,
       chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 12 },
@@ -67,6 +68,7 @@ describe("cloud preferences", () => {
     expect(profile.categories.chart_display.economicEvents).toEqual(original.settings.chartEconomicEvents);
     expect(profile.categories.chart_display.crosshairSyncEnabled).toBe(false);
     expect(profile.categories.order_entry.entryRuleAlerts).toEqual(original.entryRuleAlerts);
+    expect(profile.categories.order_entry.entryRuleLock).toEqual({ enabled: false });
     expect(profile.categories.order_entry.contractRollAlerts).toEqual(original.settings.contractRollAlerts);
     expect(profile.categories.alerts.entryRules).toBeUndefined();
     expect(serialized).not.toContain("secret-account-id");
@@ -155,6 +157,14 @@ describe("cloud preferences", () => {
     expect(merged.entryRules.allowEntries).toEqual({ long: true, short: false });
   });
 
+  it("round-trips the persistent entry-rule lock through order-entry preferences", () => {
+    const local = workspace();
+    local.entryRuleLock = { enabled: true, lockedAt: "2026-07-31T12:00:00.000Z" };
+    const profile = cloudPreferenceProfile(local);
+    const merged = applyCloudPreferenceProfile(workspace(), profile);
+    expect(merged.entryRuleLock).toEqual({ enabled: true, lockedAt: "2026-07-31T12:00:00.000Z" });
+  });
+
   it("normalizes malformed downloaded values", () => {
     const local = workspace();
     const profile = cloudPreferenceProfile(local);
@@ -169,6 +179,7 @@ describe("cloud preferences", () => {
       long: { ...local.entryRules.long, children: [{ id: "price", kind: "condition", left: { kind: "marketPrice" }, operator: "above", right: { kind: "movingAverage", average: "EMA", period: 20 } }] },
     };
     profile.categories.order_entry.entryRuleAlerts = { long: { enabled: true, sound: "invalid", durationSeconds: 99 } };
+    profile.categories.order_entry.entryRuleLock = { enabled: "yes", lockedAt: 123 };
     const merged = applyCloudPreferenceProfile(local, profile);
     expect(merged.settings.crosshairSyncEnabled).toBe(false);
     expect(merged.settings.chartLabels.fontSize).toBe(16);
@@ -177,6 +188,7 @@ describe("cloud preferences", () => {
     expect(merged.settings.journal.commissionPerContractSide).toBe(0);
     expect(merged.watchlist.map((item) => [item.provider, item.symbol])).toEqual([["tradestation", "MESU26"]]);
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "chime", durationSeconds: 3 });
+    expect(merged.entryRuleLock).toEqual({ enabled: false });
   });
 
   it("round-trips position drawings through cloud preferences", () => {

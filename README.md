@@ -38,7 +38,8 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 - Automatic or manually selected concrete trade contract when charting a continuous futures symbol. Continuous symbols themselves are never sent as order symbols.
 - CME U.S. equity-index rollover warnings for charts and positions, with daily audio/log alerts, explicit next-contract actions, and a native per-order acknowledgment requirement after the customary roll date.
 - Optional order-review step using TradeStation's confirmation endpoint, including commission and initial-margin estimates when supplied by the API.
-- Independent Long/Short entry master switches plus nested AND/OR rules for market price, SMA, EMA, crossover, and time-window conditions.
+- Independent Long/Short entry master switches plus nested AND/OR rules for market price, SMA, EMA, crossover, time-window, and configurable post-candle-close entry windows.
+- A synchronized Entry Rules lock keeps saved rules read-only until a deliberate three-code unlock challenge is completed.
 - Per-side entry-rule alerts across every open chart, with sound, toast/log output, and persistent Long/Short tab badges.
 - Position and protective-order lines on the chart, including dollar and R-multiple labels.
 - Drag-to-adjust bracket take-profit and stop-loss orders with optimistic UI rollback if TradeStation rejects the replacement.
@@ -183,7 +184,7 @@ The password is used only for the initial token exchange. Northstar stores the S
 
 Entry-chart PNGs use the private `trade-screenshots` Supabase Storage bucket created by migration `202607150006_trade_screenshots.sql`. Images are uploaded and downloaded with the authenticated journal user, are limited to 5 MB, and are never written to SQLite or the local filesystem. If cloud access is unavailable after an entry, the order continues normally and the image is retried only while that desktop session remains open.
 
-Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EMA alert configuration, drawings, the watchlist, order-entry preferences, entry rules and their alert settings, and the journal fee rate. Monitor geometry, panel layout, SIM/LIVE selection, selected broker account, order-confirmation safety state, transient order drafts, and alert history remain local to each computer.
+Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EMA alert configuration, drawings, the watchlist, order-entry preferences, entry rules, their alert settings and lock state, and the journal fee rate. Monitor geometry, panel layout, SIM/LIVE selection, selected broker account, order-confirmation safety state, transient order drafts, and alert history remain local to each computer.
 
 ## Security and local data
 

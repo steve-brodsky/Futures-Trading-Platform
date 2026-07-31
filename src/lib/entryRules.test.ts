@@ -68,6 +68,21 @@ function timeWindowRules(
   };
 }
 
+function candleCloseRules(windowSeconds = 15): EntryRules {
+  return {
+    allowEntries: { long: true, short: true },
+    long: {
+      id: "long-root", kind: "group", combinator: "and", children: [
+        { id: "candle-close", kind: "candleCloseWindow", windowSeconds },
+      ],
+    },
+    short: { id: "short-root", kind: "group", combinator: "and", children: [] },
+  };
+}
+
+const candleOpen = Date.parse("2026-07-31T12:00:00Z") / 1000;
+const candleBars: Bar[] = [{ time: candleOpen, open: 100, high: 101, low: 99, close: 100, volume: 10 }];
+
 describe("entry rules", () => {
   it("allows empty Long and Short roots", () => {
     const rules = defaultEntryRules();
@@ -292,6 +307,59 @@ describe("entry rules", () => {
       { ...base, timezone: "US/Central" },
     ]) {
       expect(normalizeEntryRules({ ...valid, long: { ...valid.long, children: [invalid] } }).long.children).toEqual([]);
+    }
+  });
+
+  it("uses inclusive candle-close starts and exclusive window ends", () => {
+    const rules = candleCloseRules(15);
+    const close = Date.parse("2026-07-31T12:01:00Z");
+    expect(evaluateEntryRules(rules, candleBars, quote, close, "1m").long).toMatchObject({ status: "allowed", nodeResults: { "candle-close": true } });
+    expect(evaluateEntryRules(rules, candleBars, quote, close + 14_999, "1m").long.status).toBe("allowed");
+    expect(evaluateEntryRules(rules, candleBars, quote, close + 15_000, "1m").long).toMatchObject({ status: "blocked", nodeResults: { "candle-close": false } });
+  });
+
+  it("tracks the newest closed candle across feed rollover and custom timeframes", () => {
+    const rules = candleCloseRules(5);
+    const rolledBars = [...candleBars, { ...candleBars[0], time: candleOpen + 60, close: 101, realtime: true }];
+    expect(evaluateEntryRules(rules, rolledBars, quote, Date.parse("2026-07-31T12:02:00Z"), "1m").long.reason)
+      .toContain("closed 0s ago");
+
+    const customBars = [{ ...candleBars[0], time: candleOpen }];
+    expect(evaluateEntryRules(rules, customBars, quote, Date.parse("2026-07-31T12:07:04Z"), "7m").long.status).toBe("allowed");
+    expect(evaluateEntryRules(rules, customBars, quote, Date.parse("2026-07-31T12:07:05Z"), "7m").long.status).toBe("blocked");
+  });
+
+  it("waits without timeframe or candle history and reports an expired stale candle", () => {
+    const rules = candleCloseRules();
+    const now = Date.parse("2026-07-31T12:10:00Z");
+    expect(evaluateEntryRules(rules, candleBars, quote, now).long.status).toBe("waiting");
+    expect(evaluateEntryRules(rules, [], quote, now, "1m").long.status).toBe("waiting");
+    const stale = evaluateEntryRules(rules, candleBars, quote, now, "1m").long;
+    expect(stale.status).toBe("blocked");
+    expect(stale.reason).toContain("expired");
+  });
+
+  it("composes candle-close windows in nested AND and OR groups", () => {
+    const rules = candleCloseRules();
+    const close = Date.parse("2026-07-31T12:01:00Z");
+    const priceCondition = {
+      id: "price", kind: "condition" as const, left: { kind: "marketPrice" as const }, operator: "above" as const,
+      right: { kind: "movingAverage" as const, average: "SMA" as const, period: 1 },
+    };
+    rules.long.children = [{ id: "nested", kind: "group", combinator: "and", children: [rules.long.children[0], priceCondition] }];
+    expect(evaluateEntryRules(rules, candleBars, { ...quote, ask: 101 }, close, "1m").long.status).toBe("allowed");
+    expect(evaluateEntryRules(rules, candleBars, { ...quote, ask: 99 }, close, "1m").long.status).toBe("blocked");
+    (rules.long.children[0] as { combinator: "and" | "or" }).combinator = "or";
+    expect(evaluateEntryRules(rules, candleBars, { ...quote, ask: 99 }, close, "1m").long.status).toBe("allowed");
+  });
+
+  it("normalizes valid candle-close rules and rejects malformed windows", () => {
+    const valid = candleCloseRules(300);
+    expect(normalizeEntryRules(valid)).toEqual(valid);
+    for (const windowSeconds of [0, 301, 1.5, "15"]) {
+      const malformed = structuredClone(valid) as any;
+      malformed.long.children[0].windowSeconds = windowSeconds;
+      expect(normalizeEntryRules(malformed).long.children).toEqual([]);
     }
   });
 });

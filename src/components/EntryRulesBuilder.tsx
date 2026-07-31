@@ -1,15 +1,16 @@
 import { useMemo, useState } from "react";
-import { AlertCircle, Check, Clock3, GitBranch, Plus, Trash2 } from "lucide-react";
+import { AlertCircle, Check, Clock3, GitBranch, LockKeyhole, Plus, Trash2 } from "lucide-react";
 import type {
   AlertDurationSeconds, AlertSound, Bar, EntryRuleAlertConfig, EntryRuleCondition, EntryRuleEmaCrossCondition,
-  EntryRuleGroup, EntryRuleNode, EntryRuleOperand, EntryRules, EntryRuleSide, EntryRuleTimeWindowCondition,
-  EntryRuleTimezone, EntryRuleWeekday, Quote,
+  EntryRuleCandleCloseCondition, EntryRuleGroup, EntryRuleNode, EntryRuleOperand, EntryRules, EntryRuleSide,
+  EntryRuleTimeWindowCondition, EntryRuleTimezone, EntryRuleWeekday, Quote, Timeframe,
 } from "../types";
 import { playAlertSound, prepareAlertAudio } from "../lib/alertAudio";
 import { ALERT_DURATIONS, ALERT_SOUNDS } from "../lib/emaAlerts";
 import {
   ALL_ENTRY_RULE_WEEKDAYS, emptyEntryRuleGroup, ENTRY_RULE_WEEKDAY_LABELS, evaluateEntryRules,
   formatEntryRuleCurrentTime, MAX_ENTRY_RULE_DEPTH, MAX_ENTRY_RULE_NODES,
+  DEFAULT_CANDLE_CLOSE_WINDOW_SECONDS, MAX_CANDLE_CLOSE_WINDOW_SECONDS, MIN_CANDLE_CLOSE_WINDOW_SECONDS,
   MAX_EMA_CROSS_LOOKBACK, MAX_EMA_CROSS_PERIOD, MAX_MOVING_AVERAGE_PERIOD,
   MIN_EMA_CROSS_LOOKBACK, MIN_EMA_CROSS_PERIOD, MIN_MOVING_AVERAGE_PERIOD, sameEntryRuleOperand,
   validEntryRuleTime, validEntryRuleTimezone,
@@ -21,7 +22,11 @@ interface Props {
   alerts: EntryRuleAlertConfig;
   bars: Bar[];
   quote: Quote;
+  timeframe: Timeframe;
   evaluatedAt: number;
+  locked: boolean;
+  onRequestLock: () => void;
+  onRequestUnlock: () => void;
   onSave: (rules: EntryRules, alerts: EntryRuleAlertConfig) => void;
   onClose: () => void;
 }
@@ -39,6 +44,10 @@ function newCondition(): EntryRuleCondition {
 
 function newEmaCrossCondition(): EntryRuleEmaCrossCondition {
   return { id: id("ema-cross"), kind: "emaCross", direction: "above", period: 20, lookback: 5 };
+}
+
+function newCandleCloseCondition(): EntryRuleCandleCloseCondition {
+  return { id: id("candle-close"), kind: "candleCloseWindow", windowSeconds: DEFAULT_CANDLE_CLOSE_WINDOW_SECONDS };
 }
 
 function newTimeWindowCondition(): EntryRuleTimeWindowCondition {
@@ -91,6 +100,12 @@ function validationError(group: EntryRuleGroup, depth = 1, root = true): string 
       if (!Number.isInteger(child.period) || child.period < MIN_EMA_CROSS_PERIOD || child.period > MAX_EMA_CROSS_PERIOD
         || !Number.isInteger(child.lookback) || child.lookback < MIN_EMA_CROSS_LOOKBACK || child.lookback > MAX_EMA_CROSS_LOOKBACK) {
         return `EMA cross conditions need an EMA period from ${MIN_EMA_CROSS_PERIOD} to ${MAX_EMA_CROSS_PERIOD} and a lookback from ${MIN_EMA_CROSS_LOOKBACK} to ${MAX_EMA_CROSS_LOOKBACK}.`;
+      }
+    } else if (child.kind === "candleCloseWindow") {
+      if (!Number.isInteger(child.windowSeconds)
+        || child.windowSeconds < MIN_CANDLE_CLOSE_WINDOW_SECONDS
+        || child.windowSeconds > MAX_CANDLE_CLOSE_WINDOW_SECONDS) {
+        return `Candle-close windows must be whole seconds from ${MIN_CANDLE_CLOSE_WINDOW_SECONDS} to ${MAX_CANDLE_CLOSE_WINDOW_SECONDS}.`;
       }
     } else if (child.kind === "timeWindow") {
       if (!validEntryRuleTime(child.startTime) || !validEntryRuleTime(child.endTime)) {
@@ -184,11 +199,12 @@ interface GroupEditorProps {
   depth: number;
   nodeResults: Record<string, boolean | null>;
   evaluatedAt: number;
+  timeframe: Timeframe;
   onChange: (group: EntryRuleGroup) => void;
   onRemove?: () => void;
 }
 
-function GroupEditor({ group, root, depth, nodeResults, evaluatedAt, onChange, onRemove }: GroupEditorProps) {
+function GroupEditor({ group, root, depth, nodeResults, evaluatedAt, timeframe, onChange, onRemove }: GroupEditorProps) {
   const nodeCount = countNodes(root);
   const atNodeLimit = nodeCount >= MAX_ENTRY_RULE_NODES;
   const patchNode = (nodeId: string, update: (node: EntryRuleNode) => EntryRuleNode) => onChange(updateNode(root, nodeId, update));
@@ -204,7 +220,7 @@ function GroupEditor({ group, root, depth, nodeResults, evaluatedAt, onChange, o
     </div>
     <div className="entry-rule-children">
       {group.children.map((child) => child.kind === "group"
-        ? <GroupEditor key={child.id} group={child} root={root} depth={depth + 1} nodeResults={nodeResults} evaluatedAt={evaluatedAt} onChange={onChange} onRemove={() => onChange(removeNode(root, child.id))} />
+        ? <GroupEditor key={child.id} group={child} root={root} depth={depth + 1} nodeResults={nodeResults} evaluatedAt={evaluatedAt} timeframe={timeframe} onChange={onChange} onRemove={() => onChange(removeNode(root, child.id))} />
         : child.kind === "emaCross"
           ? <div key={child.id} className={`entry-rule-condition entry-rule-ema-cross ${nodeResults[child.id] == null ? "waiting" : nodeResults[child.id] ? "passing" : "failing"}`}>
             <span className="entry-rule-condition-state">{nodeResults[child.id] == null ? <AlertCircle size={13} /> : nodeResults[child.id] ? <Check size={13} /> : <AlertCircle size={13} />}</span>
@@ -222,6 +238,27 @@ function GroupEditor({ group, root, depth, nodeResults, evaluatedAt, onChange, o
               <span>closed candles</span>
             </div>
             <button className="entry-rule-icon danger" aria-label="Remove EMA cross condition" title="Remove EMA cross condition" onClick={() => onChange(removeNode(root, child.id))}><Trash2 size={13} /></button>
+          </div>
+        : child.kind === "candleCloseWindow"
+          ? <div key={child.id} className={`entry-rule-condition entry-rule-candle-close ${nodeResults[child.id] == null ? "waiting" : nodeResults[child.id] ? "passing" : "failing"}`}>
+            <span className="entry-rule-condition-state">{nodeResults[child.id] == null ? <Clock3 size={13} /> : nodeResults[child.id] ? <Check size={13} /> : <AlertCircle size={13} />}</span>
+            <div className="entry-rule-candle-close-editor">
+              <span>Enter within</span>
+              <input
+                type="number"
+                aria-label="Candle close entry window seconds"
+                min={MIN_CANDLE_CLOSE_WINDOW_SECONDS}
+                max={MAX_CANDLE_CLOSE_WINDOW_SECONDS}
+                step={1}
+                value={child.windowSeconds}
+                onChange={(event) => patchNode(child.id, (node) => ({
+                  ...node as EntryRuleCandleCloseCondition,
+                  windowSeconds: Math.max(MIN_CANDLE_CLOSE_WINDOW_SECONDS, Math.min(MAX_CANDLE_CLOSE_WINDOW_SECONDS, Math.round(Number(event.target.value) || MIN_CANDLE_CLOSE_WINDOW_SECONDS))),
+                }))}
+              />
+              <span>seconds after each {timeframe} candle closes</span>
+            </div>
+            <button className="entry-rule-icon danger" aria-label="Remove candle-close condition" title="Remove candle-close condition" onClick={() => onChange(removeNode(root, child.id))}><Trash2 size={13} /></button>
           </div>
         : child.kind === "timeWindow"
           ? <TimeWindowEditor
@@ -247,6 +284,7 @@ function GroupEditor({ group, root, depth, nodeResults, evaluatedAt, onChange, o
     <div className="entry-rule-add-row">
       <button disabled={atNodeLimit} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newCondition()] }))}><Plus size={12} />Condition</button>
       <button disabled={atNodeLimit} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newEmaCrossCondition()] }))}><Plus size={12} />EMA cross</button>
+      <button disabled={atNodeLimit} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newCandleCloseCondition()] }))}><Plus size={12} />Candle close</button>
       <button disabled={atNodeLimit} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newTimeWindowCondition()] }))}><Plus size={12} />Time window</button>
       <button disabled={nodeCount > MAX_ENTRY_RULE_NODES - 2 || depth >= MAX_ENTRY_RULE_DEPTH} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newGroup("and")] }))}><Plus size={12} />AND group</button>
       <button disabled={nodeCount > MAX_ENTRY_RULE_NODES - 2 || depth >= MAX_ENTRY_RULE_DEPTH} onClick={() => patchNode(group.id, (node) => ({ ...node as EntryRuleGroup, children: [...(node as EntryRuleGroup).children, newGroup("or")] }))}><Plus size={12} />OR group</button>
@@ -254,10 +292,11 @@ function GroupEditor({ group, root, depth, nodeResults, evaluatedAt, onChange, o
   </div>;
 }
 
-export function EntryRulesBuilder({ rules, alerts, bars, quote, evaluatedAt, onSave, onClose }: Props) {
+export function EntryRulesBuilder({ rules, alerts, bars, quote, timeframe, evaluatedAt, locked, onRequestLock, onRequestUnlock, onSave, onClose }: Props) {
   const [draft, setDraft] = useState<EntryRules>(() => structuredClone(rules));
   const [draftAlerts, setDraftAlerts] = useState<EntryRuleAlertConfig>(() => structuredClone(alerts));
-  const evaluation = useMemo(() => evaluateEntryRules(draft, bars, quote, evaluatedAt), [draft, bars, quote, evaluatedAt]);
+  const evaluation = useMemo(() => evaluateEntryRules(draft, bars, quote, evaluatedAt, timeframe), [draft, bars, quote, evaluatedAt, timeframe]);
+  const dirty = useMemo(() => JSON.stringify(draft) !== JSON.stringify(rules) || JSON.stringify(draftAlerts) !== JSON.stringify(alerts), [draft, draftAlerts, rules, alerts]);
   const error = validationError(draft.long) ?? validationError(draft.short)
     ?? (countNodes(draft.long) > MAX_ENTRY_RULE_NODES || countNodes(draft.short) > MAX_ENTRY_RULE_NODES ? `A direction can contain up to ${MAX_ENTRY_RULE_NODES} nodes.` : null);
 
@@ -278,7 +317,9 @@ export function EntryRulesBuilder({ rules, alerts, bars, quote, evaluatedAt, onS
     setDraftAlerts((current) => ({ ...current, [side]: { ...current[side], ...patch } }));
   };
   return <div className="entry-rules-builder">
-    <p className="entry-rules-intro">Master switches can block an entire entry side. Market rules use each open chart's timeframe and live ask for Long or bid for Short. Time windows use their selected timezone. Empty enabled directions stay unrestricted.</p>
+    <p className="entry-rules-intro">Master switches can block an entire entry side. Candle-close rules use the originating chart's timeframe. Market rules use live ask for Long or bid for Short. Time windows use their selected timezone.</p>
+    {locked && <div className="entry-rules-lock-notice"><LockKeyhole size={18} /><span><strong>Saved rules are locked</strong><small>Rules and alert settings remain active and viewable. Complete the unlock challenge to edit them.</small></span></div>}
+    <fieldset className="entry-rules-lock-fieldset" disabled={locked}>
     {(["long", "short"] as const).map((side) => {
       const result = evaluation[side];
       return <section className={`entry-rule-side ${side}`} key={side}>
@@ -310,13 +351,19 @@ export function EntryRulesBuilder({ rules, alerts, bars, quote, evaluatedAt, onS
           <label><span>Duration</span><select aria-label={`${side} entry alert duration`} disabled={!draftAlerts[side].enabled} value={draftAlerts[side].durationSeconds} onChange={(event) => setAlert(side, { durationSeconds: Number(event.target.value) as AlertDurationSeconds })}>{ALERT_DURATIONS.map((duration) => <option key={duration} value={duration}>{duration}s</option>)}</select></label>
           <button type="button" className="entry-rule-alert-preview" disabled={!draftAlerts[side].enabled} onClick={() => playAlertSound(draftAlerts[side].sound, draftAlerts[side].durationSeconds)}>Preview</button>
         </div>
-        <GroupEditor group={draft[side]} root={draft[side]} depth={1} nodeResults={result.nodeResults} evaluatedAt={evaluatedAt} onChange={(group) => setSide(side, group)} />
+        <GroupEditor group={draft[side]} root={draft[side]} depth={1} nodeResults={result.nodeResults} evaluatedAt={evaluatedAt} timeframe={timeframe} onChange={(group) => setSide(side, group)} />
       </section>;
     })}
     {error && <p className="entry-rule-validation"><AlertCircle size={14} />{error}</p>}
+    </fieldset>
     <div className="entry-rule-actions">
-      <button className="secondary-button" onClick={onClose}>Cancel</button>
-      <button className="primary-button" disabled={Boolean(error)} onClick={() => onSave(structuredClone(draft), structuredClone(draftAlerts))}>Save rules</button>
+      <button className="secondary-button" onClick={onClose}>{locked ? "Close" : "Cancel"}</button>
+      {locked
+        ? <button className="primary-button" onClick={onRequestUnlock}><LockKeyhole size={14} />Unlock rules</button>
+        : <>
+          <button className="secondary-button" disabled={dirty || Boolean(error)} title={dirty ? "Save or discard draft changes before locking" : "Lock the currently saved rules"} onClick={onRequestLock}><LockKeyhole size={14} />Lock saved rules</button>
+          <button className="primary-button" disabled={Boolean(error) || !dirty} onClick={() => onSave(structuredClone(draft), structuredClone(draftAlerts))}>Save rules</button>
+        </>}
     </div>
   </div>;
 }

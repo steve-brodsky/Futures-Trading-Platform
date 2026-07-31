@@ -85,6 +85,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
         contractRollAlerts: { ...workspace.settings.contractRollAlerts },
         entryRules: workspace.entryRules,
         entryRuleAlerts: workspace.entryRuleAlerts,
+        entryRuleLock: workspace.entryRuleLock,
       },
       journal_fees: {
         commissionPerContractSide: workspace.settings.journal.commissionPerContractSide,
@@ -180,6 +181,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     // Rule alert settings travel atomically with their rule definitions. The
     // alerts.entryRules fallback preserves profiles written by older clients.
     entryRuleAlerts: normalizeEntryRuleAlerts(orderEntry?.entryRuleAlerts ?? alerts?.entryRules ?? current.entryRuleAlerts),
+    entryRuleLock: object(orderEntry?.entryRuleLock) as unknown as WorkspaceState["entryRuleLock"] ?? current.entryRuleLock,
     settings: {
       crosshairSyncEnabled: typeof chartDisplay?.crosshairSyncEnabled === "boolean"
         ? chartDisplay.crosshairSyncEnabled

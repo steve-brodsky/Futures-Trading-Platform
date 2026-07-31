@@ -89,7 +89,7 @@ export function trackEntryRuleAlertTransitions(
   const transitions: EntryRuleAlertTransition[] = [];
   const canTrigger = previous?.epoch === epoch;
   markets.forEach((market, marketKey) => {
-    const evaluation = evaluateEntryRules(rules, market.bars, market.quote, evaluatedAt);
+    const evaluation = evaluateEntryRules(rules, market.bars, market.quote, evaluatedAt, market.timeframe);
     (["long", "short"] as const).forEach((side) => {
       if (!rules.allowEntries[side] || !alerts[side].enabled || rules[side].children.length === 0) return;
       const key = `${marketKey}\u0000${side}`;

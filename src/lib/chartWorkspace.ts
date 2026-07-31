@@ -350,6 +350,13 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   const savedJournal = value.settings?.journal;
   const entryRules = normalizeEntryRules(value.entryRules);
   const entryRuleAlerts = normalizeEntryRuleAlerts(value.entryRuleAlerts);
+  const rawEntryRuleLock = value.entryRuleLock && typeof value.entryRuleLock === "object" ? value.entryRuleLock : undefined;
+  const entryRuleLock = {
+    enabled: rawEntryRuleLock?.enabled === true,
+    ...(rawEntryRuleLock?.enabled === true && typeof rawEntryRuleLock.lockedAt === "string" && rawEntryRuleLock.lockedAt.trim()
+      ? { lockedAt: rawEntryRuleLock.lockedAt }
+      : {}),
+  };
   (["long", "short"] as const).forEach((side) => {
     if (!entryRules[side].children.length) entryRuleAlerts[side].enabled = false;
   });
@@ -385,6 +392,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     confirmOrders: value.confirmOrders ?? true,
     entryRules,
     entryRuleAlerts,
+    entryRuleLock,
     settings: {
       crosshairSyncEnabled: typeof value.settings?.crosshairSyncEnabled === "boolean"
         ? value.settings.crosshairSyncEnabled
@@ -443,6 +451,9 @@ function sameEntryRuleNode(left: EntryRuleNode, right: EntryRuleNode): boolean {
   }
   if (left.kind === "emaCross" && right.kind === "emaCross") {
     return left.direction === right.direction && left.period === right.period && left.lookback === right.lookback;
+  }
+  if (left.kind === "candleCloseWindow" && right.kind === "candleCloseWindow") {
+    return left.windowSeconds === right.windowSeconds;
   }
   if (left.kind === "timeWindow" && right.kind === "timeWindow") {
     return left.startTime === right.startTime && left.endTime === right.endTime
@@ -528,6 +539,10 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
   const entryRuleAlerts = sameEntryRuleAlerts(current.entryRuleAlerts, incoming.entryRuleAlerts)
     ? current.entryRuleAlerts
     : incoming.entryRuleAlerts;
+  const entryRuleLock = current.entryRuleLock.enabled === incoming.entryRuleLock.enabled
+    && current.entryRuleLock.lockedAt === incoming.entryRuleLock.lockedAt
+    ? current.entryRuleLock
+    : incoming.entryRuleLock;
   const settings = current.settings.crosshairSyncEnabled === incoming.settings.crosshairSyncEnabled
     && current.settings.chartLabels.showEma200TabDots === incoming.settings.chartLabels.showEma200TabDots
     && current.settings.chartLabels.showDollarAmount === incoming.settings.chartLabels.showDollarAmount
@@ -563,6 +578,7 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
       : drawings,
     entryRules,
     entryRuleAlerts,
+    entryRuleLock,
     settings,
   };
 }

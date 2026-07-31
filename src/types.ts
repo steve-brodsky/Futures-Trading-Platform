@@ -294,6 +294,12 @@ export interface EntryRuleEmaCrossCondition {
   lookback: number;
 }
 
+export interface EntryRuleCandleCloseCondition {
+  id: string;
+  kind: "candleCloseWindow";
+  windowSeconds: number;
+}
+
 export type BrokerOutcome = "confirmed" | "rejected" | "unknown";
 export type LocalPersistenceStatus = "complete" | "pending" | "failed";
 export type ReconciliationStatus = "not_required" | "required" | "reconciling" | "reconciled" | "manual_review_required" | "failed";
@@ -398,7 +404,7 @@ export interface EntryRuleGroup {
   children: EntryRuleNode[];
 }
 
-export type EntryRuleNode = EntryRuleCondition | EntryRuleEmaCrossCondition | EntryRuleTimeWindowCondition | EntryRuleGroup;
+export type EntryRuleNode = EntryRuleCondition | EntryRuleEmaCrossCondition | EntryRuleCandleCloseCondition | EntryRuleTimeWindowCondition | EntryRuleGroup;
 
 export interface EntryRules {
   allowEntries: Record<EntryRuleSide, boolean>;
@@ -407,6 +413,11 @@ export interface EntryRules {
 }
 
 export type EntryRuleAlertConfig = Record<EntryRuleSide, TimeframeAlertConfig>;
+
+export interface EntryRuleLockState {
+  enabled: boolean;
+  lockedAt?: string;
+}
 
 export interface EntryRuleResult {
   allowed: boolean;
@@ -600,6 +611,7 @@ export interface WorkspaceState {
   confirmOrders: boolean;
   entryRules: EntryRules;
   entryRuleAlerts: EntryRuleAlertConfig;
+  entryRuleLock: EntryRuleLockState;
   settings: WorkspaceSettings;
 }
 

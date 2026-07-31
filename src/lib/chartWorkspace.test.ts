@@ -17,7 +17,7 @@ const fallback: WorkspaceState = {
   windows: [{ id: "main", tabIds: ["chart-1"], activeTabId: "chart-1", detached: false }],
   drawings: {},
   gexSelections: {},
-  watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(),
+  watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
   settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
 
@@ -466,17 +466,48 @@ describe("chart workspace", () => {
     expect(manual.tabs[0].tradeContract).toBe("MESZ26");
   });
 
-  it("defaults legacy workspaces to unrestricted entry rules and disabled alerts", () => {
-    const result = normalizeChartWorkspace({ ...fallback, entryRules: undefined, entryRuleAlerts: undefined }, fallback);
+  it("defaults legacy workspaces to unrestricted entry rules, disabled alerts, and an unlocked rule editor", () => {
+    const result = normalizeChartWorkspace({ ...fallback, entryRules: undefined, entryRuleAlerts: undefined, entryRuleLock: undefined }, fallback);
     expect(result.entryRules.allowEntries).toEqual({ long: true, short: true });
     expect(result.entryRules.long.children).toEqual([]);
     expect(result.entryRules.short.children).toEqual([]);
     expect(result.entryRuleAlerts).toEqual(defaultEntryRuleAlerts());
+    expect(result.entryRuleLock).toEqual({ enabled: false });
     const inconsistent = normalizeChartWorkspace({
       ...fallback,
       entryRuleAlerts: { ...defaultEntryRuleAlerts(), long: { enabled: true, sound: "bell", durationSeconds: 5 } },
     }, fallback);
     expect(inconsistent.entryRuleAlerts.long).toEqual({ enabled: false, sound: "bell", durationSeconds: 5 });
+  });
+
+  it("persists and stabilizes the global entry-rule lock", () => {
+    const locked = normalizeChartWorkspace({
+      ...fallback,
+      entryRuleLock: { enabled: true, lockedAt: "2026-07-31T12:00:00.000Z" },
+    }, fallback);
+    expect(locked.entryRuleLock).toEqual({ enabled: true, lockedAt: "2026-07-31T12:00:00.000Z" });
+    expect(stabilizeChartWorkspace(locked, normalizeChartWorkspace({ ...locked }, fallback)).entryRuleLock)
+      .toBe(locked.entryRuleLock);
+
+    const unlocked = normalizeChartWorkspace({ ...locked, entryRuleLock: { enabled: false, lockedAt: "stale" } }, fallback);
+    expect(unlocked.entryRuleLock).toEqual({ enabled: false });
+    expect(stabilizeChartWorkspace(locked, unlocked).entryRuleLock).not.toBe(locked.entryRuleLock);
+  });
+
+  it("stabilizes unchanged candle-close rules and detects window changes", () => {
+    const entryRules = {
+      allowEntries: { long: true, short: true },
+      long: { id: "long-root", kind: "group" as const, combinator: "and" as const, children: [{ id: "close", kind: "candleCloseWindow" as const, windowSeconds: 15 }] },
+      short: { id: "short-root", kind: "group" as const, combinator: "and" as const, children: [] },
+    };
+    const current = normalizeChartWorkspace({ ...fallback, entryRules }, fallback);
+    const unchanged = stabilizeChartWorkspace(current, normalizeChartWorkspace({ ...current }, fallback));
+    expect(unchanged.entryRules).toBe(current.entryRules);
+    const changed = normalizeChartWorkspace({
+      ...current,
+      entryRules: { ...entryRules, long: { ...entryRules.long, children: [{ ...entryRules.long.children[0], windowSeconds: 30 }] } },
+    }, fallback);
+    expect(stabilizeChartWorkspace(current, changed).entryRules).not.toBe(current.entryRules);
   });
 
   it("persists blanket side restrictions and detects switch-only workspace changes", () => {
