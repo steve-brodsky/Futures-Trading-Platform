@@ -4221,7 +4221,6 @@ function TradingApp() {
           return;
         }
         updateWorkspace({ entryRules, entryRuleAlerts });
-        setEntryRulesOpen(false);
         showToast("Entry rules and alerts saved.");
       }}
     /></Modal>}
