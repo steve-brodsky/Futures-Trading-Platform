@@ -422,6 +422,7 @@ async function requestDetachedBudget(contractCount: number): Promise<void> {
 export function DetachedOptionChainWindow() {
   const [transfer, setTransfer] = useState<OptionChainTransferState>();
   const [startupError, setStartupError] = useState<string>();
+  const [windowActionError, setWindowActionError] = useState<string>();
   const transferRef = useRef<OptionChainTransferState | undefined>(undefined);
   const [authenticated, setAuthenticated] = useState(!api.isNative);
   transferRef.current = transfer;
@@ -479,12 +480,21 @@ export function DetachedOptionChainWindow() {
       cleanups.forEach((cleanup) => cleanup());
     };
   }, []);
+  const runWindowAction = async (label: string, action: () => Promise<void>) => {
+    try {
+      setWindowActionError(undefined);
+      await action();
+    } catch (error) {
+      setWindowActionError(`${label}: ${String(error)}`);
+    }
+  };
   if (!transfer) return <main className="option-window-shell"><div className={`option-chain-loading ${startupError ? "error" : ""}`}>{startupError ? <Wifi size={20} /> : <LoaderCircle size={20} className="spin" />}<strong>{startupError ? "Could not open option chain" : "Opening option chain"}</strong>{startupError && <span>{startupError}</span>}</div></main>;
   return <main className="option-window-shell">
     <header className="option-window-titlebar" data-tauri-drag-region>
       <div className="brand"><div className="brand-glyph">N</div><span>NORTHSTAR</span><small>OPTIONS</small></div>
       <span className="option-window-title">{transfer.preferences.symbol} Option Chain</span>
-      <div className="option-window-controls"><button type="button" onClick={() => void getCurrentWindow().minimize()}><Minus size={13} /></button><button type="button" onClick={() => void getCurrentWindow().toggleMaximize()}><Maximize2 size={13} /></button><button type="button" onClick={() => void getCurrentWindow().close()}><X size={14} /></button></div>
+      {windowActionError && <span className="option-window-command-error" title={windowActionError}>Window control unavailable</span>}
+      <div className="option-window-controls"><button type="button" aria-label="Minimize option chain" onClick={() => void runWindowAction("Minimize failed", () => getCurrentWindow().minimize())}><Minus size={13} /></button><button type="button" aria-label="Maximize or restore option chain" onClick={() => void runWindowAction("Resize failed", () => getCurrentWindow().toggleMaximize())}><Maximize2 size={13} /></button><button type="button" aria-label="Close option chain" onClick={() => void runWindowAction("Close failed", () => getCurrentWindow().close())}><X size={14} /></button></div>
     </header>
     <OptionChainWorkspace
       detached authenticated={authenticated} preferences={transfer.preferences} draft={transfer.draft}
