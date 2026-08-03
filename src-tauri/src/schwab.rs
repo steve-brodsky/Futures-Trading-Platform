@@ -329,6 +329,7 @@ impl Schwab {
         &self,
         symbol: &str,
         expiration_dates: &[String],
+        strike_count: Option<u32>,
     ) -> Result<OptionChainSnapshot, AppError> {
         if expiration_dates.is_empty() {
             return Err(AppError::Validation(
@@ -350,6 +351,9 @@ impl Schwab {
             .append_pair("strategy", "SINGLE")
             .append_pair("fromDate", &dates[0])
             .append_pair("toDate", dates.last().unwrap_or(&dates[0]));
+        if let Some(strike_count) = strike_count.filter(|count| *count > 0) {
+            url.query_pairs_mut().append_pair("strikeCount", &strike_count.min(100).to_string());
+        }
         let body = self.get_json(url.as_str()).await?;
         Ok(option_chain_from_value(&body, symbol, &dates))
     }
@@ -912,10 +916,14 @@ fn option_contract_from_chain(
         open_interest: number_named(value, "openInterest").unwrap_or_default(),
         bid_price: number_named(value, "bidPrice").unwrap_or_default(),
         ask_price: number_named(value, "askPrice").unwrap_or_default(),
+        bid_size: number_named(value, "bidSize").unwrap_or_default(),
+        ask_size: number_named(value, "askSize").unwrap_or_default(),
         mark_price: number_named(value, "markPrice").unwrap_or_default(),
         total_volume: number_named(value, "totalVolume").unwrap_or_default(),
         volatility: number_named(value, "volatility").unwrap_or_default(),
         delta: number_named(value, "delta").unwrap_or_default(),
+        theta: number_named(value, "theta").unwrap_or_default(),
+        vega: number_named(value, "vega").unwrap_or_default(),
         underlying_price,
         quote_time: integer_named(value, "quoteTimeInLong").unwrap_or_default(),
         delayed,
@@ -959,10 +967,14 @@ pub fn streamed_option_from_value(value: &Value) -> Option<OptionContract> {
         open_interest: numeric_field(value, 9).unwrap_or_default(),
         bid_price: numeric_field(value, 2).unwrap_or_default(),
         ask_price: numeric_field(value, 3).unwrap_or_default(),
+        bid_size: numeric_field(value, 16).unwrap_or_default(),
+        ask_size: numeric_field(value, 17).unwrap_or_default(),
         mark_price: numeric_field(value, 37).unwrap_or_default(),
         total_volume: numeric_field(value, 8).unwrap_or_default(),
         volatility: numeric_field(value, 10).unwrap_or_default(),
         delta: numeric_field(value, 28).unwrap_or_default(),
+        theta: numeric_field(value, 30).unwrap_or_default(),
+        vega: numeric_field(value, 31).unwrap_or_default(),
         underlying_price: numeric_field(value, 35).unwrap_or_default(),
         quote_time: integer_field(value, 38).unwrap_or_default(),
         delayed: false,
@@ -1094,7 +1106,8 @@ mod tests {
         let contract = |symbol: &str, side: &str, expiration: &str| {
             serde_json::json!({
                 "symbol":symbol,"putCall":side,"strikePrice":200.0,"expirationDate":expiration,
-                "multiplier":100.0,"gamma":0.02,"openInterest":1200,"bidPrice":5.0,"askPrice":5.2,
+                "multiplier":100.0,"gamma":0.02,"theta":-0.11,"vega":0.24,"openInterest":1200,
+                "bidPrice":5.0,"askPrice":5.2,"bidSize":14,"askSize":19,
                 "markPrice":5.1,"isMini":false,"isNonStandard":false
             })
         };
@@ -1115,6 +1128,10 @@ mod tests {
             .iter()
             .all(|item| item.expiration_date == "2026-07-24"));
         assert_eq!(snapshot.contracts[0].underlying_price, 205.0);
+        assert_eq!(snapshot.contracts[0].bid_size, 14.0);
+        assert_eq!(snapshot.contracts[0].ask_size, 19.0);
+        assert_eq!(snapshot.contracts[0].theta, -0.11);
+        assert_eq!(snapshot.contracts[0].vega, 0.24);
     }
 
     fn bar(time: i64, open: f64, high: f64, low: f64, close: f64, volume: f64) -> Bar {

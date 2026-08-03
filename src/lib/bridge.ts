@@ -254,8 +254,8 @@ const rawApi = {
   async optionExpirations(symbol: string): Promise<OptionExpiration[]> {
     return isTauri ? native("get_option_expirations", { symbol }) : demoOptionExpirations(symbol);
   },
-  async optionChain(symbol: string, expirationDates: string[]): Promise<OptionChainSnapshot> {
-    return isTauri ? native("get_option_chain", { symbol, expirationDates }) : demoOptionChain(symbol, expirationDates);
+  async optionChain(symbol: string, expirationDates: string[], strikeCount?: number): Promise<OptionChainSnapshot> {
+    return isTauri ? native("get_option_chain", { symbol, expirationDates, strikeCount }) : demoOptionChain(symbol, expirationDates, strikeCount);
   },
   async startOptionStream(subscriptionId: string, symbol: string, contractSymbols: string[]): Promise<void> {
     if (isTauri) await native("start_option_stream", { subscriptionId, symbol, contractSymbols });

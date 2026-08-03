@@ -8,7 +8,7 @@ import {
   GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
   Magnet, MousePointer2, Palette, PanelsTopLeft, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingDown, TrendingUp,
-  Wifi, X, Zap,
+  Table2, Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
 import { ChartPaneGrid } from "./components/ChartPaneGrid";
@@ -18,6 +18,7 @@ import { AuditLogModal } from "./components/AuditLogModal";
 import { JournalCloudSettings, TradeJournalWindow } from "./components/TradeJournalWindow";
 import { TradingTodayModal, type TradingTodaySource } from "./components/TradingTodayModal";
 import { CustomTimeframeModal, type CustomTimeframeEntry } from "./components/CustomTimeframeModal";
+import { DetachedOptionChainWindow, OptionChainWorkspace, type OptionChainTransferState } from "./components/OptionChainWorkspace";
 import { api } from "./lib/bridge";
 import { mutationPresentation } from "./lib/mutationResults";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
@@ -61,7 +62,8 @@ import {
 } from "./lib/contractRoll";
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
 import { minuteTimeframe, normalizeCustomMinuteTimeframes, orderedToolbarTimeframes, parseMinuteTimeframe, removeCustomMinuteTimeframe as removeCustomMinuteTimeframeFromWorkspace, saveCustomMinuteTimeframe, workspaceForPersistence } from "./lib/timeframes";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import { defaultOptionOrderDraft, optionStreamBudget } from "./lib/optionChain";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
@@ -95,6 +97,7 @@ const defaultWorkspace: WorkspaceState = {
   tabs: [{ id: "chart-1", symbol: futures[0], timeframe: "1m", chartKind: "candles", renkoSettings: defaultRenkoSettings(), pointAndFigureSettings: defaultPointAndFigureSettings(), indicators: defaultIndicators, ema200Alert: defaultEma200Alert(), chartTimezone: "exchange", magnetEnabled: false, gex: { enabled: false, view: "net", expirationDisplay: "aggregate" } }],
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
+  activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
   settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
@@ -415,7 +418,9 @@ function SchwabCredentials({ clientId, secret, busy, configured, connected, nati
 }
 
 export default function App() {
-  if (new URLSearchParams(window.location.search).get("view") === "journal") return <TradeJournalWindow />;
+  const view = new URLSearchParams(window.location.search).get("view");
+  if (view === "journal") return <TradeJournalWindow />;
+  if (view === "option-chain") return <DetachedOptionChainWindow />;
   return <TradingApp />;
 }
 
@@ -455,6 +460,12 @@ function TradingApp() {
   const [gexCoverage, setGexCoverage] = useState<Record<string, number>>({});
   const gexCoverageRef = useRef(gexCoverage);
   const gexStreamSubscriptionsRef = useRef(new Map<string, string>());
+  const [optionDraft, setOptionDraft] = useState<OptionOrderDraft>(() => defaultOptionOrderDraft(defaultWorkspace.optionChain.symbol));
+  const optionDraftRef = useRef(optionDraft);
+  const [optionChainReservation, setOptionChainReservation] = useState(0);
+  const optionChainBudgetOwnerRef = useRef<string | undefined>(undefined);
+  const optionChainBudgetEpochRef = useRef(0);
+  const pendingOptionTransferRef = useRef<OptionChainTransferState | undefined>(undefined);
   const [orderProjection, setOrderProjection] = useState<(OrderProjection & { tradeSymbol?: string }) | null>(null);
   const [orderTicketResetEpochs, setOrderTicketResetEpochs] = useState<Record<string, number>>({});
   const [tradeDetails, setTradeDetails] = useState<Record<string, SymbolMeta>>({});
@@ -703,6 +714,7 @@ function TradingApp() {
   quotesRef.current = quotes;
   gexMarketsRef.current = gexMarkets;
   gexCoverageRef.current = gexCoverage;
+  optionDraftRef.current = optionDraft;
   entryRuleTabSignalsRef.current = entryRuleTabSignals;
 
   useEffect(() => {
@@ -1126,6 +1138,7 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OptionStreamStateEvent>("option-stream-state", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (!payload.subscriptionId.startsWith("gex:")) return;
         setGexMarkets((current) => {
           const market = current[payload.symbol];
           if (!market) return current;
@@ -1411,7 +1424,7 @@ function TradingApp() {
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
-    const budgets = allocateGexStreamBudgets(visibleGexSymbols, activeTab.gex.enabled ? activeTab.symbol.symbol : undefined, 100);
+    const budgets = allocateGexStreamBudgets(visibleGexSymbols, activeTab.gex.enabled ? activeTab.symbol.symbol : undefined, optionStreamBudget(optionChainReservation).gex);
     const nextSubscriptions = new Map<string, string>();
     const nextCoverage: Record<string, number> = {};
     visibleGexSymbols.forEach((symbol) => {
@@ -1444,7 +1457,7 @@ function TradingApp() {
     });
     gexCoverageRef.current = nextCoverage;
     setGexCoverage(nextCoverage);
-  }, [workspaceLoaded, gexStreamPlanKey, activeTab.id, schwabAuthEpoch]);
+  }, [workspaceLoaded, gexStreamPlanKey, activeTab.id, schwabAuthEpoch, optionChainReservation]);
 
   useEffect(() => () => {
     gexStreamSubscriptionsRef.current.forEach((_signature, subscriptionId) => { void api.stopOptionStream(subscriptionId); });
@@ -2866,6 +2879,91 @@ function TradingApp() {
     commitWorkspace((current) => ({ ...current, ...patch }));
   }
 
+  async function reserveOptionChainBudget(contractCount: number, ownerId = MAIN_WINDOW_ID): Promise<void> {
+    const epoch = ++optionChainBudgetEpochRef.current;
+    optionChainBudgetOwnerRef.current = ownerId;
+    const next = optionStreamBudget(contractCount).chain;
+    const subscriptions = [...gexStreamSubscriptionsRef.current.keys()];
+    gexStreamSubscriptionsRef.current.clear();
+    gexCoverageRef.current = {};
+    setGexCoverage({});
+    await Promise.all(subscriptions.map((subscriptionId) => api.stopOptionStream(subscriptionId).catch(() => undefined)));
+    if (optionChainBudgetEpochRef.current === epoch && optionChainBudgetOwnerRef.current === ownerId) setOptionChainReservation(next);
+  }
+
+  function releaseOptionChainBudget(ownerId = MAIN_WINDOW_ID) {
+    if (optionChainBudgetOwnerRef.current !== ownerId) return;
+    optionChainBudgetEpochRef.current += 1;
+    optionChainBudgetOwnerRef.current = undefined;
+    setOptionChainReservation(0);
+  }
+
+  async function showOptionWorkspace() {
+    if (api.isNative) {
+      const detached = (await getAllWindows()).find((item) => item.label === "option-chain");
+      if (detached) {
+        await detached.show().catch(() => undefined);
+        await detached.setFocus();
+        return;
+      }
+    }
+    updateWorkspace({ activeWorkspace: "options" });
+  }
+
+  async function detachOptionChain(state: OptionChainTransferState) {
+    if (!api.isNative) {
+      showToast("Option-chain detaching is available in the desktop app.");
+      return;
+    }
+    pendingOptionTransferRef.current = state;
+    const existing = (await getAllWindows()).find((item) => item.label === "option-chain");
+    if (existing) {
+      await emitTo("option-chain", "option-chain-transfer", state);
+      await existing.show().catch(() => undefined);
+      await existing.setFocus();
+      updateWorkspace({ activeWorkspace: "charts" });
+      return;
+    }
+    try {
+      new WebviewWindow("option-chain", {
+        url: "/?view=option-chain",
+        title: `${state.preferences.symbol} Option Chain · Northstar`,
+        width: 1500,
+        height: 900,
+        minWidth: 1000,
+        minHeight: 640,
+        center: true,
+        decorations: false,
+      });
+    } catch (error) {
+      pendingOptionTransferRef.current = undefined;
+      showToast(`Could not detach option chain: ${String(error)}`);
+    }
+  }
+
+  useEffect(() => {
+    if (!api.isNative || currentWindowId !== MAIN_WINDOW_ID) return;
+    const cleanups: Array<() => void> = [];
+    listen<{ requestId: string; contractCount: number; windowId: string }>("option-chain-budget-request", async ({ payload }) => {
+      await reserveOptionChainBudget(payload.contractCount, payload.windowId);
+      await emitTo(payload.windowId, "option-chain-budget-granted", { requestId: payload.requestId });
+    }).then((cleanup) => cleanups.push(cleanup));
+    listen<{ windowId: string }>("option-chain-budget-release", ({ payload }) => releaseOptionChainBudget(payload.windowId)).then((cleanup) => cleanups.push(cleanup));
+    listen<{ windowId: string }>("option-chain-window-ready", async ({ payload }) => {
+      const state = pendingOptionTransferRef.current ?? { preferences: workspaceRef.current.optionChain, draft: optionDraftRef.current };
+      await emitTo(payload.windowId, "option-chain-transfer", state);
+      if (workspaceRef.current.activeWorkspace !== "charts") commitWorkspace((current) => ({ ...current, activeWorkspace: "charts" }));
+    }).then((cleanup) => cleanups.push(cleanup));
+    listen<{ windowId: string }>("option-chain-transfer-received", ({ payload }) => {
+      if (payload.windowId === "option-chain") pendingOptionTransferRef.current = undefined;
+    }).then((cleanup) => cleanups.push(cleanup));
+    listen<OptionChainTransferState>("option-chain-dock", ({ payload }) => {
+      setOptionDraft(payload.draft);
+      commitWorkspace((current) => ({ ...current, activeWorkspace: "options", optionChain: payload.preferences }));
+    }).then((cleanup) => cleanups.push(cleanup));
+    return () => cleanups.forEach((cleanup) => cleanup());
+  }, []);
+
   function updateChartLabelSettings(patch: Partial<ChartLabelSettings>) {
     commitWorkspace((current) => ({
       ...current,
@@ -3787,6 +3885,7 @@ function TradingApp() {
   const activeGexContractCount = activeGexMarket ? Object.keys(activeGexMarket.contracts).length : 0;
   const activeGexCoverage = gexCoverage[activeTab.symbol.symbol] ?? 0;
   const activeGexStatus = activeGexMarket ? gexStatusLabel(activeGexMarket.status) : activeTab.gex.enabled ? "Loading" : "Off";
+  const optionWorkspaceActive = !isDetached && workspace.activeWorkspace === "options";
   const tradeContractStatus = !activeContinuous ? undefined
     : !activeTradeSymbol ? "Auto unavailable: TradeStation did not return an underlying contract."
     : tradeDetailErrors[activeTradeSymbol] ? `Contract details unavailable for ${activeTradeSymbol}.`
@@ -3897,6 +3996,10 @@ function TradingApp() {
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
     <header className="titlebar">
       <div className="brand"><div className="brand-glyph"><TrendingUp size={16} strokeWidth={2.4} /></div><span>NORTHSTAR</span><small>TRADER</small></div>
+      {!isDetached && <nav className="workspace-mode-switch" aria-label="Workspace">
+        <button type="button" className={!optionWorkspaceActive ? "active" : ""} aria-pressed={!optionWorkspaceActive} onClick={() => updateWorkspace({ activeWorkspace: "charts" })}><LineChart size={13} />Charts</button>
+        <button type="button" className={optionWorkspaceActive ? "active" : ""} aria-pressed={optionWorkspaceActive} onClick={() => void showOptionWorkspace()}><Table2 size={13} />Options</button>
+      </nav>}
       {hasWindowTabs && <TopbarWatchlist symbols={workspace.watchlist} quotes={quotes} active={instrumentKey(activeTab.symbol)} onSelect={selectWatchlistSymbol} />}
       <div className="titlebar-drag" data-tauri-drag-region />
       {!isDetached && <div className="market-clock" aria-label={`New York market time ${marketTime}`} title="New York market time"><span>NY</span><time>{marketTime}</time></div>}
@@ -3905,6 +4008,17 @@ function TradingApp() {
       <button className={`connection-chip ${market.streamState}`} title={market.streamMessage ?? `Chart data ${connectionLabel.toLowerCase()}`} onClick={() => activeTab.symbol.provider === "schwab" ? setSettingsOpen(true) : setSetupOpen(true)}><Wifi size={13} /><span>{connectionLabel}</span></button>
     </header>
 
+    {optionWorkspaceActive ? <OptionChainWorkspace
+      authenticated={schwabAuthenticated}
+      preferences={workspace.optionChain}
+      draft={optionDraft}
+      onPreferencesChange={(optionChain) => updateWorkspace({ optionChain })}
+      onDraftChange={setOptionDraft}
+      onRequestBudget={reserveOptionChainBudget}
+      onReleaseBudget={releaseOptionChainBudget}
+      onDetach={detachOptionChain}
+      onOpenSettings={() => setSettingsOpen(true)}
+    /> : <>
     <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} visibleTabIds={visibleTabIds} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} entryRuleSignals={entryRuleTabSignals} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); if (api.isNative) emit("chart-strip-bounds", bounds); }} />
 
     <nav className={`toolbar ${hasWindowTabs ? "" : "empty"}`} aria-label="Chart toolbar">
@@ -4064,6 +4178,7 @@ function TradingApp() {
 
       {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} positionRollStatuses={positionRollStatuses} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
     </section>
+    </>}
 
     {tradingTodayOpen && !isDetached && <TradingTodayModal
       displayDate={tradingTodayPresentation.displayDate}

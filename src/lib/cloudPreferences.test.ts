@@ -33,6 +33,8 @@ function workspace(): WorkspaceState {
     recentSymbols: [{ provider: "schwab", symbol: "SPY", description: "SPDR S&P 500 ETF", exchange: "NYSE ARCA", assetType: "ETF", minMove: 0.01, pointValue: 1 }],
     drawings: { "@MES": [{ id: "line-1", kind: "horizontal", points: [{ time: 1, price: 6200 }], color: "#fff" }] },
     gexSelections: {},
+    activeWorkspace: "charts",
+    optionChain: { symbol: "SPY", strikeCount: 20 },
     rightPanelOpen: true,
     bottomTab: "orders",
     bottomPanelOpen: true,

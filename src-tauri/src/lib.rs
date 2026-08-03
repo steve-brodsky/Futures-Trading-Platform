@@ -608,9 +608,10 @@ async fn get_option_expirations(
 async fn get_option_chain(
     symbol: String,
     expiration_dates: Vec<String>,
+    strike_count: Option<u32>,
     state: State<'_, NativeState>,
 ) -> Result<OptionChainSnapshot, AppError> {
-    state.schwab.option_chain(&symbol, &expiration_dates).await
+    state.schwab.option_chain(&symbol, &expiration_dates, strike_count).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

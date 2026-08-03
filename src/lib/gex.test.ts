@@ -4,9 +4,9 @@ import { allocateGexStreamBudgets, calculateGexLevels, gexExpirationDisplayGroup
 
 const contract = (symbol: string, putCall: "CALL" | "PUT", strikePrice: number, patch: Partial<OptionContract> = {}): OptionContract => ({
   symbol, underlying: "SPY", putCall, expirationDate: "2026-07-24", strikePrice,
-  multiplier: 100, gamma: 0.02, openInterest: 1_000, bidPrice: 1, askPrice: 1.1,
+  multiplier: 100, gamma: 0.02, openInterest: 1_000, bidPrice: 1, askPrice: 1.1, bidSize: 10, askSize: 12,
   markPrice: 1.05, totalVolume: 10, volatility: 0.2, delta: putCall === "CALL" ? 0.5 : -0.5,
-  underlyingPrice: 500, quoteTime: 1, delayed: false, isMini: false, isNonStandard: false,
+  theta: -0.1, vega: 0.2, underlyingPrice: 500, quoteTime: 1, delayed: false, isMini: false, isNonStandard: false,
   ...patch,
 });
 

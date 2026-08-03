@@ -101,10 +101,14 @@ export interface OptionContract {
   openInterest: number;
   bidPrice: number;
   askPrice: number;
+  bidSize: number;
+  askSize: number;
   markPrice: number;
   totalVolume: number;
   volatility: number;
   delta: number;
+  theta: number;
+  vega: number;
   underlyingPrice: number;
   quoteTime: number;
   delayed: boolean;
@@ -292,6 +296,39 @@ export interface EntryRuleEmaCrossCondition {
   direction: "above" | "below" | "either";
   period: number;
   lookback: number;
+}
+
+export type OptionDraftAction = "BUY" | "SELL";
+export type OptionDraftOrderType = "LIMIT" | "MARKET";
+export type OptionDraftTimeInForce = "DAY" | "GTC";
+export type OptionDraftPriceEffect = "DEBIT" | "CREDIT";
+
+export interface OptionDraftLeg {
+  contractSymbol: string;
+  action: OptionDraftAction;
+  ratio: number;
+  putCall: "CALL" | "PUT";
+  expirationDate: string;
+  strikePrice: number;
+  multiplier: number;
+  bidPrice: number;
+  askPrice: number;
+}
+
+export interface OptionOrderDraft {
+  underlying: string;
+  legs: OptionDraftLeg[];
+  quantity: number;
+  orderType: OptionDraftOrderType;
+  timeInForce: OptionDraftTimeInForce;
+  priceEffect: OptionDraftPriceEffect;
+  limitAmount: number;
+}
+
+export interface OptionChainPreferences {
+  symbol: string;
+  expirationDate?: string;
+  strikeCount: 5 | 10 | 15 | 20 | 24;
 }
 
 export interface EntryRuleCandleCloseCondition {
@@ -603,6 +640,8 @@ export interface WorkspaceState {
   recentSymbols: SymbolMeta[];
   drawings: Record<string, Drawing[]>;
   gexSelections: Record<string, GexExpirationSelection>;
+  activeWorkspace: "charts" | "options";
+  optionChain: OptionChainPreferences;
   rightPanelOpen: boolean;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
   bottomPanelOpen: boolean;

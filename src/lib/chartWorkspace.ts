@@ -6,6 +6,7 @@ import { quoteSubscriptionInstruments } from "./futuresContracts";
 import { normalizeRecentSymbols, normalizeSymbolMeta, normalizeWatchlist } from "./watchlist";
 import { normalizeIndicators, normalizeMagnetEnabled } from "./workspace";
 import { normalizeGexSelection, normalizeGexTabSettings } from "./gex";
+import { normalizeOptionChainPreferences } from "./optionChain";
 import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./priceBasedCharts";
 import { isValidPositionDrawing } from "./positionDrawing";
 import { normalizeDrawingAlert, sameDrawingAlert } from "./drawingAlerts";
@@ -384,6 +385,8 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     recentSymbols,
     drawings,
     gexSelections,
+    activeWorkspace: value.activeWorkspace === "options" ? "options" : "charts",
+    optionChain: normalizeOptionChainPreferences(value.optionChain ?? fallback.optionChain),
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
     bottomTab: (legacyBottomTab ?? fallback.bottomTab) as WorkspaceState["bottomTab"],
     bottomPanelOpen: value.bottomPanelOpen ?? fallback.bottomPanelOpen,

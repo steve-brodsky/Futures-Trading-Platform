@@ -74,17 +74,17 @@ export function demoOptionExpirations(_symbol: string): OptionExpiration[] {
   }));
 }
 
-export function demoOptionChain(symbol: string, expirationDates: string[]): OptionChainSnapshot {
+export function demoOptionChain(symbol: string, expirationDates: string[], strikeCount = 15): OptionChainSnapshot {
   const spot = quoteFor(symbol, 0, "schwab").last;
   const strikeStep = symbol === "SPY" ? 2 : 2.5;
   const center = Math.round(spot / strikeStep) * strikeStep;
   const contracts = expirationDates.flatMap((expirationDate, expirationIndex) => (
-    Array.from({ length: 31 }, (_, strikeIndex) => center + (strikeIndex - 15) * strikeStep).flatMap((strikePrice, strikeIndex) => (
+    Array.from({ length: strikeCount * 2 + 1 }, (_, strikeIndex) => center + (strikeIndex - strikeCount) * strikeStep).flatMap((strikePrice, strikeIndex) => (
       (["CALL", "PUT"] as const).map((putCall) => {
-        const distance = Math.abs(strikeIndex - 15);
+        const distance = Math.abs(strikeIndex - strikeCount);
         const gamma = 0.0015 + Math.exp(-(distance * distance) / 42) * (0.024 / (1 + expirationIndex * 0.34));
         const sideBias = putCall === "CALL" ? 1 + Math.sin(strikeIndex * 0.71) * 0.18 : 1 + Math.cos(strikeIndex * 0.63) * 0.22;
-        const openInterest = Math.round((850 + (15 - Math.min(15, distance)) * 260 + ((strikeIndex * 173 + expirationIndex * 97) % 900)) * sideBias);
+        const openInterest = Math.round((850 + (strikeCount - Math.min(strikeCount, distance)) * 220 + ((strikeIndex * 173 + expirationIndex * 97) % 900)) * sideBias);
         const compactDate = expirationDate.slice(2).replaceAll("-", "");
         const strikeCode = String(Math.round(strikePrice * 1_000)).padStart(8, "0");
         return {
@@ -98,10 +98,14 @@ export function demoOptionChain(symbol: string, expirationDates: string[]): Opti
           openInterest,
           bidPrice: Math.max(0.01, Math.abs(spot - strikePrice) * 0.18 + 0.55),
           askPrice: Math.max(0.02, Math.abs(spot - strikePrice) * 0.18 + 0.61),
+          bidSize: 2 + (strikeIndex * 7) % 68,
+          askSize: 1 + (strikeIndex * 11) % 54,
           markPrice: Math.max(0.015, Math.abs(spot - strikePrice) * 0.18 + 0.58),
           totalVolume: (strikeIndex * 47 + expirationIndex * 83) % 1_500,
           volatility: 0.18 + distance * 0.004,
           delta: putCall === "CALL" ? Math.max(0.05, 0.5 - (strikePrice - spot) / 80) : Math.min(-0.05, -0.5 - (strikePrice - spot) / 80),
+          theta: -(0.01 + Math.exp(-(distance * distance) / 72) * 0.16),
+          vega: 0.02 + Math.exp(-(distance * distance) / 90) * 0.2,
           underlyingPrice: spot,
           quoteTime: Date.now(),
           delayed: false,

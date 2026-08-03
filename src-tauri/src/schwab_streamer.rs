@@ -19,7 +19,7 @@ use crate::{
 
 const EQUITY_FIELDS: &str = "0,1,2,3,8,12,18,32,33,34,35,42";
 const CHART_FIELDS: &str = "0,1,2,3,4,5,6,7,8";
-const OPTION_FIELDS: &str = "0,2,3,8,9,10,12,13,20,21,22,23,26,27,28,29,33,35,37,38,39";
+const OPTION_FIELDS: &str = "0,2,3,8,9,10,12,13,16,17,20,21,22,23,26,27,28,29,30,31,33,35,37,38,39";
 
 #[derive(Clone, Debug)]
 pub enum SchwabStreamEvent {
@@ -833,7 +833,8 @@ mod tests {
             &mut state,
             &json!({
                 "key":"AAPL  260821C00200000","12":2026,"23":8,"26":21,"20":200.0,
-                "21":"C","22":"AAPL","13":100.0,"29":0.02,"9":1200,"35":205.0
+                "21":"C","22":"AAPL","13":100.0,"29":0.02,"30":-0.08,"31":0.19,
+                "9":1200,"16":11,"17":13,"35":205.0
             })
         )
         .is_some());
@@ -847,6 +848,10 @@ mod tests {
         assert_eq!(option.underlying, "AAPL");
         assert_eq!(option.gamma, 0.025);
         assert_eq!(option.open_interest, 1200.0);
+        assert_eq!(option.bid_size, 11.0);
+        assert_eq!(option.ask_size, 13.0);
+        assert_eq!(option.theta, -0.08);
+        assert_eq!(option.vega, 0.19);
         assert_eq!(option.expiration_date, "2026-08-21");
     }
 

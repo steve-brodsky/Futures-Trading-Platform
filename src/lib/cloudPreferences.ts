@@ -62,6 +62,8 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
         customMinuteTimeframes: [...workspace.customMinuteTimeframes],
         recentSymbols: workspace.recentSymbols.map((instrument) => ({ ...instrument })),
         gexSelections: workspace.gexSelections,
+        activeWorkspace: workspace.activeWorkspace,
+        optionChain: workspace.optionChain,
       },
       alerts: {
         byTabId: Object.fromEntries(workspace.tabs.map((tab) => [tab.id, tab.ema200Alert])),
@@ -168,6 +170,8 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     tabs: tabs as unknown as ChartTabState[],
     windows: remoteWindows as unknown as ChartWindowState[],
     gexSelections: remoteGexSelections as WorkspaceState["gexSelections"],
+    activeWorkspace: chartWorkspace?.activeWorkspace === "options" ? "options" : current.activeWorkspace,
+    optionChain: object(chartWorkspace?.optionChain) as unknown as WorkspaceState["optionChain"] ?? current.optionChain,
     recentSymbols: Array.isArray(chartWorkspace?.recentSymbols)
       ? chartWorkspace.recentSymbols as unknown as WorkspaceState["recentSymbols"]
       : current.recentSymbols,
