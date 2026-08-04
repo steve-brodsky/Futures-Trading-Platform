@@ -97,7 +97,7 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
       actionable: position.provider !== "schwab",
       suppressMetrics: Boolean(position.putCall),
       label: position.putCall
-        ? `SCHWAB ${position.side.toUpperCase()} ${Math.abs(position.quantity)} · ${position.expirationDate?.slice(5).replace("-", "/")} ${position.strikePrice}${position.putCall[0]} · ${position.unrealizedPnl >= 0 ? "+" : ""}$${Math.abs(position.unrealizedPnl).toFixed(2)}`
+        ? `SCHWAB ${position.side.toUpperCase()} ${Math.abs(position.quantity)} · ${position.expirationDate?.slice(5).replace("-", "/")} ${position.strikePrice}${position.putCall[0]} · ${position.unrealizedPnl >= 0 ? "+" : "-"}$${Math.abs(position.unrealizedPnl).toFixed(2)}`
         : position.provider === "schwab" ? `SCHWAB ${position.side.toUpperCase()} ${Math.abs(position.quantity)}` : undefined,
     }));
   const orderLines = orders.flatMap((order): TradeLineModel[] => {

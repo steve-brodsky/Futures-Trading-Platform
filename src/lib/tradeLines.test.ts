@@ -55,8 +55,8 @@ describe("chart trade lines", () => {
     };
     const [line] = buildTradeLines("SPY", [option], []);
     expect(line).toMatchObject({ price: 600, color: "#37d5e8", actionable: false, suppressMetrics: true });
-    expect(line.label).toContain("SCHWAB LONG 2");
-    expect(line.label).toContain("600C");
+    expect(line.label).toBe("SCHWAB LONG 2 · 08/21 600C · +$180.00");
+    expect(buildTradeLines("SPY", [{ ...option, unrealizedPnl: -180 }], [])[0].label).toBe("SCHWAB LONG 2 · 08/21 600C · -$180.00");
     expect(buildTradeLines("QQQ", [option], [])).toEqual([]);
   });
 
