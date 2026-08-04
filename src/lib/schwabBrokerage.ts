@@ -1,4 +1,18 @@
-import type { Position } from "../types";
+import type { OrderUpdate, Position } from "../types";
+
+export function readableBrokerOrderSymbol(order: Pick<OrderUpdate, "symbol" | "assetType">): string {
+  if (!(order.assetType ?? "").toUpperCase().includes("OPTION")) return order.symbol;
+  const symbol = order.symbol.replaceAll(" ", "").toUpperCase();
+  if (symbol.length <= 15) return order.symbol;
+  const underlying = symbol.slice(0, -15);
+  const suffix = symbol.slice(-15);
+  const date = suffix.slice(0, 6);
+  const putCall = suffix.slice(6, 7);
+  const strikeCode = suffix.slice(7);
+  if (!/^\d{6}$/.test(date) || !/^[CP]$/.test(putCall) || !/^\d{8}$/.test(strikeCode)) return order.symbol;
+  const strike = Number(strikeCode) / 1_000;
+  return `${underlying} ${date.slice(2, 4)}/${date.slice(4, 6)}/${date.slice(0, 2)} ${strike.toLocaleString(undefined, { maximumFractionDigits: 3 })} ${putCall}`;
+}
 
 export function positionPnlTotal(positions: Position[], field: "unrealizedPnl" | "currentDayPnl"): number | undefined {
   if (field === "currentDayPnl" && !positions.some((position) => position.currentDayPnl != null)) return undefined;

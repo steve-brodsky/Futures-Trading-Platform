@@ -9,7 +9,7 @@ mod storage;
 mod tradestation;
 mod trading_today;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Timelike, Utc};
 use futures_util::{SinkExt, StreamExt};
 use models::*;
 use schwab::Schwab;
@@ -1343,17 +1343,24 @@ async fn stop_brokerage_stream(state: State<'_, NativeState>) -> Result<(), AppE
     Ok(())
 }
 
-fn schwab_today_range() -> (String, String) {
-    let now = Utc::now();
+fn schwab_order_range_at(now: DateTime<Utc>) -> (String, String) {
     let local = now.with_timezone(&chrono_tz::America::New_York);
+    let mut session_date = local.date_naive();
+    if local.hour() < 4 {
+        session_date = session_date.pred_opt().unwrap_or(session_date);
+    }
     let start_local = chrono_tz::America::New_York
-        .from_local_datetime(&local.date_naive().and_hms_opt(0, 0, 0).unwrap())
+        .from_local_datetime(&session_date.and_hms_opt(4, 0, 0).unwrap())
         .earliest()
         .unwrap_or(local);
     (
         start_local.with_timezone(&Utc).to_rfc3339(),
         now.to_rfc3339(),
     )
+}
+
+fn schwab_current_order_range() -> (String, String) {
+    schwab_order_range_at(Utc::now())
 }
 
 async fn emit_schwab_brokerage_snapshot(
@@ -1363,7 +1370,7 @@ async fn emit_schwab_brokerage_snapshot(
     environment_generation: u64,
 ) -> Result<(), AppError> {
     let snapshot = api.account_snapshot(account_id).await?;
-    let (from, to) = schwab_today_range();
+    let (from, to) = schwab_current_order_range();
     let orders = api.orders(account_id, &from, &to).await?.orders;
     let _ = app.emit("schwab-account-snapshot", snapshot.clone());
     let _ = app.emit(
@@ -5997,6 +6004,22 @@ pub fn run() {
 #[cfg(test)]
 mod stream_tests {
     use super::*;
+
+    #[test]
+    fn schwab_order_range_keeps_the_prior_session_after_new_york_midnight() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 4, 4, 3, 0).single().unwrap();
+        let (from, to) = schwab_order_range_at(now);
+        assert_eq!(from, "2026-08-03T08:00:00+00:00");
+        assert_eq!(to, "2026-08-04T04:03:00+00:00");
+    }
+
+    #[test]
+    fn schwab_order_range_rolls_at_four_new_york_time() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 4, 13, 0, 0).single().unwrap();
+        let (from, to) = schwab_order_range_at(now);
+        assert_eq!(from, "2026-08-04T08:00:00+00:00");
+        assert_eq!(to, "2026-08-04T13:00:00+00:00");
+    }
 
     fn search_symbol(provider: MarketDataProvider, symbol: &str, asset_type: &str) -> SymbolMeta {
         SymbolMeta {

@@ -63,7 +63,7 @@ import {
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
 import { minuteTimeframe, normalizeCustomMinuteTimeframes, orderedToolbarTimeframes, parseMinuteTimeframe, removeCustomMinuteTimeframe as removeCustomMinuteTimeframeFromWorkspace, saveCustomMinuteTimeframe, workspaceForPersistence } from "./lib/timeframes";
 import { defaultOptionOrderDraft, optionStreamBudget } from "./lib/optionChain";
-import { combinedCurrencyTotal, positionPnlTotal } from "./lib/schwabBrokerage";
+import { combinedCurrencyTotal, positionPnlTotal, readableBrokerOrderSymbol } from "./lib/schwabBrokerage";
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -1557,8 +1557,9 @@ function TradingApp() {
     setSchwabBrokerageLoading(true);
     setSchwabBrokerageError(undefined);
     const now = new Date();
-    const start = new Date(now);
-    start.setHours(0, 0, 0, 0);
+    // The native stream refresh narrows this to the current 04:00 ET trading
+    // session. A rolling day keeps the initial load valid across ET midnight.
+    const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     void Promise.all([
       api.schwabAccountSnapshot(selectedSchwabAccount.id),
       api.schwabOrders(selectedSchwabAccount.id, start.toISOString(), now.toISOString()),
@@ -5246,7 +5247,7 @@ function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange,
     const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); link.download = `${activeAccount?.displayId ?? "account"}-${workspace.bottomTab}.csv`; link.click(); URL.revokeObjectURL(link.href);
   };
   const Empty = ({ label }: { label: string }) => <div className="empty-table"><BookOpen size={20} /><span>{label}</span></div>;
-  const OrderTable = ({ rows, readOnly = false }: { rows: OrderUpdate[]; readOnly?: boolean }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Strategy</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong>{o.symbol}</strong>{o.assetType && <small className="asset-tag">{o.assetType}</small>}</td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{o.groupName ?? "—"}</td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{!readOnly && o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
+  const OrderTable = ({ rows, readOnly = false }: { rows: OrderUpdate[]; readOnly?: boolean }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Strategy</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong title={o.symbol}>{readableBrokerOrderSymbol(o)}</strong>{o.assetType && <small className="asset-tag">{o.assetType}</small>}</td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{o.groupName ?? "—"}</td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{!readOnly && o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
   const pnl = positionPnlTotal;
   const combinedPositions = [...positions.map((position) => ({ ...position, provider: "tradestation" as const, accountId: account?.displayId })), ...schwabPositions.map((position) => ({ ...position, provider: "schwab" as const, accountId: schwabAccount?.displayId }))];
   const tsToday = balances[0]?.todaysProfitLoss;

@@ -1106,6 +1106,49 @@ fn normalized_order_status(value: &str) -> String {
     .into()
 }
 
+fn execution_summary(value: &Value, leg_id: &str) -> (Option<f64>, Option<f64>, Option<String>) {
+    let mut filled_quantity = 0.0;
+    let mut fill_notional = 0.0;
+    let mut latest_time: Option<String> = None;
+    for activity in value
+        .get("orderActivityCollection")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for execution in activity
+            .get("executionLegs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if scalar_string(execution.get("legId")) != leg_id {
+                continue;
+            }
+            let quantity = number_named(execution, "quantity")
+                .unwrap_or_default()
+                .max(0.0);
+            let price = number_named(execution, "price")
+                .filter(|price| price.is_finite() && *price > 0.0);
+            filled_quantity += quantity;
+            if let Some(price) = price {
+                fill_notional += price * quantity;
+            }
+            let time = text(execution, "time");
+            if !time.is_empty()
+                && latest_time
+                    .as_deref()
+                    .map_or(true, |current| time.as_str() > current)
+            {
+                latest_time = Some(time);
+            }
+        }
+    }
+    let average_price = (filled_quantity > 0.0 && fill_notional > 0.0)
+        .then_some(fill_notional / filled_quantity);
+    ((filled_quantity > 0.0).then_some(filled_quantity), average_price, latest_time)
+}
+
 fn flatten_order(
     value: &Value,
     account_id: &str,
@@ -1126,6 +1169,9 @@ fn flatten_order(
         .find(|item| !item.is_empty())
         .unwrap_or_else(|| Utc::now().to_rfc3339());
     let legs = value.get("orderLegCollection").and_then(Value::as_array);
+    let leg_count = legs.map_or(0, Vec::len);
+    let parent_quantity = number_named(value, "quantity").unwrap_or_default();
+    let parent_filled = number_named(value, "filledQuantity").unwrap_or_default();
     for (index, leg) in legs.into_iter().flatten().enumerate() {
         let instrument = leg.get("instrument").unwrap_or(&Value::Null);
         let symbol = text(instrument, "symbol");
@@ -1143,6 +1189,19 @@ fn flatten_order(
             .unwrap_or_default()
             .max(0.0)
             .round() as u32;
+        let (execution_quantity, execution_price, execution_time) =
+            execution_summary(value, &unique_leg);
+        let filled_quantity = execution_quantity.or_else(|| {
+            if parent_filled <= 0.0 {
+                None
+            } else if leg_count == 1 {
+                Some(parent_filled)
+            } else if parent_quantity > 0.0 {
+                Some(parent_filled / parent_quantity * quantity as f64)
+            } else {
+                None
+            }
+        });
         target.push(OrderUpdate {
             provider: MarketDataProvider::Schwab,
             id: format!("schwab:{account_id}:{broker_id}:{unique_leg}"),
@@ -1154,22 +1213,22 @@ fn flatten_order(
             },
             order_type: normalized_order_type(&text(value, "orderType")),
             quantity,
-            price: number_named(value, "price"),
-            stop_price: number_named(value, "stopPrice"),
+            price: number_named(value, "price").filter(|price| *price > 0.0),
+            stop_price: number_named(value, "stopPrice").filter(|price| *price > 0.0),
             status: normalized_order_status(&raw_status),
             timestamp: timestamp.clone(),
             account_id: Some(account_id.into()),
-            filled_quantity: number_named(leg, "filledQuantity"),
-            remaining_quantity: None,
-            average_fill_price: number_named(leg, "averagePrice")
-                .or_else(|| number_named(value, "price")),
+            filled_quantity,
+            remaining_quantity: filled_quantity
+                .map(|filled| (quantity as f64 - filled).max(0.0)),
+            average_fill_price: execution_price,
             duration: {
                 let value = text(value, "duration");
                 (!value.is_empty()).then_some(value)
             },
             closed_at: {
                 let value = text(value, "closeTime");
-                (!value.is_empty()).then_some(value)
+                (!value.is_empty()).then_some(value).or(execution_time)
             },
             commission: None,
             stop_loss: None,
@@ -1192,7 +1251,12 @@ fn flatten_order(
             leg_id: Some(unique_leg),
             asset_type: {
                 let value = text(instrument, "assetType");
-                (!value.is_empty()).then_some(value)
+                if value.is_empty() {
+                    let value = text(leg, "orderLegType");
+                    (!value.is_empty()).then_some(value)
+                } else {
+                    Some(value)
+                }
             },
         });
     }
@@ -1673,17 +1737,27 @@ mod tests {
         assert_eq!(position.side, "Short");
         assert_eq!(position.last, 220.0);
         let order = serde_json::json!({
-            "orderId":44,"orderType":"NET_DEBIT","status":"FILLED","enteredTime":"2026-08-03T14:30:00Z","orderStrategyType":"TRIGGER",
-            "orderLegCollection":[{"legId":1,"instruction":"BUY_TO_OPEN","quantity":1,"instrument":{"symbol":"SPY   260807C00632000","assetType":"OPTION"}}],
-            "childOrderStrategies":[{"orderId":45,"orderType":"LIMIT","status":"WORKING","orderStrategyType":"SINGLE","orderLegCollection":[{"legId":2,"instruction":"SELL_TO_CLOSE","quantity":1,"instrument":{"symbol":"SPY   260807C00634000","assetType":"OPTION"}}]}]
+            "orderId":44,"orderType":"NET_DEBIT","status":"FILLED","quantity":2,"filledQuantity":2,"enteredTime":"2026-08-03T14:30:00Z","orderStrategyType":"TRIGGER",
+            "orderLegCollection":[{"legId":1,"orderLegType":"OPTION","instruction":"BUY_TO_OPEN","quantity":2,"instrument":{"symbol":"SPY   260807C00632000"}}],
+            "orderActivityCollection":[{"activityType":"EXECUTION","executionType":"FILL","executionLegs":[
+                {"legId":1,"price":1.2,"quantity":1,"time":"2026-08-03T14:30:01Z"},
+                {"legId":1,"price":1.4,"quantity":1,"time":"2026-08-03T14:30:02Z"}
+            ]}],
+            "childOrderStrategies":[{"orderId":45,"orderType":"LIMIT","status":"FILLED","orderStrategyType":"SINGLE","orderLegCollection":[{"legId":2,"instruction":"SELL_TO_CLOSE","quantity":1,"instrument":{"symbol":"SPY   260807C00634000","assetType":"OPTION"}}],"orderActivityCollection":[{"activityType":"EXECUTION","executionType":"FILL","executionLegs":[{"legId":2,"price":2.1,"quantity":1,"time":"2026-08-03T15:30:00Z"}]}]}]
         });
         let mut rows = vec![];
         flatten_order(&order, "hash-1", None, &mut rows);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].provider, MarketDataProvider::Schwab);
         assert_eq!(rows[0].open_or_close.as_deref(), Some("Open"));
+        assert_eq!(rows[0].asset_type.as_deref(), Some("OPTION"));
+        assert_eq!(rows[0].filled_quantity, Some(2.0));
+        assert_eq!(rows[0].remaining_quantity, Some(0.0));
+        assert!((rows[0].average_fill_price.unwrap() - 1.3).abs() < f64::EPSILON * 4.0);
         assert_eq!(rows[1].open_or_close.as_deref(), Some("Close"));
-        assert_eq!(rows[1].status, "Working");
+        assert_eq!(rows[1].status, "Filled");
+        assert_eq!(rows[1].filled_quantity, Some(1.0));
+        assert_eq!(rows[1].average_fill_price, Some(2.1));
     }
 
     #[test]
