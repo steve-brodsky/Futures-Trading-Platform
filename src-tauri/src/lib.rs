@@ -82,6 +82,7 @@ pub struct NativeState {
     option_streams: tokio::sync::Mutex<HashMap<String, OptionStreamRegistration>>,
     brokerage_streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
     schwab_brokerage_stream: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    selected_schwab_journal_account: tokio::sync::Mutex<Option<String>>,
     preference_realtime: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
@@ -1363,15 +1364,34 @@ fn schwab_current_order_range() -> (String, String) {
     schwab_order_range_at(Utc::now())
 }
 
+fn capture_schwab_journal_orders(
+    app: &tauri::AppHandle,
+    db_path: &std::path::Path,
+    orders: &[OrderUpdate],
+    source: &str,
+) -> Result<(), AppError> {
+    if orders.is_empty() {
+        return Ok(());
+    }
+    let result = journal::ingest_schwab_strangles(db_path, orders, source)?;
+    if result.fills > 0 || source == "broker-stream" {
+        let _ = app.emit("journal-updated", serde_json::json!({"reason": if result.fills > 0 { "schwab-option-fill" } else { "schwab-order-observed" }}));
+        schedule_journal_flush(app.clone(), db_path.to_path_buf());
+    }
+    Ok(())
+}
+
 async fn emit_schwab_brokerage_snapshot(
     app: &tauri::AppHandle,
     api: &Schwab,
+    db_path: &std::path::Path,
     account_id: &str,
     environment_generation: u64,
 ) -> Result<(), AppError> {
     let snapshot = api.account_snapshot(account_id).await?;
     let (from, to) = schwab_current_order_range();
     let orders = api.orders(account_id, &from, &to).await?.orders;
+    capture_schwab_journal_orders(app, db_path, &orders, "broker-stream")?;
     let _ = app.emit("schwab-account-snapshot", snapshot.clone());
     let _ = app.emit(
         "positions-snapshot",
@@ -1413,6 +1433,7 @@ async fn start_schwab_brokerage_stream(
     account_id: String,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    *state.selected_schwab_journal_account.lock().await = Some(account_id.clone());
     if let Some(task) = state.schwab_brokerage_stream.lock().await.take() {
         task.abort();
     }
@@ -1421,6 +1442,7 @@ async fn start_schwab_brokerage_stream(
     let api = state.schwab.clone();
     let streamer = state.schwab_streamer.clone();
     let generation = state.safety.lifecycle.generation();
+    let db_path = state.db_path.clone();
     let task = tauri::async_runtime::spawn(async move {
         let mut receiver = streamer.subscribe();
         let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -1433,7 +1455,7 @@ async fn start_schwab_brokerage_stream(
         loop {
             tokio::select! {
                 _ = watchdog.tick() => {
-                    if let Err(error) = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await {
+                    if let Err(error) = emit_schwab_brokerage_snapshot(&app, &api, &db_path, &account_id, generation).await {
                         for channel in ["positions", "orders"] {
                             let _ = app.emit("brokerage-stream-state", BrokerageStreamStateEvent {
                                 provider: MarketDataProvider::Schwab,
@@ -1445,7 +1467,7 @@ async fn start_schwab_brokerage_stream(
                     }
                 _ = &mut debounce, if debounce_pending => {
                     debounce_pending = false;
-                    if let Err(error) = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await {
+                    if let Err(error) = emit_schwab_brokerage_snapshot(&app, &api, &db_path, &account_id, generation).await {
                         for channel in ["positions", "orders"] {
                             let _ = app.emit("brokerage-stream-state", BrokerageStreamStateEvent {
                                 provider: MarketDataProvider::Schwab,
@@ -1457,7 +1479,7 @@ async fn start_schwab_brokerage_stream(
                 }
                 _ = &mut settlement, if settlement_pending => {
                     settlement_pending = false;
-                    let _ = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await;
+                    let _ = emit_schwab_brokerage_snapshot(&app, &api, &db_path, &account_id, generation).await;
                 }
                 event = receiver.recv() => match event {
                     Ok(SchwabStreamEvent::AccountActivity { sequence, account_number, message_type, message_data }) => {
@@ -1471,7 +1493,7 @@ async fn start_schwab_brokerage_stream(
                     Ok(SchwabStreamEvent::AccountActivityState { state, message }) => {
                         let mapped = if state == "rest-only" { "disconnected" } else { state.as_str() };
                         if state == "streaming" {
-                            let _ = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await;
+                            let _ = emit_schwab_brokerage_snapshot(&app, &api, &db_path, &account_id, generation).await;
                         }
                         for channel in ["positions", "orders"] {
                             let _ = app.emit("brokerage-stream-state", BrokerageStreamStateEvent {
@@ -1484,7 +1506,7 @@ async fn start_schwab_brokerage_stream(
                     Ok(SchwabStreamEvent::State { state, message }) => {
                         let mapped = if state == "streaming" { "streaming" } else { state.as_str() };
                         if state == "streaming" {
-                            let _ = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await;
+                            let _ = emit_schwab_brokerage_snapshot(&app, &api, &db_path, &account_id, generation).await;
                         }
                         for channel in ["positions", "orders"] {
                             let _ = app.emit("brokerage-stream-state", BrokerageStreamStateEvent {
@@ -1512,6 +1534,7 @@ async fn stop_schwab_brokerage_stream(state: State<'_, NativeState>) -> Result<(
         task.abort();
     }
     state.schwab_streamer.set_account_activity(false).await;
+    *state.selected_schwab_journal_account.lock().await = None;
     Ok(())
 }
 
@@ -4106,6 +4129,35 @@ fn set_journal_commission(
     Ok(())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn set_schwab_option_fee(
+    schwab_option_fee_per_contract_side: f64,
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    journal::set_schwab_option_fee_per_contract_side(
+        &state.db_path,
+        schwab_option_fee_per_contract_side,
+    )?;
+    let mut record = audit::AuditRecord::completed(
+        "record",
+        "journal",
+        "set-schwab-option-fee",
+        "success",
+        "Schwab option journal fee setting was saved",
+    );
+    record.entity_type = Some("journal-setting".into());
+    record.entity_id = Some("schwab-option-fee-per-contract-side".into());
+    record.changes = Some(serde_json::json!({"after": schwab_option_fee_per_contract_side}));
+    state.audit.record(record);
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"commission-updated"}),
+    );
+    schedule_journal_flush(app, state.db_path.clone());
+    Ok(())
+}
+
 async fn ingest_orders_with_metadata(
     api: &TradeStation,
     db_path: &std::path::Path,
@@ -4289,6 +4341,27 @@ async fn complete_journal_cloud_sync(
     ))
 }
 
+async fn schwab_journal_history(
+    api: &Schwab,
+    account_id: &str,
+    backfill_start: &str,
+) -> Result<Vec<OrderUpdate>, AppError> {
+    let mut cursor = DateTime::parse_from_rfc3339(&format!("{backfill_start}T00:00:00Z"))
+        .map_err(|_| AppError::Validation("Journal backfill date must use YYYY-MM-DD".into()))?
+        .with_timezone(&Utc);
+    let end = Utc::now();
+    let mut orders = Vec::new();
+    while cursor < end {
+        let window_end = (cursor + chrono::Duration::days(30)).min(end);
+        let page = api
+            .orders(account_id, &cursor.to_rfc3339(), &window_end.to_rfc3339())
+            .await?;
+        orders.extend(page.orders);
+        cursor = window_end;
+    }
+    Ok(orders)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn sync_journal(
     scope: Option<journal::JournalScope>,
@@ -4300,12 +4373,24 @@ async fn sync_journal(
         .backfill_start
         .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string());
     let environment = state.api.environment().await;
+    let selected_schwab_account = if scope
+        .as_ref()
+        .is_some_and(|selected| selected.provider == MarketDataProvider::Schwab)
+    {
+        scope.as_ref().map(|selected| selected.account_id.clone())
+    } else if scope.is_none() {
+        state.selected_schwab_journal_account.lock().await.clone()
+    } else {
+        None
+    };
     let accounts = state.api.accounts().await?;
     let mut account_histories = Vec::new();
     for account in accounts.into_iter().filter(|account| {
         account.account_type.eq_ignore_ascii_case("futures")
             && scope.as_ref().is_none_or(|selected| {
-                selected.account_id == account.id && selected.environment == environment
+                selected.provider == MarketDataProvider::Tradestation
+                    && selected.account_id == account.id
+                    && selected.environment == environment
             })
     }) {
         let since = journal::reconciliation_since(
@@ -4337,13 +4422,24 @@ async fn sync_journal(
         )?;
         account_histories.push((account.id, historical_orders));
     }
+    let schwab_history = if let Some(account_id) = selected_schwab_account {
+        Some((
+            account_id.clone(),
+            schwab_journal_history(&state.schwab, &account_id, &backfill_start).await?,
+        ))
+    } else {
+        None
+    };
 
     complete_journal_cloud_sync(&state.db_path).await?;
 
     let history_record_count = account_histories
         .iter()
         .map(|(_, orders)| orders.len())
-        .sum::<usize>();
+        .sum::<usize>()
+        + schwab_history
+            .as_ref()
+            .map_or(0, |(_, orders)| orders.len());
     for (account_id, historical_orders) in account_histories {
         journal::repair_misclassified_close_campaigns(
             &state.db_path,
@@ -4359,6 +4455,14 @@ async fn sync_journal(
         )
         .await?;
         journal::set_reconciliation_checkpoint(&state.db_path, &environment, &account_id)?;
+    }
+    if let Some((account_id, orders)) = schwab_history {
+        capture_schwab_journal_orders(&app, &state.db_path, &orders, "broker-history")?;
+        journal::set_reconciliation_checkpoint(
+            &state.db_path,
+            &TradingEnvironment::Live,
+            &format!("schwab:{account_id}"),
+        )?;
     }
     let result = complete_journal_cloud_sync(&state.db_path).await?;
     let _ = app.emit(
@@ -5908,6 +6012,7 @@ pub fn run() {
                 option_streams: tokio::sync::Mutex::new(HashMap::new()),
                 brokerage_streams: tokio::sync::Mutex::new(Vec::new()),
                 schwab_brokerage_stream: tokio::sync::Mutex::new(None),
+                selected_schwab_journal_account: tokio::sync::Mutex::new(None),
                 preference_realtime: tokio::sync::Mutex::new(None),
             });
             tauri::async_runtime::spawn(async move {
@@ -5982,6 +6087,7 @@ pub fn run() {
             set_journal_backfill_start,
             reset_journal_now,
             set_journal_commission,
+            set_schwab_option_fee,
             sync_journal,
             get_journal_scopes,
             get_journal_month,
@@ -6396,6 +6502,11 @@ mod stream_tests {
             broker_order_id: None,
             leg_id: None,
             asset_type: Some("FUTURE".into()),
+            underlying: None,
+            expiration_date: None,
+            strike_price: None,
+            put_call: None,
+            multiplier: None,
         };
         let submit_calls = 0;
         let candidates = place_reconciliation_candidates(&intent, &[broker_order.clone()], None);
@@ -6467,6 +6578,11 @@ mod stream_tests {
             broker_order_id: None,
             leg_id: None,
             asset_type: Some("FUTURE".into()),
+            underlying: None,
+            expiration_date: None,
+            strike_price: None,
+            put_call: None,
+            multiplier: None,
         };
         assert_eq!(
             place_reconciliation_candidates(&intent, &[order("1"), order("2")], None).len(),

@@ -396,6 +396,12 @@ impl Schwab {
             .append_pair("fromEnteredTime", from_entered_time)
             .append_pair("toEnteredTime", to_entered_time);
         let value = self.get_json(url.as_str()).await?;
+        let raw_order_count = value.as_array().map_or(0, Vec::len);
+        if raw_order_count >= 3_000 {
+            return Err(AppError::Api(format!(
+                "Schwab returned the 3,000-order limit for {from_entered_time} through {to_entered_time}; journal history may be incomplete, so its checkpoint was not advanced"
+            )));
+        }
         let mut orders = Vec::new();
         for order in value.as_array().into_iter().flatten() {
             flatten_order(order, account_id, None, &mut orders);
@@ -1128,8 +1134,8 @@ fn execution_summary(value: &Value, leg_id: &str) -> (Option<f64>, Option<f64>, 
             let quantity = number_named(execution, "quantity")
                 .unwrap_or_default()
                 .max(0.0);
-            let price = number_named(execution, "price")
-                .filter(|price| price.is_finite() && *price > 0.0);
+            let price =
+                number_named(execution, "price").filter(|price| price.is_finite() && *price > 0.0);
             filled_quantity += quantity;
             if let Some(price) = price {
                 fill_notional += price * quantity;
@@ -1144,9 +1150,13 @@ fn execution_summary(value: &Value, leg_id: &str) -> (Option<f64>, Option<f64>, 
             }
         }
     }
-    let average_price = (filled_quantity > 0.0 && fill_notional > 0.0)
-        .then_some(fill_notional / filled_quantity);
-    ((filled_quantity > 0.0).then_some(filled_quantity), average_price, latest_time)
+    let average_price =
+        (filled_quantity > 0.0 && fill_notional > 0.0).then_some(fill_notional / filled_quantity);
+    (
+        (filled_quantity > 0.0).then_some(filled_quantity),
+        average_price,
+        latest_time,
+    )
 }
 
 fn flatten_order(
@@ -1202,6 +1212,7 @@ fn flatten_order(
                 None
             }
         });
+        let parsed_option = parse_option_symbol(&symbol);
         target.push(OrderUpdate {
             provider: MarketDataProvider::Schwab,
             id: format!("schwab:{account_id}:{broker_id}:{unique_leg}"),
@@ -1219,8 +1230,7 @@ fn flatten_order(
             timestamp: timestamp.clone(),
             account_id: Some(account_id.into()),
             filled_quantity,
-            remaining_quantity: filled_quantity
-                .map(|filled| (quantity as f64 - filled).max(0.0)),
+            remaining_quantity: filled_quantity.map(|filled| (quantity as f64 - filled).max(0.0)),
             average_fill_price: execution_price,
             duration: {
                 let value = text(value, "duration");
@@ -1258,6 +1268,13 @@ fn flatten_order(
                     Some(value)
                 }
             },
+            underlying: parsed_option.as_ref().map(|item| item.underlying.clone()),
+            expiration_date: parsed_option
+                .as_ref()
+                .map(|item| item.expiration_date.clone()),
+            strike_price: parsed_option.as_ref().map(|item| item.strike_price),
+            put_call: parsed_option.as_ref().map(|item| item.put_call.clone()),
+            multiplier: parsed_option.as_ref().map(|_| 100.0),
         });
     }
     for child in value
@@ -1751,6 +1768,11 @@ mod tests {
         assert_eq!(rows[0].provider, MarketDataProvider::Schwab);
         assert_eq!(rows[0].open_or_close.as_deref(), Some("Open"));
         assert_eq!(rows[0].asset_type.as_deref(), Some("OPTION"));
+        assert_eq!(rows[0].underlying.as_deref(), Some("SPY"));
+        assert_eq!(rows[0].expiration_date.as_deref(), Some("2026-08-07"));
+        assert_eq!(rows[0].strike_price, Some(632.0));
+        assert_eq!(rows[0].put_call.as_deref(), Some("CALL"));
+        assert_eq!(rows[0].multiplier, Some(100.0));
         assert_eq!(rows[0].filled_quantity, Some(2.0));
         assert_eq!(rows[0].remaining_quantity, Some(0.0));
         assert!((rows[0].average_fill_price.unwrap() - 1.3).abs() < f64::EPSILON * 4.0);

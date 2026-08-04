@@ -234,6 +234,11 @@ pub struct OrderUpdate {
     pub broker_order_id: Option<String>,
     pub leg_id: Option<String>,
     pub asset_type: Option<String>,
+    pub underlying: Option<String>,
+    pub expiration_date: Option<String>,
+    pub strike_price: Option<f64>,
+    pub put_call: Option<String>,
+    pub multiplier: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

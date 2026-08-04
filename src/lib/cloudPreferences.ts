@@ -91,6 +91,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       },
       journal_fees: {
         commissionPerContractSide: workspace.settings.journal.commissionPerContractSide,
+        schwabOptionFeePerContractSide: workspace.settings.journal.schwabOptionFeePerContractSide,
       },
     },
   };
@@ -206,6 +207,9 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
         commissionPerContractSide: typeof journalFees?.commissionPerContractSide === "number"
           ? journalFees.commissionPerContractSide
           : current.settings.journal.commissionPerContractSide,
+        schwabOptionFeePerContractSide: typeof journalFees?.schwabOptionFeePerContractSide === "number"
+          ? journalFees.schwabOptionFeePerContractSide
+          : current.settings.journal.schwabOptionFeePerContractSide,
       },
     },
   };

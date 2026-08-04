@@ -198,7 +198,7 @@ export function TradeJournalStats({ scope, refreshKey, onDay, onTrade }: TradeJo
       .catch((reason) => { if (!disposed) setError(String(reason)); })
       .finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; };
-  }, [scope?.accountId, scope?.environment, dates.startDate, dates.endDate, invalidRange, refreshKey]);
+  }, [scope?.provider, scope?.accountId, scope?.environment, dates.startDate, dates.endDate, invalidRange, refreshKey]);
 
   const stats = useMemo(() => journalStats(range?.trades ?? []), [range]);
   const metrics = stats.metrics;

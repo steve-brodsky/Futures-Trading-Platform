@@ -442,6 +442,9 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
         commissionPerContractSide: typeof savedJournal?.commissionPerContractSide === "number" && Number.isFinite(savedJournal.commissionPerContractSide)
           ? Math.max(0, Math.min(100, savedJournal.commissionPerContractSide))
           : fallback.settings.journal.commissionPerContractSide,
+        schwabOptionFeePerContractSide: typeof savedJournal?.schwabOptionFeePerContractSide === "number" && Number.isFinite(savedJournal.schwabOptionFeePerContractSide)
+          ? Math.max(0, Math.min(100, savedJournal.schwabOptionFeePerContractSide))
+          : fallback.settings.journal.schwabOptionFeePerContractSide,
       },
     },
   };

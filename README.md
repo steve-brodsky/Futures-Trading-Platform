@@ -53,6 +53,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 
 - Dedicated native Trade Journal window opened from the chart toolbar, with a Sunday–Friday P&L calendar and daily campaign ledger.
 - Flat-to-flat reconstruction across partial fills, scale-ins, scale-outs, commissions, and position reversals.
+- Provider-aware Schwab long/short strangle campaigns reconstructed from streamed order snapshots, with call/put execution legs, partial closes, linked one-leg rolls, and estimated option fees.
 - Durable SQLite outbox for entry intent, fills, closes, and observed stop-loss or take-profit moves.
 - Exact initial-risk provenance for Northstar entries, with inferred or unknown labels for incomplete broker history.
 - One private entry-chart screenshot per Northstar campaign, captured after the live position, stop-loss, and take-profit lines appear and shown in the trade detail drawer.
@@ -172,6 +173,8 @@ The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes,
 4. Choose **Connect** and complete authorization in the dedicated in-app window.
 5. Select a Schwab account in the brokerage drawer. Its positions, balances, and orders are monitoring-only: Northstar never exposes Schwab close, cancel, or order-entry actions.
 6. Select an equity, ETF, or index from the combined symbol picker. Open **Indicators** on equity and ETF charts to enable GEX and choose the included expirations.
+
+The selected Schwab account is also the account monitored by the trade journal. Filled two-leg call/put strangles are recorded locally from authoritative order snapshots and reconciled during Journal Sync. Configure the separate per-contract option fee under **Settings → Journal**.
 
 Schwab and TradeStation connections are independent. Changing the TradeStation SIM/LIVE environment does not affect Schwab charts or streams.
 

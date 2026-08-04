@@ -216,6 +216,11 @@ export interface OrderUpdate {
   brokerOrderId?: string;
   legId?: string;
   assetType?: string;
+  underlying?: string;
+  expirationDate?: string;
+  strikePrice?: number;
+  putCall?: "CALL" | "PUT";
+  multiplier?: number;
 }
 
 export interface ClosePositionResult {
@@ -642,6 +647,7 @@ export interface WorkspaceSettings {
   contractRollAlerts: ContractRollAlertSettings;
   journal: {
     commissionPerContractSide: number;
+    schwabOptionFeePerContractSide: number;
   };
 }
 
@@ -767,6 +773,7 @@ export type JournalEventType =
   | "order-rejected";
 
 export interface JournalScope {
+  provider?: MarketDataProvider;
   environment: TradingEnvironment;
   accountId: string;
   accountLabel: string;
@@ -793,6 +800,9 @@ export interface JournalEvent {
   id: string;
   tradeId?: string;
   brokerOrderId?: string;
+  provider?: MarketDataProvider;
+  optionSymbol?: string;
+  brokerLegId?: string;
   eventType: JournalEventType;
   occurredAt: string;
   source: "northstar" | "broker-stream" | "broker-history";
@@ -802,6 +812,26 @@ export interface JournalEvent {
   quantity?: number;
   price?: number;
   note?: string;
+}
+
+export interface JournalOptionLeg {
+  id: string;
+  tradeId: string;
+  optionSymbol: string;
+  underlying: string;
+  expirationDate: string;
+  strikePrice: number;
+  putCall: "CALL" | "PUT";
+  openingSide: "Buy" | "Sell";
+  openedQuantity: number;
+  closedQuantity: number;
+  averageEntry: number;
+  averageExit?: number;
+  multiplier: number;
+  grossPnl: number;
+  fees: number;
+  status: JournalTradeStatus;
+  replacesLegId?: string;
 }
 
 export interface JournalAnnotation {
@@ -825,10 +855,14 @@ export interface JournalScreenshotImage extends JournalScreenshotMetadata {
 
 export interface JournalTrade {
   id: string;
+  provider?: MarketDataProvider;
   environment: TradingEnvironment;
   accountId: string;
   symbol: string;
   direction: "Long" | "Short";
+  assetClass?: "futures" | "option";
+  strategy?: "futures-directional" | "long-strangle" | "short-strangle";
+  underlying?: string;
   status: JournalTradeStatus;
   openedAt: string;
   closedAt?: string;
@@ -850,6 +884,7 @@ export interface JournalTrade {
   tags: string[];
   events?: JournalEvent[];
   entryScreenshot?: JournalScreenshotMetadata;
+  legs?: JournalOptionLeg[];
 }
 
 export interface JournalSummaryMetrics {
@@ -891,8 +926,12 @@ export interface JournalDaySummary {
 
 export interface JournalStatsTrade {
   id: string;
+  provider?: MarketDataProvider;
   symbol: string;
   direction: "Long" | "Short";
+  assetClass?: "futures" | "option";
+  strategy?: "futures-directional" | "long-strangle" | "short-strangle";
+  underlying?: string;
   status: JournalTradeStatus;
   openedAt: string;
   closedAt?: string;

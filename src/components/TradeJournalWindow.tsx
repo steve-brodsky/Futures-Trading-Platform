@@ -241,7 +241,7 @@ export function TradeJournalWindow() {
     const [authStatus, nextScopes] = await Promise.all([api.journalAuthStatus(), api.journalScopes()]);
     setAuth(authStatus); setScopes(nextScopes);
     if (nextScopes.length === 0) setSelectedTrade(undefined);
-    setScope((current) => nextScopes.find((item) => current && item.accountId === current.accountId && item.environment === current.environment) ?? nextScopes[0]);
+    setScope((current) => nextScopes.find((item) => current && (item.provider ?? "tradestation") === (current.provider ?? "tradestation") && item.accountId === current.accountId && item.environment === current.environment) ?? nextScopes[0]);
     if (api.isNative && !authStatus.configured) setShowSetup(true);
   }, []);
 
@@ -321,19 +321,19 @@ export function TradeJournalWindow() {
       }).catch(() => undefined);
     }).then((unlisten) => { if (disposed) unlisten(); else cleanup = unlisten; });
     return () => { disposed = true; cleanup?.(); };
-  }, [scope?.accountId, scope?.environment, cursor.year, cursor.month, view.kind === "day" ? view.date : "month"]);
+  }, [scope?.provider, scope?.accountId, scope?.environment, cursor.year, cursor.month, view.kind === "day" ? view.date : "month"]);
 
   useEffect(() => {
     if (!scope) { setMonth(undefined); return; }
     setLoading(true); setError(undefined);
     api.journalMonth(scope, cursor.year, cursor.month).then(setMonth).catch((reason) => setError(String(reason))).finally(() => setLoading(false));
-  }, [scope?.accountId, scope?.environment, cursor.year, cursor.month]);
+  }, [scope?.provider, scope?.accountId, scope?.environment, cursor.year, cursor.month]);
 
   useEffect(() => {
     if (!scope || view.kind !== "day") { setDay(undefined); return; }
     setLoading(true); setError(undefined);
     api.journalDay(scope, view.date).then(setDay).catch((reason) => setError(String(reason))).finally(() => setLoading(false));
-  }, [scope?.accountId, scope?.environment, view.kind === "day" ? view.date : "month"]);
+  }, [scope?.provider, scope?.accountId, scope?.environment, view.kind === "day" ? view.date : "month"]);
 
   async function runSync() {
     setSync((current) => ({ ...current, state: "syncing", message: "Reconciling orders and flushing the outbox…" }));
@@ -361,7 +361,8 @@ export function TradeJournalWindow() {
 
   const dates = useMemo(() => journalCalendarDates(cursor.year, cursor.month), [cursor]);
   const dayMap = useMemo(() => new Map(month?.days.map((item) => [item.date, item]) ?? []), [month]);
-  const activeScopeValue = scope ? `${scope.environment}:${scope.accountId}` : "";
+  const scopeKey = (item: JournalScope) => `${item.provider ?? "tradestation"}:${item.environment}:${item.accountId}`;
+  const activeScopeValue = scope ? scopeKey(scope) : "";
 
   return <main className="journal-shell">
     <header className="journal-titlebar">
@@ -371,15 +372,15 @@ export function TradeJournalWindow() {
     </header>
 
     <nav className="journal-nav">
-      <div className="journal-nav-title"><BookOpen size={18} /><div><strong>Trade Journal</strong><span>Futures execution ledger</span></div></div>
+      <div className="journal-nav-title"><BookOpen size={18} /><div><strong>Trade Journal</strong><span>Futures and options execution ledger</span></div></div>
       <div className="journal-view-switch" aria-label="Journal page">
         <button className={page === "calendar" ? "active" : ""} aria-pressed={page === "calendar"} onClick={() => { setPage("calendar"); setSelectedTrade(undefined); }}><CalendarDays size={14} />Calendar</button>
         <button className={page === "stats" ? "active" : ""} aria-pressed={page === "stats"} onClick={() => { setPage("stats"); setSelectedTrade(undefined); }}><TrendingUp size={14} />Stats</button>
       </div>
       <div className="journal-nav-controls">
-        <select aria-label="Journal account and environment" value={activeScopeValue} onChange={(event) => setScope(scopes.find((item) => `${item.environment}:${item.accountId}` === event.target.value))}>
+        <select aria-label="Journal account and environment" value={activeScopeValue} onChange={(event) => setScope(scopes.find((item) => scopeKey(item) === event.target.value))}>
           {!scopes.length && <option value="">No journal accounts</option>}
-          {scopes.map((item) => <option key={`${item.environment}:${item.accountId}`} value={`${item.environment}:${item.accountId}`}>{item.environment.toUpperCase()} · {maskAccount(item.accountLabel || item.accountId)}</option>)}
+          {scopes.map((item) => <option key={scopeKey(item)} value={scopeKey(item)}>{(item.provider ?? "tradestation").toUpperCase()} · {item.environment.toUpperCase()} · {maskAccount(item.accountLabel || item.accountId)}</option>)}
         </select>
         <button className="journal-nav-button" onClick={() => setShowSetup(true)}><Cloud size={15} />Cloud</button>
         <button className="journal-nav-button primary" disabled={sync.state === "syncing" || (api.isNative && !auth.configured)} onClick={runSync}><RefreshCw size={15} className={sync.state === "syncing" ? "spin" : ""} />Sync</button>
@@ -414,7 +415,7 @@ export function TradeJournalWindow() {
 
       {page === "calendar" && loading && <div className="journal-state"><RefreshCw size={20} className="spin" /><span>Loading journal…</span></div>}
       {page === "calendar" && !loading && error && <div className="journal-state error"><CloudOff size={20} /><span>{error}</span><button onClick={runSync}>Retry sync</button></div>}
-      {page === "calendar" && !loading && !error && !scope && <div className="journal-state empty"><CalendarDays size={22} /><strong>No journal data yet</strong><span>Connect Supabase and sync a TradeStation account, or place a new trade through Northstar.</span></div>}
+      {page === "calendar" && !loading && !error && !scope && <div className="journal-state empty"><CalendarDays size={22} /><strong>No journal data yet</strong><span>Connect Supabase and sync TradeStation futures or the selected Schwab option account.</span></div>}
     </section>
 
     {selectedTrade && <TradeDrawer trade={selectedTrade} onClose={() => setSelectedTrade(undefined)} onSaved={(next) => setSelectedTrade(next)} />}
@@ -440,7 +441,7 @@ function DayView({ day, date, loading, onBack, onTrade }: { day?: JournalDaySumm
     ]} />
     {!loading && day && <div className="journal-trade-table-wrap"><table className="journal-trade-table"><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Initial stop</th><th>$ risk</th><th>Fees</th><th>Net</th><th>R</th><th /></tr></thead><tbody>
       {day.trades.map((trade) => <tr key={trade.id} onClick={() => onTrade(trade)} tabIndex={0} onKeyDown={(event) => { if (event.key === "Enter") onTrade(trade); }}>
-        <td>{journalTime.format(new Date(trade.openedAt))}{trade.closedAt ? `–${journalTime.format(new Date(trade.closedAt))}` : "–open"}</td><td><strong>{trade.symbol}</strong></td><td><span className={`journal-side ${trade.direction.toLowerCase()}`}>{trade.direction}</span></td><td>{trade.entryQuantity}</td><td>{price(trade.averageEntry)}</td><td>{price(trade.averageExit)}</td><td>{price(trade.originalStop)}</td><td title={`Risk provenance: ${trade.riskProvenance}`}>{money(trade.deployedRisk)}<i className={`risk-dot ${trade.riskProvenance}`} /></td><td className="muted">{money(-trade.fees)}</td><td className={metricClass(trade.netPnl)}>{trade.status === "open" ? "Open" : money(trade.netPnl)}</td><td className={metricClass(trade.rMultiple)}>{multiple(trade.rMultiple)}</td><td><ChevronRight size={15} /></td>
+        <td>{journalTime.format(new Date(trade.openedAt))}{trade.closedAt ? `–${journalTime.format(new Date(trade.closedAt))}` : "–open"}</td><td><strong>{trade.symbol}</strong>{trade.assetClass === "option" && <small>{trade.strategy === "short-strangle" ? "Short strangle" : "Long strangle"}</small>}</td><td><span className={`journal-side ${trade.direction.toLowerCase()}`}>{trade.direction}</span></td><td>{trade.assetClass === "option" ? `${trade.legs?.length ?? 2} legs` : trade.entryQuantity}</td><td>{trade.assetClass === "option" ? "Leg detail" : price(trade.averageEntry)}</td><td>{trade.assetClass === "option" ? "Leg detail" : price(trade.averageExit)}</td><td>{trade.assetClass === "option" ? "—" : price(trade.originalStop)}</td><td title={trade.assetClass === "option" ? "External Schwab option trades do not include an initial risk plan" : `Risk provenance: ${trade.riskProvenance}`}>{trade.assetClass === "option" ? "—" : <>{money(trade.deployedRisk)}<i className={`risk-dot ${trade.riskProvenance}`} /></>}</td><td className="muted">{money(-trade.fees)}</td><td className={metricClass(trade.netPnl)}>{trade.status === "open" ? "Open" : money(trade.netPnl)}</td><td className={metricClass(trade.rMultiple)}>{trade.assetClass === "option" ? "—" : multiple(trade.rMultiple)}</td><td><ChevronRight size={15} /></td>
       </tr>)}
       {!day.trades.length && <tr><td colSpan={12} className="journal-table-empty">No campaigns were initiated on this day.</td></tr>}
     </tbody></table></div>}
@@ -448,6 +449,7 @@ function DayView({ day, date, loading, onBack, onTrade }: { day?: JournalDaySumm
 }
 
 function TradeDrawer({ trade, onClose, onSaved }: { trade: JournalTrade; onClose: () => void; onSaved: (trade: JournalTrade) => void }) {
+  const isOption = trade.assetClass === "option";
   const [notes, setNotes] = useState(trade.notes);
   const [tags, setTags] = useState(trade.tags.join(", "));
   const [saving, setSaving] = useState(false);
@@ -495,15 +497,15 @@ function TradeDrawer({ trade, onClose, onSaved }: { trade: JournalTrade; onClose
   }
 
   return <><div className="journal-drawer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><aside className="journal-trade-drawer">
-    <header><div><span>{trade.status === "open" ? "Open Trade" : "Closed Trade"}</span><h2>{trade.symbol} <em className={trade.direction.toLowerCase()}>{trade.direction}</em></h2><p>{journalTime.format(new Date(trade.openedAt))}{trade.closedAt ? ` – ${journalTime.format(new Date(trade.closedAt))} ET` : " – Open"}</p></div><button aria-label="Close trade details" onClick={onClose}><X size={18} /></button></header>
-    <dl className="journal-drawer-metrics"><div><dt>Net P&L</dt><dd className={metricClass(trade.netPnl)}>{trade.status === "open" ? "Open" : money(trade.netPnl)}</dd></div><div><dt>R multiple</dt><dd className={metricClass(trade.rMultiple)}>{multiple(trade.rMultiple)}</dd></div><div><dt>Initial risk</dt><dd>{money(trade.deployedRisk)}</dd></div><div><dt>Risk source</dt><dd className={`provenance ${trade.riskProvenance}`}>{trade.riskProvenance}</dd></div></dl>
-    <section className="journal-drawer-section"><span>Execution plan</span><dl className="journal-plan-grid"><div><dt>Entry</dt><dd>{trade.entryQuantity} @ {price(trade.averageEntry)}</dd></div><div><dt>Exit</dt><dd>{trade.exitQuantity || "—"} @ {price(trade.averageExit)}</dd></div><div><dt>Original stop</dt><dd>{price(trade.originalStop)}</dd></div><div><dt>Original target</dt><dd>{price(trade.originalTarget)} · {multiple(journalProjectedTargetR(trade, trade.originalTarget))}</dd></div><div><dt>Gross P&L</dt><dd>{money(trade.grossPnl)}</dd></div><div><dt>Fees</dt><dd>{money(-trade.fees)}</dd></div></dl></section>
-    <section className="journal-drawer-section journal-entry-chart"><span>Entry chart</span>
+    <header><div><span>{trade.status === "open" ? "Open Trade" : "Closed Trade"}</span><h2>{trade.symbol} <em className={trade.direction.toLowerCase()}>{isOption ? trade.strategy?.replace("-", " ") : trade.direction}</em></h2><p>{journalTime.format(new Date(trade.openedAt))}{trade.closedAt ? ` – ${journalTime.format(new Date(trade.closedAt))} ET` : " – Open"}</p></div><button aria-label="Close trade details" onClick={onClose}><X size={18} /></button></header>
+    <dl className="journal-drawer-metrics"><div><dt>Net P&L</dt><dd className={metricClass(trade.netPnl)}>{trade.status === "open" ? "Open" : money(trade.netPnl)}</dd></div><div><dt>R multiple</dt><dd className={metricClass(trade.rMultiple)}>{isOption ? "N/A" : multiple(trade.rMultiple)}</dd></div><div><dt>Initial risk</dt><dd>{isOption ? "N/A" : money(trade.deployedRisk)}</dd></div><div><dt>{isOption ? "Broker" : "Risk source"}</dt><dd className={isOption ? "" : `provenance ${trade.riskProvenance}`}>{isOption ? "Schwab" : trade.riskProvenance}</dd></div></dl>
+    {isOption ? <section className="journal-drawer-section"><span>Option legs</span><div className="journal-option-legs"><div className="head"><span>Contract</span><span>Open</span><span>Close</span><span>P&amp;L</span></div>{trade.legs?.map((leg) => <div className="row" key={leg.id}><span><strong>{leg.putCall === "CALL" ? "C" : "P"} {price(leg.strikePrice)}</strong><small>{leg.expirationDate} · {leg.optionSymbol}</small>{leg.replacesLegId && <small>Rolled leg</small>}</span><span>{leg.openedQuantity} @ {price(leg.averageEntry)}</span><span>{leg.closedQuantity || "—"} @ {price(leg.averageExit)}</span><strong className={metricClass(leg.grossPnl - leg.fees)}>{money(leg.grossPnl - leg.fees)}</strong></div>)}</div><dl className="journal-plan-grid"><div><dt>Gross P&amp;L</dt><dd>{money(trade.grossPnl)}</dd></div><div><dt>Estimated fees</dt><dd>{money(-trade.fees)}</dd></div></dl></section> : <section className="journal-drawer-section"><span>Execution plan</span><dl className="journal-plan-grid"><div><dt>Entry</dt><dd>{trade.entryQuantity} @ {price(trade.averageEntry)}</dd></div><div><dt>Exit</dt><dd>{trade.exitQuantity || "—"} @ {price(trade.averageExit)}</dd></div><div><dt>Original stop</dt><dd>{price(trade.originalStop)}</dd></div><div><dt>Original target</dt><dd>{price(trade.originalTarget)} · {multiple(journalProjectedTargetR(trade, trade.originalTarget))}</dd></div><div><dt>Gross P&L</dt><dd>{money(trade.grossPnl)}</dd></div><div><dt>Fees</dt><dd>{money(-trade.fees)}</dd></div></dl></section>}
+    {!isOption && <section className="journal-drawer-section journal-entry-chart"><span>Entry chart</span>
       {imageLoading && <div className="journal-entry-chart-loading"><i /><small>Loading private chart image…</small></div>}
       {!imageLoading && entryImage && <button type="button" className="journal-entry-chart-image" onClick={() => setImageExpanded(true)} aria-label={`Expand ${trade.symbol} entry chart`}><img src={entryImage} alt={`${trade.symbol} ${trade.direction.toLowerCase()} entry chart`} /><span><Expand size={13} />Expand</span></button>}
       {!imageLoading && imageError && <div className="journal-entry-chart-state error"><ImageIcon size={18} /><p>Entry chart unavailable</p><small>{imageError}</small><button type="button" onClick={() => { void loadEntryImage(); }}><RefreshCw size={13} />Retry</button></div>}
       {!imageLoading && !entryImage && !imageError && <div className="journal-entry-chart-state"><ImageIcon size={18} /><p>No entry chart was captured.</p></div>}
-    </section>
+    </section>}
     <section className="journal-drawer-section"><span>Order and risk history</span><div className="journal-timeline">{timelineEvents.map((event) => {
       const targetR = event.eventType === "target-move" ? ` · ${multiple(journalProjectedTargetR(trade, event.newPrice))}` : "";
       return <article key={event.id}><i className={`${event.status ?? "confirmed"}`} /><div><header><strong>{event.eventType.replaceAll("-", " ")}</strong><time>{journalTime.format(new Date(event.occurredAt))} ET</time></header><p>{event.oldPrice != null || event.newPrice != null ? `${price(event.oldPrice)} → ${price(event.newPrice)}${targetR}` : event.price != null ? `${event.quantity ?? ""} @ ${price(event.price)}` : event.note ?? event.source}</p><small>{event.source} · {event.status ?? "confirmed"}</small></div></article>;

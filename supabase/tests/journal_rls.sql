@@ -1,9 +1,11 @@
 begin;
-select plan(7);
+select plan(9);
 select has_table('public','journal_trades','journal trades table exists');
 select has_table('public','journal_events','journal events table exists');
 select policies_are('public','journal_events',array['journal events owner insert','journal events owner read'],'events expose only owner insert/read policies');
 select policies_are('public','journal_trades',array['journal trades owner insert','journal trades owner read','journal trades owner repair delete','journal trades owner update'],'trade snapshots expose owner-scoped repair policies');
+select has_table('public','journal_option_legs','journal option legs table exists');
+select policies_are('public','journal_option_legs',array['journal option legs owner access'],'option legs are owner scoped');
 select has_table('public','journal_screenshots','journal screenshot metadata table exists');
 select policies_are('public','journal_screenshots',array['journal screenshots owner delete','journal screenshots owner insert','journal screenshots owner read'],'screenshot metadata is owner scoped');
 select policies_are('storage','objects',array['trade screenshots owner delete','trade screenshots owner insert','trade screenshots owner read'],'private screenshot objects are owner scoped');

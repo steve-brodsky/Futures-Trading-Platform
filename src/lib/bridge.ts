@@ -314,11 +314,14 @@ const rawApi = {
   async setJournalCommission(commissionPerContractSide: number): Promise<void> {
     if (isTauri) await native("set_journal_commission", { commissionPerContractSide });
   },
+  async setSchwabOptionFee(schwabOptionFeePerContractSide: number): Promise<void> {
+    if (isTauri) await native("set_schwab_option_fee", { schwabOptionFeePerContractSide });
+  },
   async syncJournal(scope?: JournalScope): Promise<JournalSyncStatus> {
     return isTauri ? native("sync_journal", { scope }) : { state: "synced", pendingEvents: 0, lastSyncedAt: new Date().toISOString(), message: "Browser demo data" };
   },
   async journalScopes(): Promise<JournalScope[]> {
-    return isTauri ? native("get_journal_scopes") : [{ environment: "sim", accountId: "SIM-DEMO-4821", accountLabel: "SIM ··4821" }];
+    return isTauri ? native("get_journal_scopes") : [{ provider: "tradestation", environment: "sim", accountId: "SIM-DEMO-4821", accountLabel: "SIM ··4821" }];
   },
   async journalMonth(scope: JournalScope, year: number, month: number): Promise<JournalMonthSummary> {
     return isTauri ? native("get_journal_month", { scope, year, month }) : monthSummary(scope, year, month, demoJournalTrades());

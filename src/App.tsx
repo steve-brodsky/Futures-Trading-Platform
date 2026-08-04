@@ -100,7 +100,7 @@ const defaultWorkspace: WorkspaceState = {
   drawings: {}, gexSelections: {},
   activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -1066,6 +1066,7 @@ function TradingApp() {
       workspaceRef.current = normalized;
       await api.setEnvironment(normalized.environment);
       await api.setJournalCommission(normalized.settings.journal.commissionPerContractSide);
+      await api.setSchwabOptionFee(normalized.settings.journal.schwabOptionFeePerContractSide);
       if (currentWindowId === MAIN_WINDOW_ID) {
         const mainWindow = normalized.windows.find((item) => item.id === MAIN_WINDOW_ID);
         if (mainWindow) await restoreMainWindowGeometry(mainWindow).catch(() => undefined);
@@ -2697,6 +2698,9 @@ function TradingApp() {
         if (mergedWorkspace.settings.journal.commissionPerContractSide !== current.settings.journal.commissionPerContractSide) {
           await api.setJournalCommission(mergedWorkspace.settings.journal.commissionPerContractSide);
         }
+        if (mergedWorkspace.settings.journal.schwabOptionFeePerContractSide !== current.settings.journal.schwabOptionFeePerContractSide) {
+          await api.setSchwabOptionFee(mergedWorkspace.settings.journal.schwabOptionFeePerContractSide);
+        }
         if (result.replacedCategories.some((category) => eligible.has(category))) {
           showToast("Newer preferences from another computer were applied.");
         }
@@ -3543,10 +3547,19 @@ function TradingApp() {
       ...current,
       settings: {
         ...current.settings,
-        journal: { commissionPerContractSide },
+        journal: { ...current.settings.journal, commissionPerContractSide },
       },
     }));
     void api.setJournalCommission(commissionPerContractSide).catch((error) => showToast(String(error)));
+  }
+
+  function updateSchwabOptionFee(value: number) {
+    const schwabOptionFeePerContractSide = Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+    commitWorkspace((current) => ({
+      ...current,
+      settings: { ...current.settings, journal: { ...current.settings.journal, schwabOptionFeePerContractSide } },
+    }));
+    void api.setSchwabOptionFee(schwabOptionFeePerContractSide).catch((error) => showToast(String(error)));
   }
 
   async function openTradeJournal() {
@@ -4378,7 +4391,7 @@ function TradingApp() {
       </section>
       {selectedAccount && riskStatus && <RiskSafetySettings account={selectedAccount} environment={environment} status={riskStatus} transitioning={environmentTransitioning} onStatus={setRiskStatus} onNotify={showToast} />}
       <section className="settings-section" aria-labelledby="audit-log-settings"><header><span>Diagnostics</span><h3 id="audit-log-settings">Audit log</h3><p>Review API activity and saved record changes retained locally for seven days.</p></header><button type="button" className="settings-audit-row" onClick={() => { setSettingsOpen(false); setAuditLogOpen(true); }}><span className={auditHealth.healthy ? "healthy" : "degraded"}><Activity size={16} /><i /></span><span><strong>{auditHealth.healthy ? "Logging healthy" : "Logging degraded"}</strong><small>{auditHealth.sessionOnly ? "Session-only browser diagnostics" : auditHealth.healthy ? "Local device only · 10,000 event maximum" : `${auditHealth.droppedEvents} event${auditHealth.droppedEvents === 1 ? "" : "s"} may be missing`}</small></span><em>Open audit log</em></button></section>
-      <section className="settings-section" aria-labelledby="journal-fee-settings"><header><span>Journal</span><h3 id="journal-fee-settings">Commission and fees</h3><p>Used for journal net P&amp;L on every opening and closing fill.</p></header><label className="settings-control-row"><span><strong>Fee per contract, per side</strong><small>One contract opened and closed is charged twice</small></span><div className="settings-number-control"><input aria-label="Journal fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.commissionPerContractSide} onChange={(event) => updateJournalCommission(Number(event.target.value))} /><span>USD</span></div></label></section>
+      <section className="settings-section" aria-labelledby="journal-fee-settings"><header><span>Journal</span><h3 id="journal-fee-settings">Commission and fees</h3><p>Used for journal net P&amp;L on every opening and closing fill.</p></header><label className="settings-control-row"><span><strong>Futures fee per contract, per side</strong><small>One contract opened and closed is charged twice</small></span><div className="settings-number-control"><input aria-label="Journal fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.commissionPerContractSide} onChange={(event) => updateJournalCommission(Number(event.target.value))} /><span>USD</span></div></label><label className="settings-control-row"><span><strong>Schwab option fee per contract, per leg, per side</strong><small>Used when Schwab order history does not include commissions</small></span><div className="settings-number-control"><input aria-label="Schwab option fee per contract per side" type="number" min="0" max="100" step="0.01" value={workspace.settings.journal.schwabOptionFeePerContractSide} onChange={(event) => updateSchwabOptionFee(Number(event.target.value))} /><span>USD</span></div></label></section>
       <section className="settings-section settings-api-section" aria-labelledby="journal-cloud-settings"><JournalCloudSettings preferenceSync={preferenceSync} preferenceRealtime={preferenceRealtime} onConnectionChanged={() => { void syncCloudPreferences(); }} /></section>
       <section className="settings-section settings-api-section" aria-labelledby="tradestation-api-settings"><header><span>Connection</span><h3 id="tradestation-api-settings">TradeStation API</h3><p>Update the API client ID and secret stored in your operating system credential vault.</p></header><TradeStationCredentials clientId={clientId} secret={secret} busy={busy} configured={credentialsConfigured} native={api.isNative} showIntro={false} onClientIdChange={setClientId} onSecretChange={setSecret} onSave={saveTradeStationCredentials} onConnect={connect} /></section>
       <section className="settings-section settings-api-section" aria-labelledby="schwab-api-settings"><header><span>Connection</span><h3 id="schwab-api-settings">Schwab API</h3><p>Equity and ETF chart data. Credentials and the refresh token stay in the operating system credential vault.</p></header><SchwabCredentials clientId={schwabClientId} secret={schwabSecret} busy={busy} configured={schwabConfigured} connected={schwabAuthenticated} native={api.isNative} onClientIdChange={setSchwabClientId} onSecretChange={setSchwabSecret} onSave={saveSchwabApiCredentials} onConnect={connectSchwab} onDisconnect={disconnectSchwab} /></section>

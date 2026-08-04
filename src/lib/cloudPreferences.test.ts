@@ -52,7 +52,7 @@ function workspace(): WorkspaceState {
       chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS,
       orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", riskAmount: 150 },
       contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS,
-      journal: { commissionPerContractSide: 0.75 },
+      journal: { commissionPerContractSide: 0.75, schwabOptionFeePerContractSide: 0.65 },
     },
   };
 }
@@ -113,7 +113,7 @@ describe("cloud preferences", () => {
         chartSessions: { ...local.settings.chartSessions, colorMode: "by-session", asiaColor: "#112233" },
         chartEconomicEvents: { ...local.settings.chartEconomicEvents, enabled: true, impactVisibility: { ...local.settings.chartEconomicEvents.impactVisibility, low: false } },
         contractRollAlerts: { audioEnabled: false, sound: "pulse", durationSeconds: 3 },
-        journal: { commissionPerContractSide: 1.25 },
+        journal: { commissionPerContractSide: 1.25, schwabOptionFeePerContractSide: 0.65 },
       },
     });
     const merged = applyCloudPreferenceProfile(local, profile);

@@ -1479,6 +1479,11 @@ impl TradeStation {
             broker_order_id: None,
             leg_id: None,
             asset_type: Some("FUTURE".into()),
+            underlying: None,
+            expiration_date: None,
+            strike_price: None,
+            put_call: None,
+            multiplier: None,
         })
     }
 
@@ -2075,6 +2080,11 @@ pub(crate) fn order_from_value(item: &Value) -> OrderUpdate {
         broker_order_id: None,
         leg_id: None,
         asset_type: Some("FUTURE".into()),
+        underlying: None,
+        expiration_date: None,
+        strike_price: None,
+        put_call: None,
+        multiplier: None,
     }
 }
 
@@ -2963,6 +2973,11 @@ mod tests {
             broker_order_id: None,
             leg_id: None,
             asset_type: Some("FUTURE".into()),
+            underlying: None,
+            expiration_date: None,
+            strike_price: None,
+            put_call: None,
+            multiplier: None,
         }
     }
 
