@@ -4488,15 +4488,14 @@ fn retain_schwab_bootstrap_snapshot(
     latest_bars
         .write()
         .map(|mut retained| {
-            let live = retained
-                .iter()
-                .filter(|bar| bar.realtime)
-                .cloned()
-                .collect::<Vec<_>>();
+            if let Some(first) = incoming.iter().map(|bar| bar.time).min() {
+                // The bootstrap snapshot has already reconciled REST minutes
+                // with every live minute received while it was loading. Drop
+                // the covered cached/live tail so stale Sunday bars and an
+                // incomplete timeframe-level fragment cannot survive.
+                retained.retain(|bar| bar.time < first);
+            }
             merge_retained_bars(&mut retained, incoming, limit);
-            // A REST request can finish after the first streamed candle. Keep
-            // that newer live value when both sources contain the same minute.
-            merge_retained_bars(&mut retained, &live, limit);
             retained.clone()
         })
         .unwrap_or_else(|_| incoming.to_vec())
@@ -4640,11 +4639,26 @@ fn provisional_minute_from_equity_tick(
     Some(minute)
 }
 
+fn reconcile_schwab_bootstrap_minutes(
+    live_minutes: &mut BTreeMap<i64, Bar>,
+    historical_minutes: &[Bar],
+) -> Vec<Bar> {
+    historical_minutes.iter().for_each(|bar| {
+        // A streamed minute is newer than the REST snapshot only for this
+        // exact minute; the complete set is aggregated after reconciliation.
+        live_minutes.entry(bar.time).or_insert_with(|| bar.clone());
+    });
+    live_minutes.values().cloned().collect()
+}
+
 fn aggregate_schwab_live_minute(
     live_minutes: &mut BTreeMap<i64, Bar>,
     minute: Bar,
     timeframe: &str,
 ) -> Option<(Bar, Option<Bar>)> {
+    if matches!(timeframe, "D" | "W" | "M") && !schwab::is_regular_session_minute(minute.time) {
+        return None;
+    }
     let previous = live_minutes.insert(minute.time, minute.clone());
     let bucket_time = schwab::bucket_start(minute.time, timeframe)?;
     // CHART_EQUITY can close the preceding minute after a LEVELONE_EQUITIES
@@ -4653,7 +4667,7 @@ fn aggregate_schwab_live_minute(
     live_minutes.retain(|time, _| {
         *time > minute.time || schwab::bucket_start(*time, timeframe) == Some(bucket_time)
     });
-    let mut update = schwab::aggregate_bars(
+    let mut update = schwab::aggregate_session_minutes(
         &live_minutes.values().cloned().collect::<Vec<_>>(),
         timeframe,
     )
@@ -4755,7 +4769,6 @@ async fn run_schwab_bar_stream(
                 let mut snapshot = Vec::new();
                 match history {
                     Ok(history) => {
-                        let _ = storage::save_bars(&db_path, "schwab", &symbol, &timeframe, &history);
                         snapshot = history;
                     }
                     Err(error) => emit_shared_stream_state(
@@ -4770,22 +4783,38 @@ async fn run_schwab_bar_stream(
                         Some(format!("Schwab history refresh failed; live updates will continue: {error}")),
                     ),
                 }
-                if !source_minutes.is_empty() {
-                    let _ = storage::save_bars(&db_path, "schwab", &symbol, "1m", &source_minutes);
-                    source_minutes.iter().for_each(|bar| {
-                        live_minutes.entry(bar.time).or_insert_with(|| bar.clone());
-                    });
+                let reconciled_minutes = reconcile_schwab_bootstrap_minutes(
+                    &mut live_minutes,
+                    &source_minutes,
+                );
+                if !reconciled_minutes.is_empty() {
+                    if timeframe != "1m" {
+                        let _ = storage::replace_bar_tail(
+                            &db_path,
+                            "schwab",
+                            &symbol,
+                            "1m",
+                            &reconciled_minutes,
+                        );
+                    }
                     snapshot = {
                         let mut combined = snapshot;
                         merge_retained_bars(
                             &mut combined,
-                            &schwab::aggregate_bars(&source_minutes, &timeframe),
+                            &schwab::aggregate_session_minutes(&reconciled_minutes, &timeframe),
                             retained_limit,
                         );
                         combined
                     };
                 }
                 if !snapshot.is_empty() {
+                    let _ = storage::replace_bar_tail(
+                        &db_path,
+                        "schwab",
+                        &symbol,
+                        &timeframe,
+                        &snapshot,
+                    );
                     let retained = retain_schwab_bootstrap_snapshot(&latest_bars, &snapshot, retained_limit);
                     emit_bar_snapshot(
                         &app,
@@ -6236,7 +6265,7 @@ mod stream_tests {
     }
 
     #[test]
-    fn schwab_rest_bootstrap_cannot_overwrite_an_early_live_candle() {
+    fn schwab_reconciled_bootstrap_replaces_an_incomplete_live_fragment() {
         let bar = |time: i64, close: f64, realtime: bool| Bar {
             time,
             open: close,
@@ -6259,8 +6288,100 @@ mod stream_tests {
             retained.iter().map(|item| item.time).collect::<Vec<_>>(),
             vec![100, 200, 300]
         );
-        assert_eq!(retained[2].close, 30.0);
-        assert!(retained[2].realtime);
+        assert_eq!(retained[2].close, 3.0);
+        assert!(!retained[2].realtime);
+    }
+
+    #[test]
+    fn schwab_daily_bootstrap_rebuilds_the_full_session_before_retention() {
+        let epoch = |value: &str| DateTime::parse_from_rfc3339(value).unwrap().timestamp();
+        let open = Bar {
+            time: epoch("2026-08-03T09:30:00-04:00"),
+            open: 751.11,
+            high: 753.0,
+            low: 750.9,
+            close: 752.5,
+            volume: 1_000.0,
+            realtime: false,
+        };
+        let close = Bar {
+            time: epoch("2026-08-03T15:59:00-04:00"),
+            open: 757.8,
+            high: 758.58,
+            low: 757.7,
+            close: 758.33,
+            volume: 2_000.0,
+            realtime: true,
+        };
+        let day = schwab::bucket_start(open.time, "D").unwrap();
+        let latest = Arc::new(RwLock::new(vec![Bar {
+            time: day,
+            open: 758.28,
+            high: 758.33,
+            low: 758.25,
+            close: 758.33,
+            volume: 5_347.0,
+            realtime: true,
+        }]));
+        let rebuilt = schwab::aggregate_session_minutes(&[open, close], "D");
+        let retained = retain_schwab_bootstrap_snapshot(&latest, &rebuilt, 10);
+
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].time, day);
+        assert_eq!(
+            (
+                retained[0].open,
+                retained[0].high,
+                retained[0].low,
+                retained[0].close,
+                retained[0].volume,
+            ),
+            (751.11, 758.58, 750.9, 758.33, 3_000.0)
+        );
+        assert!(retained[0].realtime);
+    }
+
+    #[test]
+    fn schwab_bootstrap_live_minute_wins_only_its_exact_timestamp() {
+        let bar = |time: i64, close: f64, realtime: bool| Bar {
+            time,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1.0,
+            realtime,
+        };
+        let mut live = BTreeMap::from([(200, bar(200, 20.0, true))]);
+        let reconciled = reconcile_schwab_bootstrap_minutes(
+            &mut live,
+            &[bar(100, 1.0, false), bar(200, 2.0, false), bar(300, 3.0, false)],
+        );
+        assert_eq!(
+            reconciled
+                .iter()
+                .map(|item| (item.time, item.close, item.realtime))
+                .collect::<Vec<_>>(),
+            vec![(100, 1.0, false), (200, 20.0, true), (300, 3.0, false)]
+        );
+    }
+
+    #[test]
+    fn schwab_after_hours_ticks_do_not_mutate_calendar_bars() {
+        let after_hours = Bar {
+            time: DateTime::parse_from_rfc3339("2026-08-03T19:59:00-04:00")
+                .unwrap()
+                .timestamp(),
+            open: 758.28,
+            high: 758.33,
+            low: 758.25,
+            close: 758.33,
+            volume: 5_347.0,
+            realtime: true,
+        };
+        let mut live_minutes = BTreeMap::new();
+        assert!(aggregate_schwab_live_minute(&mut live_minutes, after_hours, "D").is_none());
+        assert!(live_minutes.is_empty());
     }
 
     #[test]

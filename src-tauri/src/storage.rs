@@ -573,6 +573,45 @@ pub fn save_bars(
     Ok(())
 }
 
+/// Atomically replace the cached tail covered by a refreshed snapshot while
+/// preserving older history and every other provider/symbol/timeframe.
+pub fn replace_bar_tail(
+    path: &Path,
+    environment: &str,
+    symbol: &str,
+    timeframe: &str,
+    bars: &[crate::models::Bar],
+) -> Result<(), AppError> {
+    let Some(first) = bars.iter().map(|bar| bar.time).min() else {
+        return Ok(());
+    };
+    let mut db = connection(path)?;
+    let tx = db.transaction()?;
+    tx.execute(
+        "DELETE FROM bars WHERE environment=?1 AND symbol=?2 AND timeframe=?3 AND time>=?4",
+        params![environment, symbol, timeframe, first],
+    )?;
+    {
+        let mut statement = tx.prepare("INSERT INTO bars(environment,symbol,timeframe,time,open,high,low,close,volume,realtime) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(environment,symbol,timeframe,time) DO UPDATE SET open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,volume=excluded.volume,realtime=excluded.realtime")?;
+        for bar in bars {
+            statement.execute(params![
+                environment,
+                symbol,
+                timeframe,
+                bar.time,
+                bar.open,
+                bar.high,
+                bar.low,
+                bar.close,
+                bar.volume,
+                bar.realtime as i32
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn load_bars(
     path: &Path,
     environment: &str,
@@ -709,6 +748,54 @@ mod tests {
         assert!(load_bars_range(&path, "sim", "@NQ", "1m", 0, 400)
             .unwrap()
             .is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn refreshed_bar_tail_removes_stale_rows_without_touching_other_series() {
+        let path = std::env::temp_dir().join(format!(
+            "northstar-bar-tail-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let bar = |time: i64, close: f64| Bar {
+            time,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 1.0,
+            realtime: false,
+        };
+        save_bars(
+            &path,
+            "schwab",
+            "SPY",
+            "D",
+            &[bar(100, 1.0), bar(200, 2.0), bar(250, 2.5), bar(300, 3.0)],
+        )
+        .unwrap();
+        save_bars(&path, "schwab", "QQQ", "D", &[bar(250, 25.0)]).unwrap();
+
+        replace_bar_tail(
+            &path,
+            "schwab",
+            "SPY",
+            "D",
+            &[bar(200, 20.0), bar(300, 30.0)],
+        )
+        .unwrap();
+
+        let spy = load_bars(&path, "schwab", "SPY", "D", 10).unwrap();
+        assert_eq!(
+            spy.iter()
+                .map(|item| (item.time, item.close))
+                .collect::<Vec<_>>(),
+            vec![(100, 1.0), (200, 20.0), (300, 30.0)]
+        );
+        assert_eq!(
+            load_bars(&path, "schwab", "QQQ", "D", 10).unwrap()[0].close,
+            25.0
+        );
         std::fs::remove_file(path).unwrap();
     }
 

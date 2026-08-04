@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { candleEndTime, formatCandleCountdown } from "./candleCountdown";
+import { candleEndTime, formatCandleCountdown, formatSchwabDailyCountdown } from "./candleCountdown";
 
 describe("candle countdown", () => {
   it("counts down intraday candles from their opening timestamp", () => {
@@ -17,5 +17,12 @@ describe("candle countdown", () => {
     expect(formatCandleCountdown(1_000, "W", 1_000_000)).toBe("7d 00:00:00");
     const july = Date.UTC(2026, 6, 1) / 1000;
     expect(candleEndTime(july, "M")).toBe(Date.UTC(2026, 7, 1) / 1000);
+  });
+
+  it("shows Schwab daily countdowns only during the New York regular session", () => {
+    const august3MidnightNewYork = Date.parse("2026-08-03T04:00:00Z") / 1000;
+    expect(formatSchwabDailyCountdown(august3MidnightNewYork, Date.parse("2026-08-03T13:29:59Z"))).toBe("");
+    expect(formatSchwabDailyCountdown(august3MidnightNewYork, Date.parse("2026-08-03T19:59:30Z"))).toBe("00:30");
+    expect(formatSchwabDailyCountdown(august3MidnightNewYork, Date.parse("2026-08-03T20:00:00Z"))).toBe("");
   });
 });

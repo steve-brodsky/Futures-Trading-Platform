@@ -6,7 +6,7 @@ import {
 } from "lightweight-charts";
 import type { AlertDurationSeconds, AlertSound, Bar, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, EconomicEvent, GexExpirationDisplay, GexView, IndicatorConfig, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
-import { formatCandleCountdown } from "../lib/candleCountdown";
+import { formatCandleCountdown, formatSchwabDailyCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme, syncedCrosshairPlotTime, type ChartCrosshairUpdate } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
@@ -654,12 +654,16 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const price = priceRef.current;
     if (!price || latestOpenTime == null) return;
     price.applyOptions({ title: "" });
-    const updateCountdown = () => setCandleCountdown(formatCandleCountdown(latestOpenTime, timeframe));
+    const updateCountdown = () => setCandleCountdown(
+      provider === "schwab" && timeframe === "D"
+        ? formatSchwabDailyCountdown(latestOpenTime)
+        : formatCandleCountdown(latestOpenTime, timeframe),
+    );
     updateCountdown();
     requestAnimationFrame(() => syncTradeLabelsRef.current());
     const timer = window.setInterval(updateCountdown, 1_000);
     return () => window.clearInterval(timer);
-  }, [bars.at(-1)?.time, timeframe, chartGeneration, isSynthetic]);
+  }, [bars.at(-1)?.time, provider, timeframe, chartGeneration, isSynthetic]);
 
   useEffect(() => {
     const chart = chartRef.current;

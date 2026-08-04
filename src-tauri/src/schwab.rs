@@ -397,20 +397,29 @@ impl Schwab {
         }
         match timeframe {
             "D" | "W" | "M" => {
-                let mut daily = self
+                let raw_daily = self
                     .price_history(symbol, "year", 20, "daily", 1, before, None)
                     .await?;
+                // Schwab's daily timestamps are provider instants rather than
+                // stable calendar keys. Normalize them before combining them
+                // with the current session reconstructed from minute history.
+                let mut by_time: BTreeMap<_, _> = aggregate_bars(&raw_daily, "D")
+                    .into_iter()
+                    .map(|bar| (bar.time, bar))
+                    .collect();
                 if before.is_none() {
                     let minutes = self
                         .price_history(symbol, "day", 10, "minute", 1, None, None)
                         .await?;
-                    let recent_daily = aggregate_bars(&minutes, "D");
-                    let mut by_time: BTreeMap<_, _> =
-                        daily.into_iter().map(|bar| (bar.time, bar)).collect();
+                    let recent_daily = aggregate_session_minutes(&minutes, "D");
                     by_time.extend(recent_daily.into_iter().map(|bar| (bar.time, bar)));
-                    daily = by_time.into_values().collect();
                 }
-                Ok(aggregate_bars(&daily, timeframe))
+                let daily = by_time.into_values().collect::<Vec<_>>();
+                Ok(if timeframe == "D" {
+                    daily
+                } else {
+                    aggregate_bars(&daily, timeframe)
+                })
             }
             _ => Err(AppError::Validation("Unsupported Schwab timeframe".into())),
         }
@@ -511,6 +520,36 @@ pub fn aggregate_bars(source: &[Bar], timeframe: &str) -> Vec<Bar> {
             });
     }
     buckets.into_values().collect()
+}
+
+/// Aggregate minute data into Schwab calendar bars using the conventional
+/// equity session. Intraday charts intentionally keep extended-hours data.
+pub fn aggregate_session_minutes(source: &[Bar], timeframe: &str) -> Vec<Bar> {
+    if !matches!(timeframe, "D" | "W" | "M") {
+        return aggregate_bars(source, timeframe);
+    }
+    let regular_minutes = source
+        .iter()
+        .filter(|bar| is_regular_session_minute(bar.time))
+        .cloned()
+        .collect::<Vec<_>>();
+    let daily = aggregate_bars(&regular_minutes, "D");
+    if timeframe == "D" {
+        daily
+    } else {
+        aggregate_bars(&daily, timeframe)
+    }
+}
+
+pub fn is_regular_session_minute(epoch: i64) -> bool {
+    let Some(local) = new_york_local(epoch) else {
+        return false;
+    };
+    if matches!(local.weekday(), Weekday::Sat | Weekday::Sun) {
+        return false;
+    }
+    let minute_of_day = local.hour() * 60 + local.minute();
+    (9 * 60 + 30..16 * 60).contains(&minute_of_day)
 }
 
 pub fn bucket_start(epoch: i64, timeframe: &str) -> Option<i64> {
@@ -1167,6 +1206,64 @@ mod tests {
         assert_eq!(result[0].low, 9.0);
         assert_eq!(result[0].close, 11.5);
         assert_eq!(result[0].volume, 225.0);
+    }
+
+    #[test]
+    fn daily_session_bars_exclude_extended_hours_and_weekends() {
+        let monday = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+        let at = |date: NaiveDate, hour, minute| {
+            new_york_epoch(date.and_hms_opt(hour, minute, 0).unwrap())
+        };
+        let sunday = monday - chrono::Duration::days(1);
+        let result = aggregate_session_minutes(
+            &[
+                bar(at(sunday, 20, 0), 747.0, 748.0, 746.0, 747.5, 50.0),
+                bar(at(monday, 9, 29), 750.0, 751.0, 749.0, 750.5, 75.0),
+                bar(at(monday, 9, 30), 751.11, 753.0, 750.9, 752.5, 100.0),
+                bar(at(monday, 15, 59), 757.8, 758.58, 757.7, 758.33, 200.0),
+                bar(at(monday, 16, 0), 758.3, 758.4, 758.2, 758.35, 25.0),
+            ],
+            "D",
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(new_york_local(result[0].time).unwrap().date(), monday);
+        assert_eq!(
+            (
+                result[0].open,
+                result[0].high,
+                result[0].low,
+                result[0].close,
+                result[0].volume,
+            ),
+            (751.11, 758.58, 750.9, 758.33, 300.0)
+        );
+    }
+
+    #[test]
+    fn corrected_daily_minutes_roll_into_weekly_and_monthly_bars() {
+        let monday = NaiveDate::from_ymd_opt(2026, 8, 3).unwrap();
+        let tuesday = monday + chrono::Duration::days(1);
+        let at = |date: NaiveDate, hour, minute| {
+            new_york_epoch(date.and_hms_opt(hour, minute, 0).unwrap())
+        };
+        let minutes = [
+            bar(at(monday, 9, 30), 751.0, 755.0, 750.0, 754.0, 100.0),
+            bar(at(tuesday, 9, 30), 754.0, 759.0, 753.0, 758.0, 200.0),
+        ];
+        for timeframe in ["W", "M"] {
+            let result = aggregate_session_minutes(&minutes, timeframe);
+            assert_eq!(result.len(), 1);
+            assert_eq!(
+                (
+                    result[0].open,
+                    result[0].high,
+                    result[0].low,
+                    result[0].close
+                ),
+                (751.0, 759.0, 750.0, 758.0)
+            );
+            assert_eq!(result[0].volume, 300.0);
+        }
     }
 
     #[test]
