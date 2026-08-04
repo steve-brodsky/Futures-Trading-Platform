@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::{Datelike, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc, Weekday};
@@ -10,7 +14,8 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     audit::AuditService,
     models::{
-        Bar, MarketDataProvider, OptionChainSnapshot, OptionContract, OptionExpiration, Quote,
+        Account, AccountBalance, Bar, HistoricalOrderPage, MarketDataProvider, OptionChainSnapshot,
+        OptionContract, OptionExpiration, OrderUpdate, Position, Quote, SchwabAccountSnapshot,
         SymbolMeta,
     },
     storage, AppError,
@@ -57,6 +62,7 @@ pub struct Schwab {
     access_token: Arc<RwLock<Option<AccessToken>>>,
     refresh_lock: Arc<Mutex<()>>,
     audit: Option<AuditService>,
+    account_numbers: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl Schwab {
@@ -69,6 +75,7 @@ impl Schwab {
             access_token: Arc::new(RwLock::new(None)),
             refresh_lock: Arc::new(Mutex::new(())),
             audit: None,
+            account_numbers: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -211,13 +218,23 @@ impl Schwab {
     async fn get_json(&self, url: &str) -> Result<Value, AppError> {
         let mut token = self.access_token(false).await?;
         let correlation_id = uuid::Uuid::new_v4().to_string();
+        let trader_request = url.starts_with(TRADER_URL);
+        let audited_url = if trader_request {
+            format!("{TRADER_URL}/[redacted]")
+        } else {
+            url.to_string()
+        };
         for retry in 0..=1 {
             let span = self.audit.as_ref().map(|audit| {
                 audit.begin_api(
                     "schwab",
-                    "market-data",
+                    if trader_request {
+                        "account-data"
+                    } else {
+                        "market-data"
+                    },
                     "GET",
-                    url,
+                    &audited_url,
                     None,
                     Some(correlation_id.clone()),
                 )
@@ -253,20 +270,141 @@ impl Schwab {
             if !status.is_success() {
                 let detail = response.text().await.unwrap_or_default();
                 if let Some(span) = span {
-                    span.error(Some(status.as_u16()), truncate(&detail));
+                    span.error(
+                        Some(status.as_u16()),
+                        if trader_request {
+                            "Schwab account response redacted".into()
+                        } else {
+                            truncate(&detail)
+                        },
+                    );
                 }
-                return Err(AppError::Api(format!(
-                    "Schwab request failed ({status}): {}",
-                    truncate(&detail)
-                )));
+                return Err(AppError::Api(if trader_request {
+                    format!("Schwab account request failed ({status})")
+                } else {
+                    format!("Schwab request failed ({status}): {}", truncate(&detail))
+                }));
             }
             let value: Value = response.json().await?;
             if let Some(span) = span {
-                span.success(Some(status.as_u16()), Some(value.clone()));
+                span.success(
+                    Some(status.as_u16()),
+                    Some(if trader_request {
+                        serde_json::json!({"redacted": true})
+                    } else {
+                        value.clone()
+                    }),
+                );
             }
             return Ok(value);
         }
         Err(AppError::AuthenticationRequired)
+    }
+
+    pub async fn accounts(&self) -> Result<Vec<Account>, AppError> {
+        let numbers = self
+            .get_json(&format!("{TRADER_URL}/accounts/accountNumbers"))
+            .await?;
+        let mut by_number = HashMap::new();
+        for item in numbers.as_array().into_iter().flatten() {
+            let number = text(item, "accountNumber");
+            let hash = text(item, "hashValue");
+            if !number.is_empty() && !hash.is_empty() {
+                by_number.insert(number, hash);
+            }
+        }
+        *self.account_numbers.write().await = by_number.clone();
+
+        let values = self.get_json(&format!("{TRADER_URL}/accounts")).await?;
+        Ok(values
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item.get("securitiesAccount"))
+            .filter_map(|account| {
+                let number = text(account, "accountNumber");
+                let id = by_number.get(&number)?.clone();
+                Some(account_from_value(account, id))
+            })
+            .collect())
+    }
+
+    pub async fn account_hash_for_number(&self, account_number: &str) -> Option<String> {
+        self.account_numbers
+            .read()
+            .await
+            .get(account_number)
+            .cloned()
+    }
+
+    pub async fn account_snapshot(
+        &self,
+        account_id: &str,
+    ) -> Result<SchwabAccountSnapshot, AppError> {
+        let mut url = url::Url::parse(&format!("{TRADER_URL}/accounts/{account_id}"))?;
+        url.query_pairs_mut().append_pair("fields", "positions");
+        let value = self.get_json(url.as_str()).await?;
+        let account_value = value
+            .get("securitiesAccount")
+            .ok_or_else(|| AppError::Api("Schwab returned no securities account".into()))?;
+        let account = account_from_value(account_value, account_id.to_string());
+        let positions = account_value
+            .get("positions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|position| position_from_value(position, account_id))
+            .collect::<Vec<_>>();
+        let todays_profit_loss = optional_sum(positions.iter().map(|item| item.current_day_pnl));
+        let unrealized_profit_loss = Some(positions.iter().map(|item| item.unrealized_pnl).sum());
+        let market_value = Some(positions.iter().filter_map(|item| item.market_value).sum());
+        let current = balance_from_value(
+            account_value.get("currentBalances").unwrap_or(&Value::Null),
+            &account,
+            todays_profit_loss,
+            unrealized_profit_loss,
+            market_value,
+        );
+        let initial = balance_from_value(
+            account_value.get("initialBalances").unwrap_or(&Value::Null),
+            &account,
+            None,
+            None,
+            None,
+        );
+        Ok(SchwabAccountSnapshot {
+            account,
+            positions,
+            balances: vec![current],
+            beginning_of_day_balances: vec![initial],
+            fetched_at: Utc::now().to_rfc3339(),
+            freshness: "fresh".into(),
+            connection_state: "streaming".into(),
+            error: None,
+        })
+    }
+
+    pub async fn orders(
+        &self,
+        account_id: &str,
+        from_entered_time: &str,
+        to_entered_time: &str,
+    ) -> Result<HistoricalOrderPage, AppError> {
+        let mut url = url::Url::parse(&format!("{TRADER_URL}/accounts/{account_id}/orders"))?;
+        url.query_pairs_mut()
+            .append_pair("maxResults", "3000")
+            .append_pair("fromEnteredTime", from_entered_time)
+            .append_pair("toEnteredTime", to_entered_time);
+        let value = self.get_json(url.as_str()).await?;
+        let mut orders = Vec::new();
+        for order in value.as_array().into_iter().flatten() {
+            flatten_order(order, account_id, None, &mut orders);
+        }
+        orders.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+        Ok(HistoricalOrderPage {
+            orders,
+            next_token: None,
+        })
     }
 
     pub async fn search_symbols(&self, query: &str) -> Result<Vec<SymbolMeta>, AppError> {
@@ -352,7 +490,8 @@ impl Schwab {
             .append_pair("fromDate", &dates[0])
             .append_pair("toDate", dates.last().unwrap_or(&dates[0]));
         if let Some(strike_count) = strike_count.filter(|count| *count > 0) {
-            url.query_pairs_mut().append_pair("strikeCount", &strike_count.min(100).to_string());
+            url.query_pairs_mut()
+                .append_pair("strikeCount", &strike_count.min(100).to_string());
         }
         let body = self.get_json(url.as_str()).await?;
         Ok(option_chain_from_value(&body, symbol, &dates))
@@ -735,6 +874,336 @@ pub fn streamed_quote_from_value(value: &Value) -> Option<Quote> {
             .unwrap_or_else(Utc::now)
             .to_rfc3339(),
     })
+}
+
+fn mask_account(value: &str) -> String {
+    let suffix: String = value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if suffix.is_empty() {
+        "Schwab".into()
+    } else {
+        format!("Schwab ··{suffix}")
+    }
+}
+
+fn account_from_value(value: &Value, id: String) -> Account {
+    let number = text(value, "accountNumber");
+    let account_type = ["type", "accountType"]
+        .into_iter()
+        .map(|key| text(value, key))
+        .find(|item| !item.is_empty())
+        .unwrap_or_else(|| "Brokerage".into());
+    Account {
+        provider: MarketDataProvider::Schwab,
+        id,
+        display_id: mask_account(&number),
+        account_type,
+        status: if value
+            .get("isClosingOnlyRestricted")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            "Closing only".into()
+        } else {
+            "Active".into()
+        },
+        currency: "USD".into(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedOptionSymbol {
+    underlying: String,
+    expiration_date: String,
+    put_call: String,
+    strike_price: f64,
+}
+
+fn parse_option_symbol(symbol: &str) -> Option<ParsedOptionSymbol> {
+    let value = symbol.trim_end();
+    if value.len() < 16 {
+        return None;
+    }
+    let split = value.len().checked_sub(15)?;
+    let underlying = value.get(..split)?.trim().to_uppercase();
+    let suffix = value.get(split..)?;
+    let date = suffix.get(..6)?;
+    let put_call = match suffix.get(6..7)? {
+        "C" => "CALL",
+        "P" => "PUT",
+        _ => return None,
+    };
+    let strike = suffix.get(7..)?.parse::<u64>().ok()? as f64 / 1_000.0;
+    Some(ParsedOptionSymbol {
+        underlying,
+        expiration_date: format!("20{}-{}-{}", &date[0..2], &date[2..4], &date[4..6]),
+        put_call: put_call.into(),
+        strike_price: strike,
+    })
+}
+
+fn scalar_string(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Number(value)) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn position_from_value(value: &Value, account_id: &str) -> Option<Position> {
+    let instrument = value.get("instrument")?;
+    let symbol = text(instrument, "symbol");
+    if symbol.trim().is_empty() {
+        return None;
+    }
+    let long_quantity = number_named(value, "longQuantity").unwrap_or_default();
+    let short_quantity = number_named(value, "shortQuantity").unwrap_or_default();
+    let signed_quantity = long_quantity - short_quantity;
+    if signed_quantity.abs() < f64::EPSILON {
+        return None;
+    }
+    let side = if signed_quantity > 0.0 {
+        "Long"
+    } else {
+        "Short"
+    };
+    let asset_type = ["assetType", "type"]
+        .into_iter()
+        .map(|key| text(instrument, key))
+        .find(|item| !item.is_empty())
+        .unwrap_or_else(|| "EQUITY".into())
+        .to_uppercase();
+    let option = if asset_type.contains("OPTION") {
+        parse_option_symbol(&symbol)
+    } else {
+        None
+    };
+    let multiplier = if option.is_some() {
+        number_named(instrument, "multiplier").unwrap_or(100.0)
+    } else {
+        1.0
+    };
+    let average_price = if signed_quantity > 0.0 {
+        number_named(value, "averageLongPrice").or_else(|| number_named(value, "averagePrice"))
+    } else {
+        number_named(value, "averageShortPrice").or_else(|| number_named(value, "averagePrice"))
+    }
+    .unwrap_or_default();
+    let market_value = number_named(value, "marketValue");
+    let last = market_value
+        .map(|market| market.abs() / signed_quantity.abs() / multiplier.max(1.0))
+        .filter(|price| price.is_finite())
+        .unwrap_or(average_price);
+    let unrealized_pnl = if signed_quantity > 0.0 {
+        number_named(value, "longOpenProfitLoss")
+    } else {
+        number_named(value, "shortOpenProfitLoss")
+    }
+    .unwrap_or_default();
+    let id = scalar_string(value.get("positionId")).trim().to_string();
+    Some(Position {
+        provider: MarketDataProvider::Schwab,
+        account_id: Some(account_id.into()),
+        id: if id.is_empty() {
+            format!("schwab:{account_id}:{symbol}")
+        } else {
+            format!("schwab:{account_id}:{id}")
+        },
+        symbol,
+        side: side.into(),
+        quantity: signed_quantity.abs(),
+        average_price,
+        last,
+        unrealized_pnl,
+        bid: None,
+        ask: None,
+        unrealized_pnl_percent: if average_price > 0.0 {
+            Some(
+                unrealized_pnl / (average_price * signed_quantity.abs() * multiplier.max(1.0))
+                    * 100.0,
+            )
+        } else {
+            None
+        },
+        unrealized_pnl_quantity: None,
+        initial_requirement: None,
+        maintenance_margin: number_named(value, "maintenanceRequirement"),
+        market_value,
+        timestamp: Some(Utc::now().to_rfc3339()),
+        asset_type: Some(asset_type),
+        current_day_pnl: number_named(value, "currentDayProfitLoss"),
+        multiplier: Some(multiplier),
+        underlying: option.as_ref().map(|item| item.underlying.clone()),
+        expiration_date: option.as_ref().map(|item| item.expiration_date.clone()),
+        strike_price: option.as_ref().map(|item| item.strike_price),
+        put_call: option.map(|item| item.put_call),
+    })
+}
+
+fn optional_sum(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
+    let values = values.flatten().collect::<Vec<_>>();
+    (!values.is_empty()).then(|| values.into_iter().sum())
+}
+
+fn balance_from_value(
+    value: &Value,
+    account: &Account,
+    todays_profit_loss: Option<f64>,
+    unrealized_profit_loss: Option<f64>,
+    market_value: Option<f64>,
+) -> AccountBalance {
+    let equity = number_named(value, "liquidationValue")
+        .or_else(|| number_named(value, "equity"))
+        .or_else(|| number_named(value, "accountValue"));
+    AccountBalance {
+        provider: MarketDataProvider::Schwab,
+        account_id: account.id.clone(),
+        account_type: account.account_type.clone(),
+        currency: account.currency.clone(),
+        cash_balance: number_named(value, "cashBalance")
+            .or_else(|| number_named(value, "totalCash")),
+        buying_power: number_named(value, "buyingPower"),
+        equity,
+        market_value,
+        todays_profit_loss,
+        realized_profit_loss: None,
+        unrealized_profit_loss,
+        uncleared_deposit: number_named(value, "unsettledCash"),
+        commission: None,
+        initial_margin: number_named(value, "initialMargin"),
+        maintenance_margin: number_named(value, "maintenanceRequirement"),
+        open_order_margin: None,
+        balance_date: None,
+    }
+}
+
+fn normalized_order_type(value: &str) -> String {
+    match value.to_ascii_uppercase().as_str() {
+        "LIMIT" | "NET_DEBIT" | "NET_CREDIT" | "NET_ZERO" => "Limit",
+        "STOP" | "TRAILING_STOP" => "StopMarket",
+        "STOP_LIMIT" => "StopLimit",
+        _ => "Market",
+    }
+    .into()
+}
+
+fn normalized_order_status(value: &str) -> String {
+    match value.to_ascii_uppercase().as_str() {
+        "FILLED" => "Filled",
+        "CANCELED" | "CANCELLED" | "EXPIRED" | "REPLACED" => "Cancelled",
+        "REJECTED" => "Rejected",
+        "WORKING" | "QUEUED" | "ACCEPTED" | "AWAITING_PARENT_ORDER" | "AWAITING_CONDITION" => {
+            "Working"
+        }
+        _ => "Pending",
+    }
+    .into()
+}
+
+fn flatten_order(
+    value: &Value,
+    account_id: &str,
+    inherited_group: Option<&str>,
+    target: &mut Vec<OrderUpdate>,
+) {
+    let broker_id = scalar_string(value.get("orderId"));
+    let strategy = text(value, "orderStrategyType");
+    let group = if strategy.is_empty() {
+        inherited_group.unwrap_or_default().to_string()
+    } else {
+        strategy
+    };
+    let raw_status = text(value, "status");
+    let timestamp = ["enteredTime", "closeTime", "cancelTime"]
+        .into_iter()
+        .map(|key| text(value, key))
+        .find(|item| !item.is_empty())
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let legs = value.get("orderLegCollection").and_then(Value::as_array);
+    for (index, leg) in legs.into_iter().flatten().enumerate() {
+        let instrument = leg.get("instrument").unwrap_or(&Value::Null);
+        let symbol = text(instrument, "symbol");
+        if symbol.is_empty() {
+            continue;
+        }
+        let instruction = text(leg, "instruction").to_ascii_uppercase();
+        let leg_id = scalar_string(leg.get("legId"));
+        let unique_leg = if leg_id.is_empty() {
+            (index + 1).to_string()
+        } else {
+            leg_id.clone()
+        };
+        let quantity = number_named(leg, "quantity")
+            .unwrap_or_default()
+            .max(0.0)
+            .round() as u32;
+        target.push(OrderUpdate {
+            provider: MarketDataProvider::Schwab,
+            id: format!("schwab:{account_id}:{broker_id}:{unique_leg}"),
+            symbol,
+            side: if instruction.contains("SELL") {
+                "Sell".into()
+            } else {
+                "Buy".into()
+            },
+            order_type: normalized_order_type(&text(value, "orderType")),
+            quantity,
+            price: number_named(value, "price"),
+            stop_price: number_named(value, "stopPrice"),
+            status: normalized_order_status(&raw_status),
+            timestamp: timestamp.clone(),
+            account_id: Some(account_id.into()),
+            filled_quantity: number_named(leg, "filledQuantity"),
+            remaining_quantity: None,
+            average_fill_price: number_named(leg, "averagePrice")
+                .or_else(|| number_named(value, "price")),
+            duration: {
+                let value = text(value, "duration");
+                (!value.is_empty()).then_some(value)
+            },
+            closed_at: {
+                let value = text(value, "closeTime");
+                (!value.is_empty()).then_some(value)
+            },
+            commission: None,
+            stop_loss: None,
+            take_profit: None,
+            raw_status: (!raw_status.is_empty()).then_some(raw_status.clone()),
+            status_description: {
+                let value = text(value, "statusDescription");
+                (!value.is_empty()).then_some(value)
+            },
+            open_or_close: if instruction.ends_with("_TO_OPEN") {
+                Some("Open".into())
+            } else if instruction.ends_with("_TO_CLOSE") {
+                Some("Close".into())
+            } else {
+                None
+            },
+            group_name: (!group.is_empty()).then_some(group.clone()),
+            related_orders: vec![],
+            broker_order_id: (!broker_id.is_empty()).then_some(broker_id.clone()),
+            leg_id: Some(unique_leg),
+            asset_type: {
+                let value = text(instrument, "assetType");
+                (!value.is_empty()).then_some(value)
+            },
+        });
+    }
+    for child in value
+        .get("childOrderStrategies")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        flatten_order(child, account_id, Some(&group), target);
+    }
 }
 
 fn instrument_from_value(value: &Value) -> Option<SymbolMeta> {
@@ -1171,6 +1640,68 @@ mod tests {
         assert_eq!(snapshot.contracts[0].ask_size, 19.0);
         assert_eq!(snapshot.contracts[0].theta, -0.11);
         assert_eq!(snapshot.contracts[0].vega, 0.24);
+    }
+
+    #[test]
+    fn parses_schwab_option_symbols_and_position_pnl() {
+        let parsed = parse_option_symbol("SPY   260807C00632000").unwrap();
+        assert_eq!(parsed.underlying, "SPY");
+        assert_eq!(parsed.expiration_date, "2026-08-07");
+        assert_eq!(parsed.put_call, "CALL");
+        assert_eq!(parsed.strike_price, 632.0);
+        let value = serde_json::json!({
+            "positionId":91,"longQuantity":2,"shortQuantity":0,"averageLongPrice":6.1,
+            "marketValue":1567.0,"longOpenProfitLoss":347.0,"currentDayProfitLoss":56.0,
+            "instrument":{"symbol":"SPY   260807C00632000","assetType":"OPTION"}
+        });
+        let position = position_from_value(&value, "hash-1").unwrap();
+        assert_eq!(position.provider, MarketDataProvider::Schwab);
+        assert_eq!(position.side, "Long");
+        assert_eq!(position.quantity, 2.0);
+        assert_eq!(position.last, 7.835);
+        assert_eq!(position.current_day_pnl, Some(56.0));
+        assert_eq!(position.multiplier, Some(100.0));
+    }
+
+    #[test]
+    fn maps_short_equities_and_recursive_order_legs() {
+        let short = serde_json::json!({
+            "shortQuantity":5,"averageShortPrice":225.0,"marketValue":-1100.0,
+            "shortOpenProfitLoss":25.0,"instrument":{"symbol":"AAPL","assetType":"EQUITY"}
+        });
+        let position = position_from_value(&short, "hash-1").unwrap();
+        assert_eq!(position.side, "Short");
+        assert_eq!(position.last, 220.0);
+        let order = serde_json::json!({
+            "orderId":44,"orderType":"NET_DEBIT","status":"FILLED","enteredTime":"2026-08-03T14:30:00Z","orderStrategyType":"TRIGGER",
+            "orderLegCollection":[{"legId":1,"instruction":"BUY_TO_OPEN","quantity":1,"instrument":{"symbol":"SPY   260807C00632000","assetType":"OPTION"}}],
+            "childOrderStrategies":[{"orderId":45,"orderType":"LIMIT","status":"WORKING","orderStrategyType":"SINGLE","orderLegCollection":[{"legId":2,"instruction":"SELL_TO_CLOSE","quantity":1,"instrument":{"symbol":"SPY   260807C00634000","assetType":"OPTION"}}]}]
+        });
+        let mut rows = vec![];
+        flatten_order(&order, "hash-1", None, &mut rows);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].provider, MarketDataProvider::Schwab);
+        assert_eq!(rows[0].open_or_close.as_deref(), Some("Open"));
+        assert_eq!(rows[1].open_or_close.as_deref(), Some("Close"));
+        assert_eq!(rows[1].status, "Working");
+    }
+
+    #[test]
+    fn maps_masked_accounts_and_balance_variants() {
+        let value = serde_json::json!({"accountNumber":"1234561174","type":"MARGIN"});
+        let account = account_from_value(&value, "encrypted-hash".into());
+        assert_eq!(account.id, "encrypted-hash");
+        assert_eq!(account.display_id, "Schwab ··1174");
+        let balance = balance_from_value(
+            &serde_json::json!({"liquidationValue":51000,"cashBalance":18000,"buyingPower":36000}),
+            &account,
+            Some(70.5),
+            Some(334.75),
+            Some(6404.75),
+        );
+        assert_eq!(balance.provider, MarketDataProvider::Schwab);
+        assert_eq!(balance.equity, Some(51000.0));
+        assert_eq!(balance.todays_profit_loss, Some(70.5));
     }
 
     fn bar(time: i64, open: f64, high: f64, low: f64, close: f64, volume: f64) -> Bar {

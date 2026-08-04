@@ -46,6 +46,20 @@ describe("chart trade lines", () => {
     expect(lines[0].position?.symbol).toBe("MESU26");
   });
 
+  it("draws Schwab option holdings on the underlying strike without a close action", () => {
+    const option: Position = {
+      id: "schwab-option", provider: "schwab", accountId: "hash-1", assetType: "OPTION",
+      symbol: "SPY   260821C00600000", underlying: "SPY", expirationDate: "2026-08-21",
+      strikePrice: 600, putCall: "CALL", side: "Long", quantity: 2, averagePrice: 4.2,
+      last: 5.1, unrealizedPnl: 180, multiplier: 100,
+    };
+    const [line] = buildTradeLines("SPY", [option], []);
+    expect(line).toMatchObject({ price: 600, color: "#37d5e8", actionable: false, suppressMetrics: true });
+    expect(line.label).toContain("SCHWAB LONG 2");
+    expect(line.label).toContain("600C");
+    expect(buildTradeLines("QQQ", [option], [])).toEqual([]);
+  });
+
   it("builds the opposite-side flatten market draft", () => {
     expect(flattenOrderDraft("account", position)).toMatchObject({ side: "Sell", quantity: 2, type: "Market" });
     expect(flattenOrderDraft("account", { ...position, side: "Short" })).toMatchObject({ side: "Buy" });

@@ -225,9 +225,11 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     environment: current.environment,
     rightPanelOpen: current.rightPanelOpen,
     bottomTab: current.bottomTab,
+    bottomBrokerPanel: current.bottomBrokerPanel,
     bottomPanelOpen: current.bottomPanelOpen,
     bottomPanelHeight: current.bottomPanelHeight,
     selectedAccountId: current.selectedAccountId,
+    selectedSchwabAccountId: current.selectedSchwabAccountId,
     confirmOrders: current.confirmOrders,
     revision: Math.max(current.revision + 1, Date.now()),
   };

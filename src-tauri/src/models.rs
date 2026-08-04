@@ -44,6 +44,8 @@ impl TradingEnvironment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
+    #[serde(default)]
+    pub provider: MarketDataProvider,
     pub id: String,
     pub display_id: String,
     pub account_type: String,
@@ -145,6 +147,9 @@ pub struct OptionChainSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Position {
+    #[serde(default)]
+    pub provider: MarketDataProvider,
+    pub account_id: Option<String>,
     pub id: String,
     pub symbol: String,
     pub side: String,
@@ -160,6 +165,13 @@ pub struct Position {
     pub maintenance_margin: Option<f64>,
     pub market_value: Option<f64>,
     pub timestamp: Option<String>,
+    pub asset_type: Option<String>,
+    pub current_day_pnl: Option<f64>,
+    pub multiplier: Option<f64>,
+    pub underlying: Option<String>,
+    pub expiration_date: Option<String>,
+    pub strike_price: Option<f64>,
+    pub put_call: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +205,8 @@ pub struct OrderPreview {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderUpdate {
+    #[serde(default)]
+    pub provider: MarketDataProvider,
     pub id: String,
     pub symbol: String,
     pub side: String,
@@ -217,6 +231,9 @@ pub struct OrderUpdate {
     pub open_or_close: Option<String>,
     pub group_name: Option<String>,
     pub related_orders: Vec<RelatedOrder>,
+    pub broker_order_id: Option<String>,
+    pub leg_id: Option<String>,
+    pub asset_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +316,8 @@ pub struct KillSwitchResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountBalance {
+    #[serde(default)]
+    pub provider: MarketDataProvider,
     pub account_id: String,
     pub account_type: String,
     pub currency: String,
@@ -400,6 +419,7 @@ pub struct StreamStateEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionsSnapshotEvent {
+    pub provider: MarketDataProvider,
     pub account_id: String,
     pub environment_generation: u64,
     pub positions: Vec<Position>,
@@ -408,6 +428,7 @@ pub struct PositionsSnapshotEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PositionUpdateEvent {
+    pub provider: MarketDataProvider,
     pub account_id: String,
     pub environment_generation: u64,
     pub position: Position,
@@ -416,6 +437,7 @@ pub struct PositionUpdateEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrdersSnapshotEvent {
+    pub provider: MarketDataProvider,
     pub account_id: String,
     pub environment_generation: u64,
     pub orders: Vec<OrderUpdate>,
@@ -424,6 +446,7 @@ pub struct OrdersSnapshotEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderStreamUpdateEvent {
+    pub provider: MarketDataProvider,
     pub account_id: String,
     pub environment_generation: u64,
     pub order: OrderUpdate,
@@ -432,9 +455,23 @@ pub struct OrderStreamUpdateEvent {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrokerageStreamStateEvent {
+    pub provider: MarketDataProvider,
     pub account_id: String,
     pub environment_generation: u64,
     pub channel: String,
     pub state: String,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchwabAccountSnapshot {
+    pub account: Account,
+    pub positions: Vec<Position>,
+    pub balances: Vec<AccountBalance>,
+    pub beginning_of_day_balances: Vec<AccountBalance>,
+    pub fetched_at: String,
+    pub freshness: String,
+    pub connection_state: String,
+    pub error: Option<String>,
 }

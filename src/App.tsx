@@ -25,7 +25,7 @@ import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInte
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
 import { nextBarRolloverRefresh, type BarRolloverRefreshState } from "./lib/barRollover";
-import { demoOrders, demoPositions, futures, quoteFor } from "./lib/demo";
+import { demoOrders, demoPositions, demoSchwabAccounts, demoSchwabBalance, demoSchwabBodBalance, demoSchwabOrders, demoSchwabPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
 import { calculateContractsForRisk, calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
@@ -63,7 +63,8 @@ import {
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
 import { minuteTimeframe, normalizeCustomMinuteTimeframes, orderedToolbarTimeframes, parseMinuteTimeframe, removeCustomMinuteTimeframe as removeCustomMinuteTimeframeFromWorkspace, saveCustomMinuteTimeframe, workspaceForPersistence } from "./lib/timeframes";
 import { defaultOptionOrderDraft, optionStreamBudget } from "./lib/optionChain";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import { combinedCurrencyTotal, positionPnlTotal } from "./lib/schwabBrokerage";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
@@ -98,7 +99,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
-  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
+  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
   settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
 
@@ -441,6 +442,7 @@ function TradingApp() {
   const [vwapMarkets, setVwapMarkets] = useState<Record<string, VwapMarketState>>({});
   const vwapMarketsRef = useRef(vwapMarkets);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [schwabAccounts, setSchwabAccounts] = useState<Account[]>(api.isNative ? [] : demoSchwabAccounts);
   const [positions, setPositions] = useState<Position[]>(api.isNative ? [] : demoPositions);
   const [positionsReadyScope, setPositionsReadyScope] = useState<string>();
   const [orders, setOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoOrders);
@@ -451,6 +453,14 @@ function TradingApp() {
   const [brokerageError, setBrokerageError] = useState<string>();
   const [brokerageStreamStates, setBrokerageStreamStates] = useState<Record<"positions" | "orders", StreamConnectionState>>({ positions: api.isNative ? "disconnected" : "streaming", orders: api.isNative ? "disconnected" : "streaming" });
   const [notifications, setNotifications] = useState<ActivityNotification[]>([]);
+  const [schwabPositions, setSchwabPositions] = useState<Position[]>(api.isNative ? [] : demoSchwabPositions);
+  const [schwabOrders, setSchwabOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoSchwabOrders);
+  const [schwabBalances, setSchwabBalances] = useState<AccountBalance[]>(api.isNative ? [] : [demoSchwabBalance]);
+  const [schwabBodBalances, setSchwabBodBalances] = useState<AccountBalance[]>(api.isNative ? [] : [demoSchwabBodBalance]);
+  const [schwabHistory, setSchwabHistory] = useState<HistoricalOrderPage>({ orders: api.isNative ? [] : demoSchwabOrders });
+  const [schwabBrokerageLoading, setSchwabBrokerageLoading] = useState(false);
+  const [schwabBrokerageError, setSchwabBrokerageError] = useState<string>();
+  const [schwabBrokerageStreamStates, setSchwabBrokerageStreamStates] = useState<Record<"positions" | "orders", StreamConnectionState>>({ positions: api.isNative ? "disconnected" : "streaming", orders: api.isNative ? "disconnected" : "streaming" });
   const [entryRuleTabSignals, setEntryRuleTabSignals] = useState<Record<string, EntryRuleTabSignal>>({});
   const entryRuleTabSignalsRef = useRef(entryRuleTabSignals);
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
@@ -549,6 +559,7 @@ function TradingApp() {
   const brokerageBalanceRefreshRef = useRef<() => void>(() => undefined);
   const brokerageFillReconcileTimerRef = useRef<number | undefined>(undefined);
   const selectedAccountIdRef = useRef<string | undefined>(undefined);
+  const selectedSchwabAccountIdRef = useRef<string | undefined>(undefined);
   const recentOrderIdsRef = useRef(new Map<string, number>());
   const recentPositionIdsRef = useRef(new Map<string, number>());
   const [busy, setBusy] = useState(false);
@@ -1061,6 +1072,7 @@ function TradingApp() {
       setSchwabConfigured(schwabAuth.configured);
       setSchwabAuthenticated(schwabAuth.authenticated);
       setAccounts(currentWindowId === MAIN_WINDOW_ID && auth.authenticated ? await api.accounts().catch(() => []) : []);
+      setSchwabAccounts(currentWindowId === MAIN_WINDOW_ID && schwabAuth.authenticated ? await api.schwabAccounts().catch(() => []) : api.isNative ? [] : demoSchwabAccounts);
       if (currentWindowId === MAIN_WINDOW_ID && api.isNative && !auth.configured && !schwabAuth.configured) setSetupOpen(true);
     }).finally(() => setWorkspaceLoaded(true));
     const cleanups: Array<() => void> = [];
@@ -1074,9 +1086,10 @@ function TradingApp() {
         showToast("TradeStation connected.");
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
-      listen<{ authenticated: boolean }>("schwab-auth-changed", ({ payload }) => {
+      listen<{ authenticated: boolean }>("schwab-auth-changed", async ({ payload }) => {
         setSchwabAuthenticated(payload.authenticated);
         setSchwabConfigured(true);
+        if (currentWindowId === MAIN_WINDOW_ID) setSchwabAccounts(payload.authenticated ? await api.schwabAccounts().catch(() => []) : []);
         setSchwabAuthEpoch((value) => value + 1);
         showToast(payload.authenticated ? "Schwab connected." : "Schwab disconnected.");
       }).then((unlisten) => cleanups.push(unlisten));
@@ -1117,9 +1130,22 @@ function TradingApp() {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "tradestation" && payload.environment !== environmentRef.current) return;
         setQuotes((current) => ({ ...current, [instrumentKey(payload.quote)]: { ...payload.quote, receivedAt: Date.now() } }));
+        if (payload.provider === "schwab") setSchwabPositions((current) => current.map((position) => {
+          if ((position.assetType ?? "").toUpperCase().includes("OPTION") || position.symbol.trim().toUpperCase() !== payload.quote.symbol.trim().toUpperCase()) return position;
+          const direction = position.side === "Long" ? 1 : -1;
+          const unrealizedPnl = (payload.quote.last - position.averagePrice) * direction * position.quantity * (position.multiplier ?? 1);
+          return { ...position, last: payload.quote.last, bid: payload.quote.bid, ask: payload.quote.ask, unrealizedPnl };
+        }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OptionUpdateEvent>("option-update", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        setSchwabPositions((current) => current.map((position) => {
+          if (position.symbol.trim() !== payload.contract.symbol.trim()) return position;
+          const mark = payload.contract.markPrice || (payload.contract.bidPrice + payload.contract.askPrice) / 2;
+          const direction = position.side === "Long" ? 1 : -1;
+          const unrealizedPnl = (mark - position.averagePrice) * direction * position.quantity * (position.multiplier ?? payload.contract.multiplier ?? 100);
+          return { ...position, last: mark, bid: payload.contract.bidPrice, ask: payload.contract.askPrice, unrealizedPnl };
+        }));
         setGexMarkets((current) => {
           let changed = false;
           const next = { ...current };
@@ -1169,6 +1195,13 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<PositionsSnapshotEvent>("positions-snapshot", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider === "schwab") {
+          if (payload.accountId === selectedSchwabAccountIdRef.current) {
+            setSchwabPositions(payload.positions);
+            setSchwabBrokerageError(undefined);
+          }
+          return;
+        }
         if (payload.accountId !== selectedAccountIdRef.current) return;
         const protectedIds = activeProtectionIds(recentPositionIdsRef.current);
         setPositions((current) => reconcilePositionSnapshot(current, payload.positions, protectedIds));
@@ -1178,6 +1211,10 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<PositionUpdateEvent>("position-update", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider === "schwab") {
+          if (payload.accountId === selectedSchwabAccountIdRef.current) setSchwabPositions((current) => upsertStreamPosition(current, payload.position));
+          return;
+        }
         if (payload.accountId !== selectedAccountIdRef.current) return;
         setPositions((current) => {
           const isNew = isNewOpenPosition(current, payload.position);
@@ -1189,6 +1226,13 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OrdersSnapshotEvent>("orders-snapshot", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider === "schwab") {
+          if (payload.accountId === selectedSchwabAccountIdRef.current) {
+            setSchwabOrders(payload.orders);
+            setSchwabBrokerageError(undefined);
+          }
+          return;
+        }
         if (payload.accountId !== selectedAccountIdRef.current) return;
         const protectedIds = activeProtectionIds(recentOrderIdsRef.current);
         setOrders((current) => reconcileOrderSnapshot(current, payload.orders, protectedIds));
@@ -1197,6 +1241,10 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OrderStreamUpdateEvent>("order-stream-update", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider === "schwab") {
+          if (payload.accountId === selectedSchwabAccountIdRef.current) setSchwabOrders((current) => upsertStreamOrder(current, payload.order));
+          return;
+        }
         if (payload.accountId !== selectedAccountIdRef.current) return;
         recentOrderIdsRef.current.set(payload.order.id, Date.now() + 15_000);
         setOrders((current) => upsertStreamOrder(current, payload.order));
@@ -1219,10 +1267,26 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BrokerageStreamStateEvent>("brokerage-stream-state", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider === "schwab") {
+          if (payload.accountId === selectedSchwabAccountIdRef.current) {
+            setSchwabBrokerageStreamStates((current) => ({ ...current, [payload.channel]: payload.state }));
+            if (payload.state === "stale") setSchwabBrokerageError(payload.message ?? "Schwab refresh failed; showing the last snapshot.");
+          }
+          return;
+        }
         if (payload.accountId !== selectedAccountIdRef.current) return;
         setBrokerageStreamStates((current) => ({ ...current, [payload.channel]: payload.state }));
       }).then((unlisten) => cleanups.push(unlisten));
+      listen<SchwabAccountSnapshot>("schwab-account-snapshot", ({ payload }) => {
+        if (payload.account.id !== selectedSchwabAccountIdRef.current) return;
+        setSchwabPositions(payload.positions);
+        setSchwabBalances(payload.balances);
+        setSchwabBodBalances(payload.beginningOfDayBalances);
+        setSchwabBrokerageLoading(false);
+        setSchwabBrokerageError(undefined);
+      }).then((unlisten) => cleanups.push(unlisten));
     }
+    if (api.isNative) {
     listen<TimeframeSessionSyncEvent>("timeframe-session-sync", ({ payload }) => {
       const customMinuteTimeframes = normalizeCustomMinuteTimeframes(payload.customMinuteTimeframes);
       sessionCustomMinuteTimeframesRef.current = customMinuteTimeframes;
@@ -1346,6 +1410,7 @@ function TradingApp() {
         retryEntryScreenshotsRef.current();
       }
     }).then((unlisten) => cleanups.push(unlisten));
+    }
     return () => {
       if (brokerageFillReconcileTimerRef.current != null) window.clearTimeout(brokerageFillReconcileTimerRef.current);
       brokerageFillReconcileTimerRef.current = undefined;
@@ -1466,6 +1531,8 @@ function TradingApp() {
 
   const selectedAccount = accounts.find((account) => account.id === workspace.selectedAccountId) ?? accounts[0];
   selectedAccountIdRef.current = selectedAccount?.id;
+  const selectedSchwabAccount = schwabAccounts.find((account) => account.id === workspace.selectedSchwabAccountId) ?? schwabAccounts[0];
+  selectedSchwabAccountIdRef.current = selectedSchwabAccount?.id;
   const entryRuleAccountId = selectedAccount?.id ?? (api.isNative ? undefined : "demo");
 
   useEffect(() => {
@@ -1482,6 +1549,53 @@ function TradingApp() {
   const entryRulePositionScope = entryRuleAccountId ? positionSnapshotScope(environment, entryRuleAccountId) : undefined;
   const entryRulePositionsReady = !api.isNative || positionsReadyScope === entryRulePositionScope;
   const brokerageStreamsHealthy = areBrokerageStreamsHealthy(brokerageStreamStates);
+
+  useEffect(() => {
+    if (currentWindowId !== MAIN_WINDOW_ID || !selectedSchwabAccount || !schwabAuthenticated) return;
+    if (workspace.selectedSchwabAccountId !== selectedSchwabAccount.id) updateWorkspace({ selectedSchwabAccountId: selectedSchwabAccount.id });
+    let active = true;
+    setSchwabBrokerageLoading(true);
+    setSchwabBrokerageError(undefined);
+    const now = new Date();
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    void Promise.all([
+      api.schwabAccountSnapshot(selectedSchwabAccount.id),
+      api.schwabOrders(selectedSchwabAccount.id, start.toISOString(), now.toISOString()),
+    ]).then(([snapshot, orderPage]) => {
+      if (!active) return;
+      setSchwabPositions(snapshot.positions);
+      setSchwabBalances(snapshot.balances);
+      setSchwabBodBalances(snapshot.beginningOfDayBalances);
+      setSchwabOrders(orderPage.orders);
+      setSchwabBrokerageLoading(false);
+    }).catch((error) => {
+      if (active) { setSchwabBrokerageLoading(false); setSchwabBrokerageError(String(error)); }
+    });
+    if (api.isNative) {
+      setSchwabBrokerageStreamStates({ positions: "connecting", orders: "connecting" });
+      void api.startSchwabBrokerageStream(selectedSchwabAccount.id).catch((error) => setSchwabBrokerageError(String(error)));
+    }
+    return () => {
+      active = false;
+      if (api.isNative) void api.stopSchwabBrokerageStream();
+      setSchwabBrokerageStreamStates({ positions: "disconnected", orders: "disconnected" });
+    };
+  }, [selectedSchwabAccount?.id, schwabAuthenticated, schwabAuthEpoch, workspace.environment]);
+
+  const schwabHeldEquitySymbols = schwabPositions.filter((position) => !(position.assetType ?? "").toUpperCase().includes("OPTION")).map((position) => position.symbol.trim().toUpperCase()).sort().join("|");
+  const schwabHeldOptionSymbols = schwabPositions.filter((position) => (position.assetType ?? "").toUpperCase().includes("OPTION")).map((position) => position.symbol).sort().join("|");
+  useEffect(() => {
+    if (!selectedSchwabAccount || !schwabAuthenticated) return;
+    const equities = schwabHeldEquitySymbols.split("|").filter(Boolean);
+    const options = schwabHeldOptionSymbols.split("|").filter(Boolean);
+    if (equities.length) void api.startQuoteStream("schwab-held-positions", "schwab", equities);
+    if (options.length) void api.startOptionStream("schwab-held-options", "POSITIONS", options);
+    return () => {
+      if (equities.length) void api.stopQuoteStream("schwab-held-positions");
+      if (options.length) void api.stopOptionStream("schwab-held-options");
+    };
+  }, [selectedSchwabAccount?.id, schwabAuthenticated, schwabHeldEquitySymbols, schwabHeldOptionSymbols]);
 
   useEffect(() => {
     if (currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
@@ -3948,7 +4062,7 @@ function TradingApp() {
       magnetEnabled={tab.magnetEnabled}
       symbol={tab.symbol.symbol}
       provider={tab.symbol.provider}
-      tradeSymbol={tabTradeSymbol}
+      tradeSymbol={tab.symbol.provider === "schwab" ? tab.symbol.symbol : tabTradeSymbol}
       description={tab.symbol.description}
       exchange={tab.symbol.exchange}
       minMove={tab.symbol.minMove}
@@ -3967,8 +4081,8 @@ function TradingApp() {
       gexExpirationDates={gexMarket?.selectedDates ?? []}
       gexStatus={gexDisplayStatus}
       gexExpirationCount={gexMarket?.selectedDates.length ?? 0}
-      orders={orders}
-      positions={positions}
+      orders={tab.symbol.provider === "schwab" ? [] : orders}
+      positions={tab.symbol.provider === "schwab" ? schwabPositions : positions}
       orderProjection={focused ? activeOrderProjection : undefined}
       onOrderProjectionChange={editProjectedExit}
       onOrderProjectionRestore={restoreOrderProjection}
@@ -4010,13 +4124,14 @@ function TradingApp() {
 
     {optionWorkspaceActive ? <OptionChainWorkspace
       authenticated={schwabAuthenticated}
+      positions={schwabPositions}
       preferences={workspace.optionChain}
       draft={optionDraft}
       onPreferencesChange={(optionChain) => updateWorkspace({ optionChain })}
       onDraftChange={setOptionDraft}
       onRequestBudget={reserveOptionChainBudget}
       onReleaseBudget={releaseOptionChainBudget}
-      onDetach={detachOptionChain}
+      onDetach={(state) => detachOptionChain({ ...state, positions: schwabPositions, schwabAccountId: selectedSchwabAccount?.id })}
       onOpenSettings={() => setSettingsOpen(true)}
     /> : <>
     <ChartTabStrip tabs={windowState.tabIds.map((id) => workspace.tabs.find((tab) => tab.id === id)).filter((tab): tab is ChartTabState => Boolean(tab))} activeTabId={windowState.activeTabId} visibleTabIds={visibleTabIds} totalTabs={workspace.tabs.length} windowId={currentWindowId} ema200Positions={ema200Positions} entryRuleSignals={entryRuleTabSignals} onSelect={selectTab} onAdd={addTab} onClose={closeTab} onReorder={reorderTab} onDragEnd={finishTabDrag} onBounds={(bounds) => { stripBoundsRef.current.set(currentWindowId, bounds); if (api.isNative) emit("chart-strip-bounds", bounds); }} />
@@ -4176,7 +4291,8 @@ function TradingApp() {
         </div>}
       </aside>}
 
-      {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} positionRollStatuses={positionRollStatuses} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder} />}
+      {!isDetached && <BottomPanel workspace={workspace} updateWorkspace={updateWorkspace} maximized={bottomPanelMaximized} onMaximizedChange={setBottomPanelMaximized} accounts={accounts} account={selectedAccount} positions={positions} positionRollStatuses={positionRollStatuses} orders={orders} balances={balances} bodBalances={bodBalances} history={history} setHistory={setHistory} loading={brokerageLoading} error={brokerageError} streamState={brokerageConnectionState} notifications={notifications} closingPositionIds={closingPositionIds} onClosePosition={requestClosePosition} onNotify={(item) => setNotifications((current) => [item, ...current].slice(0, 250))} onCancel={cancelWorkingOrder}
+        schwabAccounts={schwabAccounts} schwabAccount={selectedSchwabAccount} schwabPositions={schwabPositions} schwabOrders={schwabOrders} schwabBalances={schwabBalances} schwabBodBalances={schwabBodBalances} schwabHistory={schwabHistory} setSchwabHistory={setSchwabHistory} schwabLoading={schwabBrokerageLoading} schwabError={schwabBrokerageError} schwabStreamState={brokerageDisplayState(schwabBrokerageStreamStates)} />}
     </section>
     </>}
 
@@ -5028,8 +5144,9 @@ function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, setting
   </div>;
 }
 
-function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange, accounts, account, positions, positionRollStatuses, orders, balances, bodBalances, history, setHistory, loading, error, streamState, notifications, closingPositionIds, onClosePosition, onNotify, onCancel }: {
+function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange, accounts, account, positions, positionRollStatuses, orders, balances, bodBalances, history, setHistory, loading, error, streamState, notifications, closingPositionIds, onClosePosition, onNotify, onCancel, schwabAccounts, schwabAccount, schwabPositions, schwabOrders, schwabBalances, schwabBodBalances, schwabHistory, setSchwabHistory, schwabLoading, schwabError, schwabStreamState }: {
   workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; maximized: boolean; onMaximizedChange: (maximized: boolean) => void; accounts: Account[]; account?: Account; positions: Position[]; positionRollStatuses: Record<string, ContractRollStatus>; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; streamState: StreamConnectionState; notifications: ActivityNotification[]; closingPositionIds: Set<string>; onClosePosition: (position: Position) => void; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
+  schwabAccounts: Account[]; schwabAccount?: Account; schwabPositions: Position[]; schwabOrders: OrderUpdate[]; schwabBalances: AccountBalance[]; schwabBodBalances: AccountBalance[]; schwabHistory: HistoricalOrderPage; setSchwabHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; schwabLoading: boolean; schwabError?: string; schwabStreamState: StreamConnectionState;
 }) {
   const tabs: Array<[WorkspaceState["bottomTab"], string]> = [["positions", "Positions"], ["orders", "Orders"], ["history", "Order history"], ["summary", "Account summary"], ["notifications", "Notifications log"]];
   const [orderFilter, setOrderFilter] = useState("All");
@@ -5076,55 +5193,84 @@ function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange,
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", stop);
   };
   const loadHistory = async (append = false) => {
-    if (!account) return; setHistoryLoading(true);
+    const schwabPanel = workspace.bottomBrokerPanel === "schwab";
+    const activeAccount = schwabPanel ? schwabAccount : account;
+    if (!activeAccount) return; setHistoryLoading(true);
     try {
-      if (since >= today) {
+      if (!schwabPanel && since >= today) {
         setHistory({ orders: [] });
         return;
       }
-      const page = await api.historicalOrders(account.id, since, append ? history.nextToken : undefined);
+      const page = schwabPanel
+        ? await api.schwabOrders(activeAccount.id, new Date(`${since}T00:00:00`).toISOString(), new Date(`${until}T23:59:59.999`).toISOString())
+        : await api.historicalOrders(activeAccount.id, since, append ? history.nextToken : undefined);
       const historicalRows = page.orders.filter((order) => { const day = localDay(order.timestamp); return day >= since && day <= until; });
-      const combined = append ? [...history.orders, ...historicalRows] : historicalRows;
+      const currentPage = schwabPanel ? schwabHistory : history;
+      const combined = append ? [...currentPage.orders, ...historicalRows] : historicalRows;
       const unique = [...new Map(combined.map((order) => [order.id, order])).values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-      setHistory({ orders: unique, nextToken: page.nextToken });
+      (schwabPanel ? setSchwabHistory : setHistory)({ orders: unique, nextToken: page.nextToken });
     } catch (cause) { onNotify({ id: crypto.randomUUID(), time: new Date().toISOString(), title: "History refresh failed", text: String(cause), level: "error" }); }
     finally { setHistoryLoading(false); }
   };
-  useEffect(() => { if (workspace.bottomPanelOpen && workspace.bottomTab === "history" && account) loadHistory(); }, [workspace.bottomPanelOpen, workspace.bottomTab, account?.id, since, until]);
+  useEffect(() => { if (workspace.bottomPanelOpen && workspace.bottomTab === "history" && workspace.bottomBrokerPanel !== "combined") void loadHistory(); }, [workspace.bottomPanelOpen, workspace.bottomTab, workspace.bottomBrokerPanel, account?.id, schwabAccount?.id, since, until]);
   const statusMatches = (status: string, filter: string) => filter === "All" || status.toLowerCase() === filter.toLowerCase() || filter === "Inactive" && ["Pending", "Indeterminate"].includes(status);
-  const visibleOrders = orders.filter((order) => statusMatches(order.status, orderFilter));
-  const currentHistoryRows = orders.filter((order) => { const day = localDay(order.timestamp); return day >= since && day <= until; });
-  const mergedHistoryRows = [...new Map([...history.orders, ...currentHistoryRows].map((order) => [order.id, order])).values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  const schwabPanel = workspace.bottomBrokerPanel === "schwab";
+  const activeOrders = schwabPanel ? schwabOrders : orders;
+  const activePositions = schwabPanel ? schwabPositions : positions;
+  const activeBalances = schwabPanel ? schwabBalances : balances;
+  const activeBodBalances = schwabPanel ? schwabBodBalances : bodBalances;
+  const activeHistory = schwabPanel ? schwabHistory : history;
+  const activeAccount = schwabPanel ? schwabAccount : account;
+  const activeNotifications = notifications.filter((item) => (item.provider ?? "tradestation") === (schwabPanel ? "schwab" : "tradestation"));
+  const activeError = schwabPanel ? schwabError : error;
+  const activeLoading = schwabPanel ? schwabLoading : loading;
+  const activeStreamState = schwabPanel ? schwabStreamState : streamState;
+  const visibleOrders = activeOrders.filter((order) => statusMatches(order.status, orderFilter));
+  const currentHistoryRows = activeOrders.filter((order) => { const day = localDay(order.timestamp); return day >= since && day <= until; });
+  const mergedHistoryRows = [...new Map([...activeHistory.orders, ...currentHistoryRows].map((order) => [order.id, order])).values()].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
   const visibleHistory = mergedHistoryRows.filter((order) => statusMatches(order.status, historyFilter));
   const money = (value?: number) => value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const time = (value?: string) => value ? new Date(value).toLocaleString() : "—";
-  const balance = balances[0]; const bod = bodBalances[0];
+  const balance = activeBalances[0]; const bod = activeBodBalances[0];
   const exportRows = () => {
     let rows: Array<Record<string, unknown>> = [];
-    if (workspace.bottomTab === "positions") rows = positions as unknown as Array<Record<string, unknown>>;
+    if (workspace.bottomTab === "positions") rows = activePositions as unknown as Array<Record<string, unknown>>;
     else if (workspace.bottomTab === "orders") rows = visibleOrders as unknown as Array<Record<string, unknown>>;
     else if (workspace.bottomTab === "history") rows = visibleHistory as unknown as Array<Record<string, unknown>>;
-    else if (workspace.bottomTab === "summary") rows = [...balances, ...bodBalances] as unknown as Array<Record<string, unknown>>;
-    else rows = notifications as unknown as Array<Record<string, unknown>>;
+    else if (workspace.bottomTab === "summary") rows = [...activeBalances, ...activeBodBalances] as unknown as Array<Record<string, unknown>>;
+    else rows = activeNotifications as unknown as Array<Record<string, unknown>>;
     if (!rows.length) return;
     const keys = [...new Set(rows.flatMap((row) => Object.keys(row)))];
     const quote = (value: unknown) => `"${String(value ?? "").replaceAll('"', '""')}"`;
     const csv = [keys.map(quote).join(","), ...rows.map((row) => keys.map((key) => quote(row[key])).join(","))].join("\n");
-    const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); link.download = `${account?.displayId ?? "account"}-${workspace.bottomTab}.csv`; link.click(); URL.revokeObjectURL(link.href);
+    const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); link.download = `${activeAccount?.displayId ?? "account"}-${workspace.bottomTab}.csv`; link.click(); URL.revokeObjectURL(link.href);
   };
   const Empty = ({ label }: { label: string }) => <div className="empty-table"><BookOpen size={20} /><span>{label}</span></div>;
-  const OrderTable = ({ rows }: { rows: OrderUpdate[] }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong>{o.symbol}</strong></td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
-  return <section className={`bottom-panel ${workspace.bottomPanelOpen ? "open" : "collapsed"} ${maximized ? "maximized" : ""}`}>
+  const OrderTable = ({ rows, readOnly = false }: { rows: OrderUpdate[]; readOnly?: boolean }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Strategy</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong>{o.symbol}</strong>{o.assetType && <small className="asset-tag">{o.assetType}</small>}</td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{o.groupName ?? "—"}</td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{!readOnly && o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
+  const pnl = positionPnlTotal;
+  const combinedPositions = [...positions.map((position) => ({ ...position, provider: "tradestation" as const, accountId: account?.displayId })), ...schwabPositions.map((position) => ({ ...position, provider: "schwab" as const, accountId: schwabAccount?.displayId }))];
+  const tsToday = balances[0]?.todaysProfitLoss;
+  const schwabToday = pnl(schwabPositions, "currentDayPnl");
+  const sameCurrency = account?.currency && account.currency === schwabAccount?.currency;
+  const combinedToday = combinedCurrencyTotal(account?.currency, tsToday, schwabAccount?.currency, schwabToday);
+  const combinedOpen = combinedCurrencyTotal(account?.currency, pnl(positions, "unrealizedPnl"), schwabAccount?.currency, pnl(schwabPositions, "unrealizedPnl"));
+  const statusText = activeError ? "Last snapshot stale" : activeStreamState === "rate-limited" ? "Brokerage data paused" : activeStreamState === "stale" ? "Last snapshot stale" : activeStreamState === "connecting" || activeStreamState === "reconnecting" ? "Brokerage stream reconnecting" : activeStreamState === "disconnected" ? "Snapshot polling" : activeLoading ? "Refreshing…" : "Brokerage data active";
+  return <section className={`bottom-panel ${workspace.bottomPanelOpen ? "open" : "collapsed"} ${maximized ? "maximized" : ""} broker-${workspace.bottomBrokerPanel}`}>
     {workspace.bottomPanelOpen && <div className="resize-handle" onPointerDown={startResize} />}
-    <header className="bottom-provider"><strong>TradeStation</strong><span className="bottom-status"><span className={`status-dot ${error ? "error" : streamState === "streaming" ? "" : "paused"}`} />{error ? "Data unavailable" : streamState === "rate-limited" ? "Brokerage data paused" : streamState === "connecting" || streamState === "reconnecting" ? "Brokerage stream reconnecting" : streamState === "disconnected" ? "Brokerage snapshot polling" : loading ? "Refreshing…" : "Brokerage data active"}</span><button className="drawer-toggle" type="button" aria-label={workspace.bottomPanelOpen ? "Collapse bottom drawer" : "Open bottom drawer"} aria-expanded={workspace.bottomPanelOpen} title={workspace.bottomPanelOpen ? "Collapse drawer" : "Open drawer"} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}>{workspace.bottomPanelOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}</button>{workspace.bottomPanelOpen && <button type="button" title={maximized ? "Restore" : "Maximize"} onClick={() => onMaximizedChange(!maximized)}><Maximize2 size={15} /></button>}</header>
-    {workspace.bottomPanelOpen && <><div className="account-summary"><select value={account?.id ?? ""} onChange={(event) => updateWorkspace({ selectedAccountId: event.target.value })}>{accounts.map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Today’s profit</dt><dd>{money(balance?.realizedProfitLoss)}</dd></div><div><dt>Unrealized PnL</dt><dd>{money(balance?.unrealizedProfitLoss ?? positions.reduce((sum, item) => sum + item.unrealizedPnl, 0))}</dd></div></dl></div>
+    <header className="bottom-provider"><strong>Brokerage</strong>{workspace.bottomPanelOpen && <div className="broker-panel-switch" role="tablist">{(["combined", "tradestation", "schwab"] as const).map((panel) => <button key={panel} role="tab" aria-selected={workspace.bottomBrokerPanel === panel} className={workspace.bottomBrokerPanel === panel ? "active" : ""} onClick={() => updateWorkspace({ bottomBrokerPanel: panel })}>{panel === "combined" ? "Combined" : panel === "tradestation" ? "TradeStation" : "Schwab"}</button>)}</div>}<span className="bottom-status"><span className={`status-dot ${activeError ? "error" : activeStreamState === "streaming" ? "" : "paused"}`} />{workspace.bottomBrokerPanel === "combined" ? "Two-broker overview" : statusText}</span><button className="drawer-toggle" type="button" aria-label={workspace.bottomPanelOpen ? "Collapse bottom drawer" : "Open bottom drawer"} aria-expanded={workspace.bottomPanelOpen} title={workspace.bottomPanelOpen ? "Collapse drawer" : "Open drawer"} onClick={() => updateWorkspace({ bottomPanelOpen: !workspace.bottomPanelOpen })}>{workspace.bottomPanelOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}</button>{workspace.bottomPanelOpen && <button type="button" title={maximized ? "Restore" : "Maximize"} onClick={() => onMaximizedChange(!maximized)}><Maximize2 size={15} /></button>}</header>
+    {workspace.bottomPanelOpen && workspace.bottomBrokerPanel === "combined" && <><div className="combined-broker-summary">
+      <div className="combined-account"><span className="broker-mark tradestation">TS</span><span className={`status-dot broker-independent ${error ? "error" : streamState === "streaming" ? "" : "paused"}`} title={`TradeStation: ${error ? "unavailable" : streamState}`} /><select value={account?.id ?? ""} onChange={(event) => updateWorkspace({ selectedAccountId: event.target.value })}>{accounts.map((item) => <option key={item.id} value={item.id}>{item.displayId}</option>)}</select><dl><div><dt>Positions</dt><dd>{positions.length}</dd></div><div><dt>Net worth</dt><dd>{money(balances[0]?.equity)}</dd></div><div><dt>Today P&amp;L</dt><dd className={(tsToday ?? 0) >= 0 ? "positive" : "negative"}>{money(tsToday)}</dd></div><div><dt>Open P&amp;L</dt><dd className={pnl(positions, "unrealizedPnl")! >= 0 ? "positive" : "negative"}>{money(pnl(positions, "unrealizedPnl"))}</dd></div></dl></div>
+      <div className="combined-account"><span className="broker-mark schwab">CS</span><span className={`status-dot broker-independent ${schwabError ? "error" : schwabStreamState === "streaming" ? "" : "paused"}`} title={`Schwab: ${schwabError ? "unavailable" : schwabStreamState}`} /><select value={schwabAccount?.id ?? ""} onChange={(event) => updateWorkspace({ selectedSchwabAccountId: event.target.value })}>{schwabAccounts.map((item) => <option key={item.id} value={item.id}>{item.displayId}</option>)}</select><dl><div><dt>Positions</dt><dd>{schwabPositions.length}</dd></div><div><dt>Net worth</dt><dd>{money(schwabBalances[0]?.equity)}</dd></div><div><dt>Today P&amp;L</dt><dd className={(schwabToday ?? 0) >= 0 ? "positive" : "negative"}>{money(schwabToday)}</dd></div><div><dt>Open P&amp;L</dt><dd className={pnl(schwabPositions, "unrealizedPnl")! >= 0 ? "positive" : "negative"}>{money(pnl(schwabPositions, "unrealizedPnl"))}</dd></div></dl></div>
+      <div className="combined-total"><span>Combined {sameCurrency ? account?.currency : "mixed currency"}</span><strong className={(combinedToday ?? 0) >= 0 ? "positive" : "negative"}>{money(combinedToday)}</strong><small>Today</small><strong className={(combinedOpen ?? 0) >= 0 ? "positive" : "negative"}>{money(combinedOpen)}</strong><small>Open</small></div>
+    </div><div className="table-wrap combined-position-table">{combinedPositions.length ? <table><thead><tr><th>Broker</th><th>Account</th><th>Symbol</th><th>Asset</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Last</th><th>Open P&amp;L</th><th>Today P&amp;L</th></tr></thead><tbody>{combinedPositions.map((position) => <tr key={`${position.provider}:${position.id}`}><td><span className={`provider-label ${position.provider}`}>{position.provider === "schwab" ? "Schwab" : "TradeStation"}</span></td><td>{position.accountId ?? "—"}</td><td><strong>{position.assetType?.includes("OPTION") ? `${position.underlying} ${position.expirationDate?.slice(5)} ${money(position.strikePrice)} ${position.putCall?.slice(0, 1)}` : position.symbol}</strong></td><td>{position.assetType ?? "Future"}</td><td className={position.side === "Long" ? "buy-text" : "negative"}>{position.side}</td><td>{position.quantity}</td><td>{money(position.averagePrice)}</td><td>{money(position.last)}</td><td className={position.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(position.unrealizedPnl)}</td><td className={(position.currentDayPnl ?? 0) >= 0 ? "positive" : "negative"}>{money(position.currentDayPnl)}</td></tr>)}</tbody></table> : <Empty label="There are no open positions in the selected accounts" />}</div></>}
+    {workspace.bottomPanelOpen && workspace.bottomBrokerPanel !== "combined" && <><div className="account-summary"><select value={activeAccount?.id ?? ""} onChange={(event) => updateWorkspace(schwabPanel ? { selectedSchwabAccountId: event.target.value } : { selectedAccountId: event.target.value })}>{(schwabPanel ? schwabAccounts : accounts).map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Today’s profit</dt><dd>{money(schwabPanel ? pnl(schwabPositions, "currentDayPnl") : balance?.todaysProfitLoss)}</dd></div><div><dt>Unrealized P&amp;L</dt><dd>{money(balance?.unrealizedProfitLoss ?? pnl(activePositions, "unrealizedPnl"))}</dd></div></dl></div>
     <nav className="bottom-tabs">{tabs.map(([tab, label]) => <button key={tab} className={workspace.bottomTab === tab ? "active" : ""} onClick={() => updateWorkspace({ bottomTab: tab })}>{label}</button>)}<button className="export-button" title="Export active tab to CSV" onClick={exportRows}><Download size={16} /></button></nav>
-    <div className="table-wrap">{error && <div className="panel-error">{error}</div>}
-      {workspace.bottomTab === "positions" && (positions.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Stop loss</th><th>Take profit</th><th>Last price</th><th>Bid price</th><th>Ask price</th><th>Unrealized PnL</th><th>PnL quantity</th><th>PnL percent</th><th /></tr></thead><tbody>{positions.map((p) => { const closing = closingPositionIds.has(p.id); const roll = positionRollStatuses[p.symbol.trim().toUpperCase()]; return <tr key={p.id}><td><span className="position-symbol"><strong>{p.symbol}</strong>{roll && <small className={`contract-roll-badge ${roll.phase}`} title={`${p.symbol} rolls ${formatRollDate(roll.rollDate)}. Positions are never rolled automatically.`}>{roll.phase === "roll-due" ? "ROLL DUE" : `${roll.sessionsUntilRoll}D`}</small>}</span></td><td className={p.side === "Long" ? "buy-text" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{money(p.averagePrice)}</td><td>—</td><td>—</td><td>{money(p.last)}</td><td>{money(p.bid)}</td><td>{money(p.ask)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(p.unrealizedPnl)}</td><td>{money(p.unrealizedPnlQuantity)}</td><td>{p.unrealizedPnlPercent == null ? "—" : `${p.unrealizedPnlPercent.toFixed(2)}%`}</td><td><button className="close-position-button" disabled={closing} onClick={() => onClosePosition(p)}><X size={12} />{closing ? "Closing…" : "Close Position"}</button></td></tr>; })}</tbody></table> : <Empty label="There are no open positions in this account" />)}
-      {workspace.bottomTab === "orders" && <><div className="table-filters">{["All", "Working", "Inactive", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={orderFilter === filter ? "active" : ""} onClick={() => setOrderFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleOrders} /></>}
-      {workspace.bottomTab === "history" && <><div className="history-controls"><label>From <input type="date" value={since} max={until} onChange={(e) => setSince(e.target.value)} /></label><label>To <input type="date" value={until} min={since} onChange={(e) => setUntil(e.target.value)} /></label>{["All", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={historyFilter === filter ? "active" : ""} onClick={() => setHistoryFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleHistory} />{history.nextToken && <button className="load-more" disabled={historyLoading} onClick={() => loadHistory(true)}>{historyLoading ? "Loading…" : "Load more"}</button>}</>}
+    <div className="table-wrap">{activeError && <div className="panel-error">{activeError}</div>}
+      {workspace.bottomTab === "positions" && (activePositions.length ? <table><thead><tr><th>Symbol</th><th>Asset</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Stop loss</th><th>Take profit</th><th>Last price</th><th>Bid price</th><th>Ask price</th><th>Unrealized P&amp;L</th><th>Today P&amp;L</th><th>P&amp;L quantity</th><th>P&amp;L percent</th><th /></tr></thead><tbody>{activePositions.map((p) => { const closing = closingPositionIds.has(p.id); const roll = !schwabPanel ? positionRollStatuses[p.symbol.trim().toUpperCase()] : undefined; return <tr key={p.id}><td><span className="position-symbol"><strong>{p.assetType?.includes("OPTION") ? `${p.underlying} ${p.expirationDate?.slice(5)} ${money(p.strikePrice)} ${p.putCall?.slice(0, 1)}` : p.symbol}</strong>{roll && <small className={`contract-roll-badge ${roll.phase}`}>{roll.phase === "roll-due" ? "ROLL DUE" : `${roll.sessionsUntilRoll}D`}</small>}</span></td><td>{p.assetType ?? (schwabPanel ? "Security" : "Future")}</td><td className={p.side === "Long" ? "buy-text" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{money(p.averagePrice)}</td><td>—</td><td>—</td><td>{money(p.last)}</td><td>{money(p.bid)}</td><td>{money(p.ask)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(p.unrealizedPnl)}</td><td className={(p.currentDayPnl ?? 0) >= 0 ? "positive" : "negative"}>{money(p.currentDayPnl)}</td><td>{money(p.unrealizedPnlQuantity)}</td><td>{p.unrealizedPnlPercent == null ? "—" : `${p.unrealizedPnlPercent.toFixed(2)}%`}</td><td>{!schwabPanel && <button className="close-position-button" disabled={closing} onClick={() => onClosePosition(p)}><X size={12} />{closing ? "Closing…" : "Close Position"}</button>}</td></tr>; })}</tbody></table> : <Empty label="There are no open positions in this account" />)}
+      {workspace.bottomTab === "orders" && <><div className="table-filters">{["All", "Working", "Inactive", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={orderFilter === filter ? "active" : ""} onClick={() => setOrderFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleOrders} readOnly={schwabPanel} /></>}
+      {workspace.bottomTab === "history" && <><div className="history-controls"><label>From <input type="date" value={since} max={until} onChange={(e) => setSince(e.target.value)} /></label><label>To <input type="date" value={until} min={since} onChange={(e) => setUntil(e.target.value)} /></label>{["All", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={historyFilter === filter ? "active" : ""} onClick={() => setHistoryFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleHistory} readOnly={schwabPanel} />{activeHistory.nextToken && <button className="load-more" disabled={historyLoading} onClick={() => loadHistory(true)}>{historyLoading ? "Loading…" : "Load more"}</button>}</>}
       {workspace.bottomTab === "summary" && <div className="balance-sections"><BalanceSection title="Real-time" balance={balance} money={money} /><BalanceSection title="Beginning of day" balance={bod} money={money} /></div>}
-      {workspace.bottomTab === "notifications" && (notifications.length ? <table><thead><tr><th>Symbol</th><th>Time</th><th>Title</th><th>Text</th></tr></thead><tbody>{notifications.map((item) => <tr key={item.id}><td>{item.symbol ?? "—"}</td><td>{time(item.time)}</td><td className={item.level === "error" ? "negative" : ""}>{item.title}</td><td>{item.text}</td></tr>)}</tbody></table> : <Empty label="There is no activity here yet" />)}
+      {workspace.bottomTab === "notifications" && (activeNotifications.length ? <table><thead><tr><th>Symbol</th><th>Time</th><th>Title</th><th>Text</th></tr></thead><tbody>{activeNotifications.map((item) => <tr key={item.id}><td>{item.symbol ?? "—"}</td><td>{time(item.time)}</td><td className={item.level === "error" ? "negative" : ""}>{item.title}</td><td>{item.text}</td></tr>)}</tbody></table> : <Empty label="There is no activity here yet" />)}
     </div></>}
   </section>;
 }

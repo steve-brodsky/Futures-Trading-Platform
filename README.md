@@ -1,6 +1,6 @@
 # Northstar Trader
 
-Northstar Trader is a private multi-provider trading workspace. TradeStation supplies futures charting and order entry, while Schwab supplies equity, ETF, and index history, quotes, and live candles. It combines a React workspace with a Rust/Tauri native layer for OAuth, live market and brokerage data, order execution, secure credential storage, and local persistence.
+Northstar Trader is a private multi-provider trading workspace. TradeStation supplies futures charting and order entry, while Schwab supplies read-only equity, ETF, index, option, account, position, and order monitoring. It combines a React workspace with a Rust/Tauri native layer for OAuth, live market and brokerage data, order execution, secure credential storage, and local persistence.
 
 > [!CAUTION]
 > This project can submit real orders when it is connected to TradeStation LIVE. It is early-stage, private software—not financial advice or a finished commercial trading system. Develop and validate against SIM before using LIVE.
@@ -29,6 +29,8 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 - Horizontal lines and horizontal rays with color, width, lock, move, delete, high/low magnet snapping, and persistent live price-cross alerts managed from the chart toolbar.
 - Persistent drawings by symbol.
 - Right-side order/watchlist panel and a resizable brokerage panel for positions, orders, order history, balances, and notifications.
+- Combined, TradeStation, and Schwab brokerage drawer views with independent account selections, broker status, account totals, and a merged positions table.
+- Schwab equity entry and option strike overlays on charts, plus held-contract highlighting, live P&L, and expiration navigation in the Options workspace.
 - CSV export for the active brokerage table.
 
 ### Trading workflow
@@ -45,6 +47,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 - Drag-to-adjust bracket take-profit and stop-loss orders with optimistic UI rollback if TradeStation rejects the replacement.
 - Position close workflow that cancels working exit orders, waits for cancellation confirmation, refreshes the live quantity, and then submits the flattening market order.
 - Order cancellation, paginated order history, account balances, and live position/order updates with snapshot polling as a fallback.
+- Read-only Schwab balances, positions, today/open P&L, and recursively flattened order history, refreshed by account-activity events with polling and reconnect fallbacks.
 
 ### Trade journal
 
@@ -167,7 +170,8 @@ The local OAuth listener binds to `127.0.0.1:8080` and waits up to five minutes,
 2. Start the native app and open **Settings → Schwab API**.
 3. Enter the Schwab App Key and App Secret, then choose **Save**.
 4. Choose **Connect** and complete authorization in the dedicated in-app window.
-5. Select an equity, ETF, or index from the combined symbol picker. Open **Indicators** on equity and ETF charts to enable GEX and choose the included expirations. Schwab instruments are currently chart data only; indexes are not tradable.
+5. Select a Schwab account in the brokerage drawer. Its positions, balances, and orders are monitoring-only: Northstar never exposes Schwab close, cancel, or order-entry actions.
+6. Select an equity, ETF, or index from the combined symbol picker. Open **Indicators** on equity and ETF charts to enable GEX and choose the included expirations.
 
 Schwab and TradeStation connections are independent. Changing the TradeStation SIM/LIVE environment does not affect Schwab charts or streams.
 
@@ -197,6 +201,7 @@ Supabase synchronizes open chart tabs and grouping, chart/indicator settings, EM
 - SIM and LIVE bar caches are separated by environment.
 - Schwab bars use a provider-specific cache namespace and never mix with TradeStation SIM or LIVE data.
 - TradeStation account IDs are masked before they are displayed by the app.
+- Plain Schwab account numbers remain in native memory only. Renderer account IDs use Schwab's encrypted hashes, displayed IDs are masked, and Schwab account/activity payloads are excluded from audit logs.
 - Native HTTP calls and order validation live in Rust; the frontend invokes a constrained set of Tauri commands.
 
 Order confirmation is enabled in a new workspace, but it can currently be disabled and that preference is persisted. Treat LIVE as real-money execution even when the UI looks familiar from SIM.

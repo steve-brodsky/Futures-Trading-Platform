@@ -1166,8 +1166,15 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         aria-label={`Current price ${liveBar.close.toFixed(pricePrecision(minMove))}${candleCountdown ? `; candle closes in ${candleCountdown}` : ""}`}
       ><strong>{liveBar.close.toFixed(pricePrecision(minMove))}</strong>{!isSynthetic && <span>{candleCountdown}</span>}</div>}
       {tradeLines.map((line) => {
-        const top = tradeLineTops[line.id];
-        if (top == null) return null;
+        const baseTop = tradeLineTops[line.id];
+        if (baseTop == null) return null;
+        const lineIndex = tradeLines.findIndex((candidate) => candidate.id === line.id);
+        const stackIndex = tradeLines.slice(0, lineIndex).filter((candidate) => candidate.price === line.price).length;
+        const chartHeight = host.current?.clientHeight ?? 0;
+        const labelHeight = chartLabelSettings.fontSize + 14;
+        const stackDirection = baseTop > chartHeight / 2 ? -1 : 1;
+        const rawTop = baseTop + Math.max(0, stackIndex) * (chartLabelSettings.fontSize + 9) * stackDirection;
+        const top = Math.max(labelHeight / 2 + 2, Math.min(chartHeight - labelHeight / 2 - 2, rawTop));
         const projectionField: ProjectedExitField | undefined = line.kind === "projected-take-profit" ? "takeProfit"
           : line.kind === "projected-stop-loss" ? "stopLoss" : undefined;
         const pending = line.order && replacingOrderIds.has(line.order.id);
@@ -1176,15 +1183,15 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         const metricValues = tradeLineMetrics.get(line.id);
         const metricLabel = metricValues ? formatTradeLineMetrics(metricValues, chartLabelSettings) : null;
         const contractPrefix = tradeSymbol && tradeSymbol !== symbol ? `${tradeSymbol} ` : "";
-        const label = line.kind === "position" ? `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`
+        const label = line.label ?? (line.kind === "position" ? `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`
           : line.kind === "take-profit" ? `${contractPrefix}TP ${line.quantity}`
             : line.kind === "stop-loss" ? `${contractPrefix}SL ${line.quantity}`
               : line.kind === "projected-take-profit" ? "PROJECTED TP"
                 : line.kind === "projected-stop-loss" ? "PROJECTED SL"
-                  : `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`;
+                  : `${contractPrefix}${line.side.toUpperCase()} ${line.quantity}`);
         return <div
           key={line.id}
-          className={`trade-line-label ${line.kind} ${line.kind === "position" ? line.side.toLowerCase() : ""} ${line.draggable ? "draggable" : ""} ${pending || closing ? "pending" : ""}`}
+          className={`trade-line-label ${line.kind} ${line.kind === "position" ? line.side.toLowerCase() : ""} ${line.position?.putCall?.toLowerCase() ?? ""} ${line.draggable ? "draggable" : ""} ${pending || closing ? "pending" : ""}`}
           style={{ top, "--trade-label-font-size": `${chartLabelSettings.fontSize}px` } as CSSProperties}
           onPointerEnter={() => promoteTradeLine(line.id)}
           onFocus={() => promoteTradeLine(line.id)}
@@ -1196,7 +1203,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
           title={line.order && line.draggable ? "Drag to replace this protective order" : projectionField ? "Drag to update the order ticket price" : undefined}
         >
           <span>{closing ? "CLOSING" : pending ? "UPDATING" : label}</span><strong>{displayPrice.toFixed(pricePrecision(minMove))}</strong>{metricLabel && <em>{metricLabel}</em>}
-          {line.position && <button type="button" aria-label={`Close ${line.position.symbol} position`} title="Close position" disabled={closingPositionIds.has(line.position.id)} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onClosePosition(line.position!); }}><X size={11} /></button>}
+          {line.position && line.actionable !== false && <button type="button" aria-label={`Close ${line.position.symbol} position`} title="Close position" disabled={closingPositionIds.has(line.position.id)} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onClosePosition(line.position!); }}><X size={11} /></button>}
         </div>;
       })}
       <div className="chart-watermark">{symbol}</div>

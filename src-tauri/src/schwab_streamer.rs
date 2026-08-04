@@ -1,6 +1,6 @@
 use std::{
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
+    collections::{BTreeSet, HashMap, VecDeque},
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -43,6 +43,16 @@ pub enum SchwabStreamEvent {
         state: String,
         message: Option<String>,
     },
+    AccountActivity {
+        sequence: i64,
+        account_number: String,
+        message_type: String,
+        message_data: String,
+    },
+    AccountActivityState {
+        state: String,
+        message: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -50,6 +60,7 @@ struct DesiredSubscriptions {
     charts: BTreeSet<String>,
     quotes: BTreeSet<String>,
     options: BTreeSet<String>,
+    account_activity: bool,
 }
 
 struct Inner {
@@ -60,6 +71,7 @@ struct Inner {
     events: broadcast::Sender<SchwabStreamEvent>,
     chart_events: broadcast::Sender<SchwabStreamEvent>,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    activity_seen: StdMutex<VecDeque<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +101,7 @@ impl SchwabStreamer {
                 events,
                 chart_events,
                 task: Mutex::new(None),
+                activity_seen: StdMutex::new(VecDeque::new()),
             }),
         }
     }
@@ -137,6 +150,16 @@ impl SchwabStreamer {
             desired.options = next.clone();
             drop(desired);
             record_subscription(&self.inner, "options", &next);
+            self.ensure_running().await;
+            self.inner.changed.notify_one();
+        }
+    }
+
+    pub async fn set_account_activity(&self, enabled: bool) {
+        let mut desired = self.inner.desired.write().await;
+        if desired.account_activity != enabled {
+            desired.account_activity = enabled;
+            drop(desired);
             self.ensure_running().await;
             self.inner.changed.notify_one();
         }
@@ -484,6 +507,20 @@ where
             json!({"keys":keys.join(","),"fields":OPTION_FIELDS}),
         ));
     }
+    if previous.account_activity != next.account_activity {
+        *request_id += 1;
+        requests.push(request_entry(
+            info,
+            *request_id,
+            "ACCT_ACTIVITY",
+            if next.account_activity {
+                "SUBS"
+            } else {
+                "UNSUBS"
+            },
+            json!({"keys":"Account Activity","fields":"0,1,2,3"}),
+        ));
+    }
     if !requests.is_empty() {
         write
             .send(Message::Text(
@@ -509,7 +546,11 @@ fn process_message(
         .into_iter()
         .flatten()
     {
-        if response.get("service").and_then(Value::as_str) != Some("LEVELONE_OPTIONS") {
+        let service = response
+            .get("service")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if service != "LEVELONE_OPTIONS" && service != "ACCT_ACTIVITY" {
             continue;
         }
         let code = response
@@ -520,17 +561,20 @@ fn process_message(
             .pointer("/content/msg")
             .and_then(Value::as_str)
             .map(str::to_string);
-        let _ = inner.events.send(SchwabStreamEvent::OptionState {
-            state: if code == 0 {
-                "streaming"
-            } else if code == 19 {
-                "rest-only"
-            } else {
-                "error"
-            }
-            .into(),
-            message,
-        });
+        let state = if code == 0 {
+            "streaming"
+        } else if code == 19 {
+            "rest-only"
+        } else {
+            "error"
+        }
+        .to_string();
+        let event = if service == "ACCT_ACTIVITY" {
+            SchwabStreamEvent::AccountActivityState { state, message }
+        } else {
+            SchwabStreamEvent::OptionState { state, message }
+        };
+        let _ = inner.events.send(event);
     }
     for data in value
         .get("data")
@@ -582,6 +626,52 @@ fn process_message(
                     if let Some(option) = merge_sparse_option(option_state, content) {
                         counts.options += 1;
                         let _ = inner.events.send(SchwabStreamEvent::Option(option));
+                    }
+                }
+                "ACCT_ACTIVITY" => {
+                    let sequence = data.get("seq").and_then(Value::as_i64).unwrap_or_default();
+                    let account_number = content
+                        .get("1")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let message_type = content
+                        .get("2")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let message_data = content
+                        .get("3")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    if account_number.is_empty() {
+                        continue;
+                    }
+                    let fingerprint =
+                        format!("{sequence}|{account_number}|{message_type}|{message_data}");
+                    let duplicate = {
+                        let mut seen = inner
+                            .activity_seen
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if seen.contains(&fingerprint) {
+                            true
+                        } else {
+                            seen.push_back(fingerprint);
+                            while seen.len() > 1_024 {
+                                seen.pop_front();
+                            }
+                            false
+                        }
+                    };
+                    if !duplicate {
+                        let _ = inner.events.send(SchwabStreamEvent::AccountActivity {
+                            sequence,
+                            account_number,
+                            message_type,
+                            message_data,
+                        });
                     }
                 }
                 _ => {}
@@ -778,6 +868,7 @@ mod tests {
             charts: BTreeSet::from(["$VIX".into(), "SPY".into(), "QQQ".into()]),
             quotes: BTreeSet::from(["AAPL".into(), "SPY".into()]),
             options: BTreeSet::new(),
+            account_activity: false,
         };
         assert_eq!(
             equity_subscription_symbols(&desired)
@@ -801,6 +892,7 @@ mod tests {
             charts: BTreeSet::from(["$VIX".into(), "SPY".into()]),
             quotes: BTreeSet::from(["AAPL".into()]),
             options: BTreeSet::from(["SPY   260724C00750000".into()]),
+            account_activity: false,
         };
         let mut sink = CaptureSink::default();
         let mut request_id = 1;
@@ -824,6 +916,64 @@ mod tests {
             .unwrap()
             .split(',')
             .any(|field| field == "35"));
+    }
+
+    #[tokio::test]
+    async fn account_activity_uses_the_documented_contract() {
+        let info = schwab::StreamerInfo {
+            streamer_socket_url: "wss://example.test".into(),
+            schwab_client_customer_id: "customer".into(),
+            schwab_client_correl_id: "correlation".into(),
+            schwab_client_channel: "channel".into(),
+            schwab_client_function_id: "function".into(),
+        };
+        let mut next = DesiredSubscriptions::default();
+        next.account_activity = true;
+        let mut sink = CaptureSink::default();
+        let mut request_id = 1;
+        update_subscriptions(
+            &mut sink,
+            &info,
+            &mut request_id,
+            &DesiredSubscriptions::default(),
+            &next,
+        )
+        .await
+        .unwrap();
+        let Message::Text(body) = &sink.0[0] else {
+            panic!("expected text")
+        };
+        let value: Value = serde_json::from_str(body.as_ref()).unwrap();
+        let request = &value["requests"][0];
+        assert_eq!(request["service"], "ACCT_ACTIVITY");
+        assert_eq!(request["command"], "SUBS");
+        assert_eq!(request["parameters"]["keys"], "Account Activity");
+        assert_eq!(request["parameters"]["fields"], "0,1,2,3");
+    }
+
+    #[test]
+    fn duplicate_account_activity_sequences_emit_once() {
+        let streamer = SchwabStreamer::new(Schwab::new().unwrap());
+        let mut receiver = streamer.subscribe();
+        let message = r#"{"data":[{"service":"ACCT_ACTIVITY","seq":91,"content":[{"key":"Account Activity","1":"12341174","2":"OrderFill","3":"{\"status\":\"FILLED\"}"}]}]}"#;
+        for _ in 0..2 {
+            process_message(
+                &streamer.inner,
+                message,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &mut StreamCounts::default(),
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(SchwabStreamEvent::AccountActivity { sequence: 91, .. })
+        ));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

@@ -1045,6 +1045,7 @@ impl TradeStation {
             .map(|item| {
                 let id = string(item, "AccountID");
                 Account {
+                    provider: MarketDataProvider::Tradestation,
                     display_id: mask_account(&id),
                     id,
                     account_type: string(item, "AccountType"),
@@ -1451,6 +1452,7 @@ impl TradeStation {
             ));
         }
         Ok(OrderUpdate {
+            provider: MarketDataProvider::Tradestation,
             id,
             symbol: draft.symbol.clone(),
             side: draft.side.clone(),
@@ -1474,6 +1476,9 @@ impl TradeStation {
             open_or_close: None,
             group_name: None,
             related_orders: vec![],
+            broker_order_id: None,
+            leg_id: None,
+            asset_type: Some("FUTURE".into()),
         })
     }
 
@@ -2039,6 +2044,7 @@ pub(crate) fn order_from_value(item: &Value) -> OrderUpdate {
         })
         .collect();
     OrderUpdate {
+        provider: MarketDataProvider::Tradestation,
         id: string(item, "OrderID"),
         symbol: string(leg, "Symbol"),
         side: string(leg, "BuyOrSell"),
@@ -2066,6 +2072,9 @@ pub(crate) fn order_from_value(item: &Value) -> OrderUpdate {
         open_or_close: optional_string(leg, "OpenOrClose"),
         group_name: optional_string(item, "GroupName"),
         related_orders,
+        broker_order_id: None,
+        leg_id: None,
+        asset_type: Some("FUTURE".into()),
     }
 }
 
@@ -2273,6 +2282,8 @@ fn market_replacement_update(order: &OrderUpdate, position: &Position) -> OrderU
 
 pub(crate) fn position_from_value(item: &Value) -> Position {
     Position {
+        provider: MarketDataProvider::Tradestation,
+        account_id: None,
         id: string(item, "PositionID"),
         symbol: string(item, "Symbol"),
         side: string(item, "LongShort"),
@@ -2290,6 +2301,13 @@ pub(crate) fn position_from_value(item: &Value) -> Position {
         maintenance_margin: optional_number(item, "MaintenanceMargin"),
         market_value: optional_number(item, "MarketValue"),
         timestamp: optional_string(item, "Timestamp"),
+        asset_type: Some("FUTURE".into()),
+        current_day_pnl: None,
+        multiplier: None,
+        underlying: None,
+        expiration_date: None,
+        strike_price: None,
+        put_call: None,
     }
 }
 
@@ -2394,6 +2412,7 @@ fn validate_order_id(order_id: &str) -> Result<(), AppError> {
 fn balance_from_value(item: &Value) -> AccountBalance {
     let detail = item.get("BalanceDetail").unwrap_or(item);
     AccountBalance {
+        provider: MarketDataProvider::Tradestation,
         account_id: string(item, "AccountID"),
         account_type: string(item, "AccountType"),
         currency: string(item, "Currency"),
@@ -2917,6 +2936,7 @@ mod tests {
 
     fn sample_order(id: &str) -> OrderUpdate {
         OrderUpdate {
+            provider: MarketDataProvider::Tradestation,
             id: id.into(),
             symbol: "MESU26".into(),
             side: "Sell".into(),
@@ -2940,11 +2960,16 @@ mod tests {
             open_or_close: Some("Close".into()),
             group_name: Some("OCO bracket".into()),
             related_orders: vec![],
+            broker_order_id: None,
+            leg_id: None,
+            asset_type: Some("FUTURE".into()),
         }
     }
 
     fn sample_position(side: &str, quantity: f64) -> Position {
         Position {
+            provider: MarketDataProvider::Tradestation,
+            account_id: None,
             id: "position-1".into(),
             symbol: "MESU26".into(),
             side: side.into(),
@@ -2960,6 +2985,13 @@ mod tests {
             maintenance_margin: None,
             market_value: None,
             timestamp: None,
+            asset_type: Some("FUTURE".into()),
+            current_day_pnl: None,
+            multiplier: None,
+            underlying: None,
+            expiration_date: None,
+            strike_price: None,
+            put_call: None,
         }
     }
 

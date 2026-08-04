@@ -1235,6 +1235,7 @@ fn inside_session(policy: &TradingSessionPolicy, now: DateTime<Utc>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::MarketDataProvider;
     use std::fs;
 
     fn temp_db(name: &str) -> PathBuf {
@@ -1509,6 +1510,8 @@ mod tests {
             .any(|reason| reason.contains("trade risk")));
 
         let position = Position {
+            provider: MarketDataProvider::Tradestation,
+            account_id: None,
             id: "p1".into(),
             symbol: draft.symbol.clone(),
             side: "Long".into(),
@@ -1524,6 +1527,13 @@ mod tests {
             maintenance_margin: None,
             market_value: None,
             timestamp: None,
+            asset_type: Some("FUTURE".into()),
+            current_day_pnl: None,
+            multiplier: None,
+            underlying: None,
+            expiration_date: None,
+            strike_price: None,
+            put_call: None,
         };
         let mut close = draft;
         close.side = "Sell".into();
@@ -1625,6 +1635,8 @@ mod tests {
         order.stop_loss = None;
         order.take_profit = None;
         let position = Position {
+            provider: MarketDataProvider::Tradestation,
+            account_id: None,
             id: "p1".into(),
             symbol: order.symbol.clone(),
             side: "Long".into(),
@@ -1640,6 +1652,13 @@ mod tests {
             maintenance_margin: None,
             market_value: None,
             timestamp: None,
+            asset_type: Some("FUTURE".into()),
+            current_day_pnl: None,
+            multiplier: None,
+            underlying: None,
+            expiration_date: None,
+            strike_price: None,
+            put_call: None,
         };
         let reducing = evaluate(&order, &[position], now);
         assert!(reducing.allowed);
@@ -1759,6 +1778,7 @@ mod tests {
         order.stop_loss = None;
         order.take_profit = Some(5999.0);
         let balance = AccountBalance {
+            provider: MarketDataProvider::Tradestation,
             account_id: "SIM-1".into(),
             account_type: "Futures".into(),
             currency: "USD".into(),

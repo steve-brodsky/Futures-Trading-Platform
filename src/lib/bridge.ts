@@ -1,15 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "../types";
+import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "../types";
 import { demoAuditExport, demoAuditPage, instrumentDemoApi } from "./audit";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
-import { demoAccounts, demoBalance, demoBodBalance, demoOptionChain, demoOptionExpirations, demoOrders, demoPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
+import { demoAccounts, demoBalance, demoBodBalance, demoOptionChain, demoOptionExpirations, demoOrders, demoPositions, demoSchwabAccounts, demoSchwabBalance, demoSchwabBodBalance, demoSchwabOrders, demoSchwabPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
 import { CME_HOURS_URL, demoTradingTodaySnapshot, NYSE_HOURS_URL, TRADING_ECONOMICS_CALENDAR_URL } from "./tradingToday";
 import { timeframeSeconds } from "./timeframes";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-const nativeAuditExcluded = new Set(["get_audit_events", "get_audit_health", "export_audit_events", "record_client_audit"]);
+// Account payloads stay out of the renderer audit trail. The native Schwab
+// client records a deliberately redacted request/result instead.
+const nativeAuditExcluded = new Set([
+  "get_audit_events", "get_audit_health", "export_audit_events", "record_client_audit",
+  "get_schwab_accounts", "get_schwab_account_snapshot", "get_schwab_orders",
+]);
 const nativeRecordCommands = new Set([
   "save_credentials", "save_schwab_credentials", "set_environment", "save_workspace",
   "configure_journal", "disconnect_journal", "set_journal_backfill_start", "reset_journal_now",
@@ -51,7 +56,7 @@ async function native<T>(command: string, args?: Record<string, unknown>): Promi
 const rawApi = {
   isNative: isTauri,
   async authStatus(): Promise<{ configured: boolean; authenticated: boolean }> {
-    return isTauri ? native("auth_status") : { configured: false, authenticated: false };
+    return isTauri ? native("auth_status") : { configured: true, authenticated: true };
   },
   async saveCredentials(clientId: string, clientSecret: string): Promise<void> {
     if (!isTauri) return;
@@ -82,6 +87,20 @@ const rawApi = {
   },
   async accounts(): Promise<Account[]> {
     return isTauri ? native("get_accounts") : demoAccounts;
+  },
+  async schwabAccounts(): Promise<Account[]> {
+    return isTauri ? native("get_schwab_accounts") : demoSchwabAccounts;
+  },
+  async schwabAccountSnapshot(accountId: string): Promise<SchwabAccountSnapshot> {
+    return isTauri ? native("get_schwab_account_snapshot", { accountId }) : {
+      account: demoSchwabAccounts[0], positions: demoSchwabPositions,
+      balances: [demoSchwabBalance], beginningOfDayBalances: [demoSchwabBodBalance],
+      fetchedAt: new Date().toISOString(), freshness: "fresh", connectionState: "streaming",
+    };
+  },
+  async schwabOrders(accountId: string, fromEnteredTime: string, toEnteredTime: string): Promise<HistoricalOrderPage> {
+    if (isTauri) return native("get_schwab_orders", { accountId, fromEnteredTime, toEnteredTime });
+    return { orders: demoSchwabOrders.filter((order) => order.timestamp >= fromEnteredTime && order.timestamp <= toEnteredTime) };
   },
   async symbolSearch(query: string): Promise<SymbolMeta[]> {
     if (isTauri) return native("search_symbols", { query });
@@ -141,6 +160,12 @@ const rawApi = {
   },
   async stopBrokerageStream(): Promise<void> {
     if (isTauri) await native("stop_brokerage_stream");
+  },
+  async startSchwabBrokerageStream(accountId: string): Promise<void> {
+    if (isTauri) await native("start_schwab_brokerage_stream", { accountId });
+  },
+  async stopSchwabBrokerageStream(): Promise<void> {
+    if (isTauri) await native("stop_schwab_brokerage_stream");
   },
   async quotes(provider: MarketDataProvider, symbols: string[]): Promise<Quote[]> {
     if (isTauri) return native("get_quotes", { provider, symbols });

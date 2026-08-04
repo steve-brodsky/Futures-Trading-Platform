@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { api } from "../lib/bridge";
 import { useSymbolSuggestions } from "../lib/symbolSearch";
+import { heldOptionsForUnderlying } from "../lib/schwabBrokerage";
 import {
   MAX_OPTION_DRAFT_LEGS, OPTION_STRIKE_COUNTS, classifyOptionDraft, defaultOptionOrderDraft,
   formatOptionCount, formatOptionGreek, formatOptionPrice, optionDraftNatural, pairOptionContracts,
@@ -14,7 +15,7 @@ import {
 } from "../lib/optionChain";
 import type {
   OptionChainPreferences, OptionContract, OptionDraftAction, OptionOrderDraft, OptionStreamStateEvent,
-  OptionUpdateEvent, Quote, QuoteUpdateEvent, SymbolMeta,
+  OptionUpdateEvent, Position, PositionsSnapshotEvent, Quote, QuoteUpdateEvent, SymbolMeta,
 } from "../types";
 
 const MAIN_WINDOW_ID = "main";
@@ -27,6 +28,8 @@ const OPTION_FIELDS_TO_FLASH: Array<keyof OptionContract> = [
 export interface OptionChainTransferState {
   preferences: OptionChainPreferences;
   draft: OptionOrderDraft;
+  positions?: Position[];
+  schwabAccountId?: string;
 }
 
 interface OptionChainWorkspaceProps extends OptionChainTransferState {
@@ -39,6 +42,7 @@ interface OptionChainWorkspaceProps extends OptionChainTransferState {
   onDetach?: (state: OptionChainTransferState) => void | Promise<void>;
   onDock?: (state: OptionChainTransferState) => void | Promise<void>;
   onOpenSettings?: () => void;
+  positions?: Position[];
 }
 
 type ChainState = "loading" | "connecting" | "live" | "delayed" | "stale" | "rest-only" | "error";
@@ -134,7 +138,7 @@ function OptionDraftBuilder({ draft, onChange }: { draft: OptionOrderDraft; onCh
 
 export function OptionChainWorkspace({
   preferences, draft, detached = false, authenticated, onPreferencesChange, onDraftChange,
-  onRequestBudget, onReleaseBudget, onDetach, onDock, onOpenSettings,
+  onRequestBudget, onReleaseBudget, onDetach, onDock, onOpenSettings, positions = [],
 }: OptionChainWorkspaceProps) {
   const [symbolMeta, setSymbolMeta] = useState<SymbolMeta>();
   const [searchOpen, setSearchOpen] = useState(false);
@@ -151,6 +155,7 @@ export function OptionChainWorkspace({
   const [flashes, setFlashes] = useState<Record<string, FlashDirection>>({});
   const [refreshEpoch, setRefreshEpoch] = useState(0);
   const [draftMessage, setDraftMessage] = useState<string>();
+  const [heldRevealStrike, setHeldRevealStrike] = useState<number>();
   const contractsRef = useRef(contracts);
   const flashTimersRef = useRef(new Map<string, number>());
   const activeStreamIdsRef = useRef(new Set<string>());
@@ -158,6 +163,8 @@ export function OptionChainWorkspace({
   const subscriptionId = `${detached ? "option-window" : "option-main"}:${preferences.symbol}`;
   const displayed = useMemo(() => pairOptionContracts(Object.values(contracts), quote?.last || underlyingPrice), [contracts, quote?.last, underlyingPrice]);
   const selectedExpiration = expirations.find((item) => item.expirationDate === preferences.expirationDate);
+  const heldPositions = useMemo(() => heldOptionsForUnderlying(positions, preferences.symbol), [positions, preferences.symbol]);
+  const heldForExpiration = heldPositions.filter((position) => position.expirationDate === preferences.expirationDate);
 
   contractsRef.current = contracts;
 
@@ -221,6 +228,12 @@ export function OptionChainWorkspace({
     try {
       const snapshot = await api.optionChain(preferences.symbol, [preferences.expirationDate], preferences.strikeCount);
       const next = Object.fromEntries(snapshot.contracts.map((contract) => [contract.symbol, contract]));
+      const missingHeldStrikes = heldPositions.filter((position) => position.expirationDate === preferences.expirationDate && position.strikePrice != null && !snapshot.contracts.some((contract) => contract.symbol.trim() === position.symbol.trim()));
+      if (missingHeldStrikes.length) {
+        const expanded = await api.optionChain(preferences.symbol, [preferences.expirationDate], 100);
+        const wanted = new Set(missingHeldStrikes.map((position) => position.strikePrice));
+        expanded.contracts.filter((contract) => wanted.has(contract.strikePrice)).forEach((contract) => { next[contract.symbol] = contract; });
+      }
       setContracts(next);
       setUnderlyingPrice(snapshot.underlyingPrice);
       setFetchedAt(snapshot.fetchedAt);
@@ -230,7 +243,7 @@ export function OptionChainWorkspace({
       setState(Object.keys(contractsRef.current).length ? "stale" : "error");
       setMessage(String(error));
     }
-  }, [preferences.symbol, preferences.expirationDate, preferences.strikeCount, authenticated]);
+  }, [preferences.symbol, preferences.expirationDate, preferences.strikeCount, authenticated, heldPositions.map((position) => `${position.symbol}:${position.strikePrice}`).join("|")]);
 
   useEffect(() => {
     void loadChain(false);
@@ -328,10 +341,18 @@ export function OptionChainWorkspace({
   }, [contracts]);
 
   useEffect(() => {
-    if (displayed.atTheMoneyStrike == null) return;
+    if (heldRevealStrike != null || displayed.atTheMoneyStrike == null) return;
     const row = chainScrollRef.current?.querySelector<HTMLElement>(`[data-strike="${displayed.atTheMoneyStrike}"]`);
     row?.scrollIntoView({ block: "center" });
-  }, [preferences.expirationDate, preferences.strikeCount, displayed.atTheMoneyStrike]);
+  }, [preferences.expirationDate, preferences.strikeCount, displayed.atTheMoneyStrike, heldRevealStrike]);
+
+  useEffect(() => {
+    if (heldRevealStrike == null) return;
+    const row = chainScrollRef.current?.querySelector<HTMLElement>(`[data-strike="${heldRevealStrike}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: "center" });
+    setHeldRevealStrike(undefined);
+  }, [heldRevealStrike, displayed.rows]);
 
   const selectContract = (contract: OptionContract, action: OptionDraftAction) => {
     const result = toggleOptionDraftLeg(draft, contract, action);
@@ -340,7 +361,7 @@ export function OptionChainWorkspace({
   };
   const isSelected = (contract: OptionContract | undefined, action: OptionDraftAction) => Boolean(contract && draft.legs.some((leg) => leg.contractSymbol === contract.symbol && leg.action === action));
 
-  return <section className={`option-chain-workspace ${detached ? "detached" : ""}`}>
+  return <section className={`option-chain-workspace ${detached ? "detached" : ""} ${heldPositions.length ? "has-held-options" : ""}`}>
     <header className="option-chain-toolbar">
       <div className="option-symbol-search">
         <Search size={15} />
@@ -363,10 +384,20 @@ export function OptionChainWorkspace({
       <button type="button" className="option-toolbar-icon" aria-label="Refresh option chain" title="Refresh option chain" onClick={() => setRefreshEpoch((value) => value + 1)}><RefreshCw size={15} /></button>
       {detached
         ? <button type="button" className="option-toolbar-icon" aria-label="Dock option chain" title="Dock to main window" onClick={() => void onDock?.({ preferences, draft })}><PanelTopClose size={15} /></button>
-        : <button type="button" className="option-toolbar-icon" aria-label="Detach option chain" title="Detach option chain" onClick={() => void onDetach?.({ preferences, draft })}><ExternalLink size={15} /></button>}
+        : <button type="button" className="option-toolbar-icon" aria-label="Detach option chain" title="Detach option chain" onClick={() => void onDetach?.({ preferences, draft, positions })}><ExternalLink size={15} /></button>}
       <button type="button" className={`option-stream-chip ${state}`} title={message ?? state} onClick={state === "error" ? onOpenSettings : undefined}><Wifi size={12} /><span>{state === "rest-only" ? "REST ONLY" : state.toUpperCase()}</span></button>
     </header>
 
+    {heldPositions.length > 0 && <section className="held-options-strip" aria-label="Held Schwab options"><header><strong>Held options</strong><span>{heldPositions.length} position{heldPositions.length === 1 ? "" : "s"}</span></header>{heldPositions.map((position) => {
+      const live = contracts[position.symbol];
+      const mark = live?.markPrice || position.last;
+      const direction = position.side === "Long" ? 1 : -1;
+      const openPnl = live ? (mark - position.averagePrice) * direction * position.quantity * (position.multiplier ?? 100) : position.unrealizedPnl;
+      return <button key={position.id} type="button" className={position.expirationDate === preferences.expirationDate ? "visible-contract" : ""} onClick={() => {
+        setHeldRevealStrike(position.strikePrice);
+        if (position.expirationDate) setPreference({ expirationDate: position.expirationDate });
+      }}><span className={`held-option-side ${position.putCall?.toLowerCase()}`}>{position.putCall === "CALL" ? "C" : "P"}</span><strong>{position.expirationDate?.slice(5).replace("-", "/")} · {formatOptionPrice(position.strikePrice)}</strong><small>{position.side.toUpperCase()} {position.quantity} · Avg {formatOptionPrice(position.averagePrice)} · Mark {formatOptionPrice(mark)}</small><em className={openPnl >= 0 ? "positive" : "negative"}>{openPnl >= 0 ? "+" : ""}${openPnl.toFixed(2)}</em><small>Today {position.currentDayPnl == null ? "—" : `${position.currentDayPnl >= 0 ? "+" : ""}$${position.currentDayPnl.toFixed(2)}`}</small></button>;
+    })}</section>}
     <OptionDraftBuilder draft={draft} onChange={onDraftChange} />
     {draftMessage && <button type="button" className="option-draft-message" onClick={() => setDraftMessage(undefined)}>{draftMessage}<X size={12} /></button>}
 
@@ -378,7 +409,7 @@ export function OptionChainWorkspace({
     <div className="option-chain-scroll" ref={chainScrollRef}>
       <table className="option-chain-table">
         <thead><tr className="option-side-heading"><th colSpan={8}>CALLS</th><th>STRIKE</th><th colSpan={8}>PUTS</th></tr><tr><th>Volume</th><th>OI</th><th>Vega</th><th>Theta</th><th>Gamma</th><th>Delta</th><th>Bid × Size</th><th>Ask × Size</th><th>Strike</th><th>Bid × Size</th><th>Ask × Size</th><th>Delta</th><th>Gamma</th><th>Theta</th><th>Vega</th><th>OI</th><th>Volume</th></tr></thead>
-        <tbody>{displayed.rows.map((row) => <tr key={row.strikePrice} data-strike={row.strikePrice} className={`${row.atTheMoney ? "atm" : ""} ${row.callInTheMoney ? "call-itm" : ""} ${row.putInTheMoney ? "put-itm" : ""}`}>
+        <tbody>{displayed.rows.map((row) => { const heldCall = heldForExpiration.find((position) => position.symbol.trim() === row.call?.symbol.trim()); const heldPut = heldForExpiration.find((position) => position.symbol.trim() === row.put?.symbol.trim()); return <tr key={row.strikePrice} data-strike={row.strikePrice} className={`${row.atTheMoney ? "atm" : ""} ${row.callInTheMoney ? "call-itm" : ""} ${row.putInTheMoney ? "put-itm" : ""} ${heldCall ? "held-call" : ""} ${heldPut ? "held-put" : ""}`}>
           <DataCell contract={row.call} field="totalVolume" format={formatOptionCount} flashes={flashes} />
           <DataCell contract={row.call} field="openInterest" format={formatOptionCount} flashes={flashes} />
           <DataCell contract={row.call} field="vega" format={formatOptionGreek} flashes={flashes} />
@@ -387,7 +418,7 @@ export function OptionChainWorkspace({
           <DataCell contract={row.call} field="delta" format={formatOptionGreek} flashes={flashes} />
           <PriceCell contract={row.call} field="bidPrice" action="SELL" selected={isSelected(row.call, "SELL")} flashes={flashes} onSelect={selectContract} />
           <PriceCell contract={row.call} field="askPrice" action="BUY" selected={isSelected(row.call, "BUY")} flashes={flashes} onSelect={selectContract} />
-          <th scope="row" className="option-strike-cell"><strong>{formatOptionPrice(row.strikePrice)}</strong>{row.atTheMoney && <span>ATM</span>}</th>
+          <th scope="row" className="option-strike-cell"><strong>{formatOptionPrice(row.strikePrice)}</strong>{row.atTheMoney && <span>ATM</span>}{heldCall && <span className="held-contract-badge">{heldCall.quantity}C</span>}{heldPut && <span className="held-contract-badge put">{heldPut.quantity}P</span>}</th>
           <PriceCell contract={row.put} field="bidPrice" action="SELL" selected={isSelected(row.put, "SELL")} flashes={flashes} onSelect={selectContract} />
           <PriceCell contract={row.put} field="askPrice" action="BUY" selected={isSelected(row.put, "BUY")} flashes={flashes} onSelect={selectContract} />
           <DataCell contract={row.put} field="delta" format={formatOptionGreek} flashes={flashes} />
@@ -396,7 +427,7 @@ export function OptionChainWorkspace({
           <DataCell contract={row.put} field="vega" format={formatOptionGreek} flashes={flashes} />
           <DataCell contract={row.put} field="openInterest" format={formatOptionCount} flashes={flashes} />
           <DataCell contract={row.put} field="totalVolume" format={formatOptionCount} flashes={flashes} />
-        </tr>)}</tbody>
+        </tr>; })}</tbody>
       </table>
       {state === "loading" && !displayed.rows.length && <div className="option-chain-loading"><LoaderCircle size={19} className="spin" /><strong>Loading {preferences.symbol} option chain</strong><span>Fetching expirations, contracts, and underlying quote</span></div>}
       {state === "error" && !displayed.rows.length && <div className="option-chain-loading error"><Wifi size={19} /><strong>Option chain unavailable</strong><span>{message}</span>{onOpenSettings && <button type="button" onClick={onOpenSettings}>Open Schwab settings</button>}</div>}
@@ -450,6 +481,11 @@ export function DetachedOptionChainWindow() {
           return;
         }
         cleanups.push(transferCleanup);
+        const positionsCleanup = await listen<PositionsSnapshotEvent>("positions-snapshot", ({ payload }) => {
+          if (payload.provider !== "schwab") return;
+          setTransfer((current) => current && (!current.schwabAccountId || current.schwabAccountId === payload.accountId) ? { ...current, schwabAccountId: payload.accountId, positions: payload.positions } : current);
+        });
+        if (disposed) positionsCleanup(); else cleanups.push(positionsCleanup);
         await emitTo(MAIN_WINDOW_ID, "option-chain-window-ready", { windowId: OPTION_WINDOW_ID });
         readyTimer = window.setInterval(() => {
           if (!receivedTransfer) void emitTo(MAIN_WINDOW_ID, "option-chain-window-ready", { windowId: OPTION_WINDOW_ID }).catch(() => undefined);
@@ -498,6 +534,7 @@ export function DetachedOptionChainWindow() {
     </header>
     <OptionChainWorkspace
       detached authenticated={authenticated} preferences={transfer.preferences} draft={transfer.draft}
+      positions={transfer.positions ?? []}
       onPreferencesChange={(preferences) => setTransfer((current) => current ? { ...current, preferences } : current)}
       onDraftChange={(draft) => setTransfer((current) => current ? { ...current, draft } : current)}
       onRequestBudget={requestDetachedBudget}

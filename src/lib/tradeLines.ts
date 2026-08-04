@@ -1,5 +1,6 @@
 import type { ChartLabelSettings, OrderDraft, OrderUpdate, Position } from "../types";
 import { calculateTakeProfitAtR, roundToTick } from "./indicators";
+import { positionMatchesSchwabChart } from "./schwabBrokerage";
 
 export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "projected-take-profit" | "projected-stop-loss" | "order";
 export const orderRMultiples = [1, 1.5, 2] as const;
@@ -40,6 +41,9 @@ export interface TradeLineModel {
   draggable: boolean;
   order?: OrderUpdate;
   position?: Position;
+  label?: string;
+  actionable?: boolean;
+  suppressMetrics?: boolean;
 }
 
 export interface TradeLineMetrics {
@@ -75,16 +79,26 @@ function matchesProtectiveType(order: OrderUpdate): boolean {
 export function buildTradeLines(tradeSymbol: string | undefined, positions: Position[], orders: OrderUpdate[]): TradeLineModel[] {
   if (!tradeSymbol) return [];
   const positionLines = positions
-    .filter((position) => position.symbol === tradeSymbol && Math.abs(position.quantity) > 0)
+    .filter((position) => {
+      if (Math.abs(position.quantity) === 0) return false;
+      return position.provider === "schwab"
+        ? positionMatchesSchwabChart(position, tradeSymbol)
+        : position.symbol.trim().toUpperCase() === tradeSymbol.trim().toUpperCase();
+    })
     .map((position): TradeLineModel => ({
       id: `position:${position.id}`,
       kind: "position",
-      price: position.averagePrice,
-      color: position.side === "Long" ? "#16c79a" : "#ef466f",
+      price: position.strikePrice ?? position.averagePrice,
+      color: position.putCall === "CALL" ? "#37d5e8" : position.putCall === "PUT" ? "#a986df" : position.side === "Long" ? "#16c79a" : "#ef466f",
       side: position.side,
       quantity: Math.abs(position.quantity),
       draggable: false,
       position,
+      actionable: position.provider !== "schwab",
+      suppressMetrics: Boolean(position.putCall),
+      label: position.putCall
+        ? `SCHWAB ${position.side.toUpperCase()} ${Math.abs(position.quantity)} · ${position.expirationDate?.slice(5).replace("-", "/")} ${position.strikePrice}${position.putCall[0]} · ${position.unrealizedPnl >= 0 ? "+" : ""}$${Math.abs(position.unrealizedPnl).toFixed(2)}`
+        : position.provider === "schwab" ? `SCHWAB ${position.side.toUpperCase()} ${Math.abs(position.quantity)}` : undefined,
     }));
   const orderLines = orders.flatMap((order): TradeLineModel[] => {
     if (order.symbol !== tradeSymbol || order.status !== "Working") return [];
@@ -152,7 +166,7 @@ export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: numbe
     const liveDollarAmount = currentPrice != null && Number.isFinite(currentPrice) && currentPrice > 0
       ? direction * (currentPrice - position.averagePrice) * pointValue * quantity
       : position.unrealizedPnl;
-    if (Number.isFinite(liveDollarAmount)) metrics.set(positionLine.id, withRisk(liveDollarAmount));
+    if (!positionLine.suppressMetrics && Number.isFinite(liveDollarAmount)) metrics.set(positionLine.id, withRisk(liveDollarAmount));
     lines.forEach((line) => {
       if ((line.kind !== "take-profit" && line.kind !== "stop-loss") || line.order?.symbol !== position.symbol) return;
       const dollarAmount = direction * (line.price - position.averagePrice) * pointValue * quantity;

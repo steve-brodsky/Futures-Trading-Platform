@@ -3137,6 +3137,7 @@ mod tests {
     }
     fn order(id: &str, side: &str, open_close: &str, qty: f64, price: f64) -> OrderUpdate {
         OrderUpdate {
+            provider: MarketDataProvider::Tradestation,
             id: id.into(),
             symbol: "MESU26".into(),
             side: side.into(),
@@ -3160,6 +3161,9 @@ mod tests {
             open_or_close: Some(open_close.into()),
             group_name: None,
             related_orders: vec![],
+            broker_order_id: None,
+            leg_id: None,
+            asset_type: Some("FUTURE".into()),
         }
     }
     fn configure_local(path: &Path, record_from: Option<&str>) {

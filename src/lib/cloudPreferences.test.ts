@@ -37,6 +37,7 @@ function workspace(): WorkspaceState {
     optionChain: { symbol: "SPY", strikeCount: 20 },
     rightPanelOpen: true,
     bottomTab: "orders",
+    bottomBrokerPanel: "combined",
     bottomPanelOpen: true,
     bottomPanelHeight: 420,
     selectedAccountId: "secret-account-id",

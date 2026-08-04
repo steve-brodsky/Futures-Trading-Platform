@@ -9,7 +9,7 @@ mod storage;
 mod tradestation;
 mod trading_today;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use models::*;
 use schwab::Schwab;
@@ -81,6 +81,7 @@ pub struct NativeState {
         tokio::sync::Mutex<HashMap<MarketDataProvider, tauri::async_runtime::JoinHandle<()>>>,
     option_streams: tokio::sync::Mutex<HashMap<String, OptionStreamRegistration>>,
     brokerage_streams: tokio::sync::Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+    schwab_brokerage_stream: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     preference_realtime: tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
@@ -433,6 +434,10 @@ async fn shutdown_native_services(state: &NativeState) {
             handles.push(task);
         }
     }
+    if let Some(task) = state.schwab_brokerage_stream.lock().await.take() {
+        task.abort();
+        handles.push(task);
+    }
     if let Some(task) = state.preference_realtime.lock().await.take() {
         task.abort();
         handles.push(task);
@@ -461,6 +466,32 @@ async fn shutdown_native_services(state: &NativeState) {
 #[tauri::command]
 async fn get_accounts(state: State<'_, NativeState>) -> Result<Vec<Account>, AppError> {
     state.api.accounts().await
+}
+
+#[tauri::command]
+async fn get_schwab_accounts(state: State<'_, NativeState>) -> Result<Vec<Account>, AppError> {
+    state.schwab.accounts().await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_schwab_account_snapshot(
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<SchwabAccountSnapshot, AppError> {
+    state.schwab.account_snapshot(&account_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn get_schwab_orders(
+    account_id: String,
+    from_entered_time: String,
+    to_entered_time: String,
+    state: State<'_, NativeState>,
+) -> Result<HistoricalOrderPage, AppError> {
+    state
+        .schwab
+        .orders(&account_id, &from_entered_time, &to_entered_time)
+        .await
 }
 
 #[tauri::command]
@@ -611,7 +642,10 @@ async fn get_option_chain(
     strike_count: Option<u32>,
     state: State<'_, NativeState>,
 ) -> Result<OptionChainSnapshot, AppError> {
-    state.schwab.option_chain(&symbol, &expiration_dates, strike_count).await
+    state
+        .schwab
+        .option_chain(&symbol, &expiration_dates, strike_count)
+        .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -942,9 +976,7 @@ async fn refresh_bar_stream(
             .map(|shared| (shared.subscribers.clone(), shared.latest_bars.clone()))
     };
     let bars = match provider {
-        MarketDataProvider::Tradestation => {
-            state.api.recent_bars(&symbol, &timeframe, 4).await?
-        }
+        MarketDataProvider::Tradestation => state.api.recent_bars(&symbol, &timeframe, 4).await?,
         MarketDataProvider::Schwab => state.schwab.bars(&symbol, &timeframe).await?,
     };
     if !state.safety.lifecycle.accepts(environment_generation) {
@@ -1311,6 +1343,171 @@ async fn stop_brokerage_stream(state: State<'_, NativeState>) -> Result<(), AppE
     Ok(())
 }
 
+fn schwab_today_range() -> (String, String) {
+    let now = Utc::now();
+    let local = now.with_timezone(&chrono_tz::America::New_York);
+    let start_local = chrono_tz::America::New_York
+        .from_local_datetime(&local.date_naive().and_hms_opt(0, 0, 0).unwrap())
+        .earliest()
+        .unwrap_or(local);
+    (
+        start_local.with_timezone(&Utc).to_rfc3339(),
+        now.to_rfc3339(),
+    )
+}
+
+async fn emit_schwab_brokerage_snapshot(
+    app: &tauri::AppHandle,
+    api: &Schwab,
+    account_id: &str,
+    environment_generation: u64,
+) -> Result<(), AppError> {
+    let snapshot = api.account_snapshot(account_id).await?;
+    let (from, to) = schwab_today_range();
+    let orders = api.orders(account_id, &from, &to).await?.orders;
+    let _ = app.emit("schwab-account-snapshot", snapshot.clone());
+    let _ = app.emit(
+        "positions-snapshot",
+        PositionsSnapshotEvent {
+            provider: MarketDataProvider::Schwab,
+            account_id: account_id.into(),
+            environment_generation,
+            positions: snapshot.positions,
+        },
+    );
+    let _ = app.emit(
+        "orders-snapshot",
+        OrdersSnapshotEvent {
+            provider: MarketDataProvider::Schwab,
+            account_id: account_id.into(),
+            environment_generation,
+            orders,
+        },
+    );
+    for channel in ["positions", "orders"] {
+        let _ = app.emit(
+            "brokerage-stream-state",
+            BrokerageStreamStateEvent {
+                provider: MarketDataProvider::Schwab,
+                account_id: account_id.into(),
+                environment_generation,
+                channel: channel.into(),
+                state: "streaming".into(),
+                message: None,
+            },
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn start_schwab_brokerage_stream(
+    app: tauri::AppHandle,
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<(), AppError> {
+    if let Some(task) = state.schwab_brokerage_stream.lock().await.take() {
+        task.abort();
+    }
+    let _ = state.schwab.accounts().await?;
+    state.schwab_streamer.set_account_activity(true).await;
+    let api = state.schwab.clone();
+    let streamer = state.schwab_streamer.clone();
+    let generation = state.safety.lifecycle.generation();
+    let task = tauri::async_runtime::spawn(async move {
+        let mut receiver = streamer.subscribe();
+        let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(30));
+        watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let debounce = tokio::time::sleep(std::time::Duration::from_secs(31_536_000));
+        let settlement = tokio::time::sleep(std::time::Duration::from_secs(31_536_000));
+        tokio::pin!(debounce, settlement);
+        let mut debounce_pending = false;
+        let mut settlement_pending = false;
+        loop {
+            tokio::select! {
+                _ = watchdog.tick() => {
+                    if let Err(error) = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await {
+                        for channel in ["positions", "orders"] {
+                            let _ = app.emit("brokerage-stream-state", BrokerageStreamStateEvent {
+                                provider: MarketDataProvider::Schwab,
+                                account_id: account_id.clone(), environment_generation: generation,
+                                channel: channel.into(), state: "stale".into(), message: Some(error.to_string()),
+                            });
+                        }
+                        }
+                    }
+                _ = &mut debounce, if debounce_pending => {
+                    debounce_pending = false;
+                    if let Err(error) = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await {
+                        for channel in ["positions", "orders"] {
+                            let _ = app.emit("brokerage-stream-state", BrokerageStreamStateEvent {
+                                provider: MarketDataProvider::Schwab,
+                                account_id: account_id.clone(), environment_generation: generation,
+                                channel: channel.into(), state: "stale".into(), message: Some(error.to_string()),
+                            });
+                        }
+                    }
+                }
+                _ = &mut settlement, if settlement_pending => {
+                    settlement_pending = false;
+                    let _ = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await;
+                }
+                event = receiver.recv() => match event {
+                    Ok(SchwabStreamEvent::AccountActivity { sequence, account_number, message_type, message_data }) => {
+                        let _activity_metadata = (sequence, message_type.len(), message_data.len());
+                        if api.account_hash_for_number(&account_number).await.as_deref() != Some(account_id.as_str()) { continue; }
+                        debounce.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_millis(350));
+                        settlement.as_mut().reset(tokio::time::Instant::now() + std::time::Duration::from_millis(2_850));
+                        debounce_pending = true;
+                        settlement_pending = true;
+                    }
+                    Ok(SchwabStreamEvent::AccountActivityState { state, message }) => {
+                        let mapped = if state == "rest-only" { "disconnected" } else { state.as_str() };
+                        if state == "streaming" {
+                            let _ = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await;
+                        }
+                        for channel in ["positions", "orders"] {
+                            let _ = app.emit("brokerage-stream-state", BrokerageStreamStateEvent {
+                                provider: MarketDataProvider::Schwab,
+                                account_id: account_id.clone(), environment_generation: generation,
+                                channel: channel.into(), state: mapped.into(), message: message.clone(),
+                            });
+                        }
+                    }
+                    Ok(SchwabStreamEvent::State { state, message }) => {
+                        let mapped = if state == "streaming" { "streaming" } else { state.as_str() };
+                        if state == "streaming" {
+                            let _ = emit_schwab_brokerage_snapshot(&app, &api, &account_id, generation).await;
+                        }
+                        for channel in ["positions", "orders"] {
+                            let _ = app.emit("brokerage-stream-state", BrokerageStreamStateEvent {
+                                provider: MarketDataProvider::Schwab,
+                                account_id: account_id.clone(), environment_generation: generation,
+                                channel: channel.into(), state: mapped.into(), message: message.clone(),
+                            });
+                        }
+                    }
+                    Err(broadcast_error) => {
+                        if matches!(broadcast_error, tokio::sync::broadcast::error::RecvError::Closed) { break; }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    *state.schwab_brokerage_stream.lock().await = Some(task);
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_schwab_brokerage_stream(state: State<'_, NativeState>) -> Result<(), AppError> {
+    if let Some(task) = state.schwab_brokerage_stream.lock().await.take() {
+        task.abort();
+    }
+    state.schwab_streamer.set_account_activity(false).await;
+    Ok(())
+}
+
 async fn run_brokerage_stream(
     app: tauri::AppHandle,
     api: TradeStation,
@@ -1402,6 +1599,7 @@ async fn run_brokerage_stream(
                                     let _ = app.emit(
                                         "positions-snapshot",
                                         PositionsSnapshotEvent {
+                                            provider: MarketDataProvider::Tradestation,
                                             account_id: account_id.clone(),
                                             environment_generation,
                                             positions,
@@ -1430,6 +1628,7 @@ async fn run_brokerage_stream(
                                     let _ = app.emit(
                                         "orders-snapshot",
                                         OrdersSnapshotEvent {
+                                            provider: MarketDataProvider::Tradestation,
                                             account_id: account_id.clone(),
                                             environment_generation,
                                             orders,
@@ -1470,6 +1669,7 @@ async fn run_brokerage_stream(
                                 let _ = app.emit(
                                     "position-update",
                                     PositionUpdateEvent {
+                                        provider: MarketDataProvider::Tradestation,
                                         account_id: account_id.clone(),
                                         environment_generation,
                                         position,
@@ -1517,6 +1717,7 @@ async fn run_brokerage_stream(
                                 let _ = app.emit(
                                     "order-stream-update",
                                     OrderStreamUpdateEvent {
+                                        provider: MarketDataProvider::Tradestation,
                                         account_id: account_id.clone(),
                                         environment_generation,
                                         order,
@@ -1541,6 +1742,7 @@ async fn run_brokerage_stream(
                         let _ = app.emit(
                             "positions-snapshot",
                             PositionsSnapshotEvent {
+                                provider: MarketDataProvider::Tradestation,
                                 account_id: account_id.clone(),
                                 environment_generation,
                                 positions,
@@ -1570,6 +1772,7 @@ async fn run_brokerage_stream(
                         let _ = app.emit(
                             "orders-snapshot",
                             OrdersSnapshotEvent {
+                                provider: MarketDataProvider::Tradestation,
                                 account_id: account_id.clone(),
                                 environment_generation,
                                 orders,
@@ -1687,6 +1890,7 @@ fn emit_brokerage_stream_state(
     let _ = app.emit(
         "brokerage-stream-state",
         BrokerageStreamStateEvent {
+            provider: MarketDataProvider::Tradestation,
             account_id: account_id.into(),
             environment_generation,
             channel: channel.into(),
@@ -5696,6 +5900,7 @@ pub fn run() {
                 quote_provider_tasks: tokio::sync::Mutex::new(HashMap::new()),
                 option_streams: tokio::sync::Mutex::new(HashMap::new()),
                 brokerage_streams: tokio::sync::Mutex::new(Vec::new()),
+                schwab_brokerage_stream: tokio::sync::Mutex::new(None),
                 preference_realtime: tokio::sync::Mutex::new(None),
             });
             tauri::async_runtime::spawn(async move {
@@ -5716,6 +5921,9 @@ pub fn run() {
             logout_schwab,
             set_environment,
             get_accounts,
+            get_schwab_accounts,
+            get_schwab_account_snapshot,
+            get_schwab_orders,
             search_symbols,
             get_symbol_details,
             get_future_contracts,
@@ -5736,6 +5944,8 @@ pub fn run() {
             stop_option_stream,
             start_brokerage_stream,
             stop_brokerage_stream,
+            start_schwab_brokerage_stream,
+            stop_schwab_brokerage_stream,
             get_positions,
             get_orders,
             get_balances,
@@ -6136,6 +6346,7 @@ mod stream_tests {
         .unwrap();
         let intent = safety::load_intent(&path, "restart-1").unwrap().unwrap();
         let broker_order = OrderUpdate {
+            provider: MarketDataProvider::Tradestation,
             id: "91234".into(),
             symbol: "MESZ26".into(),
             side: "Buy".into(),
@@ -6159,6 +6370,9 @@ mod stream_tests {
             open_or_close: Some("Open".into()),
             group_name: None,
             related_orders: vec![],
+            broker_order_id: None,
+            leg_id: None,
+            asset_type: Some("FUTURE".into()),
         };
         let submit_calls = 0;
         let candidates = place_reconciliation_candidates(&intent, &[broker_order.clone()], None);
@@ -6203,6 +6417,7 @@ mod stream_tests {
             updated_at: Utc::now().to_rfc3339(),
         };
         let order = |id: &str| OrderUpdate {
+            provider: MarketDataProvider::Tradestation,
             id: id.into(),
             symbol: "MESZ26".into(),
             side: "Buy".into(),
@@ -6226,6 +6441,9 @@ mod stream_tests {
             open_or_close: Some("Open".into()),
             group_name: None,
             related_orders: vec![],
+            broker_order_id: None,
+            leg_id: None,
+            asset_type: Some("FUTURE".into()),
         };
         assert_eq!(
             place_reconciliation_candidates(&intent, &[order("1"), order("2")], None).len(),
@@ -6355,7 +6573,11 @@ mod stream_tests {
         let mut live = BTreeMap::from([(200, bar(200, 20.0, true))]);
         let reconciled = reconcile_schwab_bootstrap_minutes(
             &mut live,
-            &[bar(100, 1.0, false), bar(200, 2.0, false), bar(300, 3.0, false)],
+            &[
+                bar(100, 1.0, false),
+                bar(200, 2.0, false),
+                bar(300, 3.0, false),
+            ],
         );
         assert_eq!(
             reconciled

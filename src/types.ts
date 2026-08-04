@@ -140,6 +140,7 @@ export interface GexExpirationSelection {
 }
 
 export interface Account {
+  provider: MarketDataProvider;
   id: string;
   displayId: string;
   accountType: string;
@@ -161,6 +162,8 @@ export interface SymbolMeta {
 }
 
 export interface Position {
+  provider?: MarketDataProvider;
+  accountId?: string;
   id: string;
   symbol: string;
   side: "Long" | "Short";
@@ -176,9 +179,17 @@ export interface Position {
   maintenanceMargin?: number;
   marketValue?: number;
   timestamp?: string;
+  assetType?: string;
+  currentDayPnl?: number;
+  multiplier?: number;
+  underlying?: string;
+  expirationDate?: string;
+  strikePrice?: number;
+  putCall?: "CALL" | "PUT";
 }
 
 export interface OrderUpdate {
+  provider?: MarketDataProvider;
   id: string;
   symbol: string;
   side: "Buy" | "Sell";
@@ -202,6 +213,9 @@ export interface OrderUpdate {
   openOrClose?: "Open" | "Close";
   groupName?: string;
   relatedOrders?: Array<{ orderId: string; relationship: string }>;
+  brokerOrderId?: string;
+  legId?: string;
+  assetType?: string;
 }
 
 export interface ClosePositionResult {
@@ -213,6 +227,7 @@ export interface ClosePositionResult {
 }
 
 export interface AccountBalance {
+  provider?: MarketDataProvider;
   accountId: string;
   accountType: string;
   currency: string;
@@ -235,7 +250,7 @@ export interface BodBalance extends AccountBalance {
 }
 
 export interface HistoricalOrderPage { orders: OrderUpdate[]; nextToken?: string; }
-export interface ActivityNotification { id: string; symbol?: string; time: string; title: string; text: string; level?: "info" | "success" | "warning" | "error"; }
+export interface ActivityNotification { provider?: MarketDataProvider; id: string; symbol?: string; time: string; title: string; text: string; level?: "info" | "success" | "warning" | "error"; }
 
 export interface OrderDraft {
   accountId: string;
@@ -644,9 +659,11 @@ export interface WorkspaceState {
   optionChain: OptionChainPreferences;
   rightPanelOpen: boolean;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
+  bottomBrokerPanel: "combined" | "tradestation" | "schwab";
   bottomPanelOpen: boolean;
   bottomPanelHeight?: number;
   selectedAccountId?: string;
+  selectedSchwabAccountId?: string;
   confirmOrders: boolean;
   entryRules: EntryRules;
   entryRuleAlerts: EntryRuleAlertConfig;
@@ -718,11 +735,22 @@ export interface StreamStateEvent {
   timeframe?: Timeframe;
   generation?: number;
 }
-export interface PositionsSnapshotEvent { accountId: string; environmentGeneration: number; positions: Position[]; }
-export interface PositionUpdateEvent { accountId: string; environmentGeneration: number; position: Position; }
-export interface OrdersSnapshotEvent { accountId: string; environmentGeneration: number; orders: OrderUpdate[]; }
-export interface OrderStreamUpdateEvent { accountId: string; environmentGeneration: number; order: OrderUpdate; }
-export interface BrokerageStreamStateEvent { accountId: string; environmentGeneration: number; channel: "positions" | "orders"; state: StreamConnectionState; message?: string; }
+export interface PositionsSnapshotEvent { provider?: MarketDataProvider; accountId: string; environmentGeneration: number; positions: Position[]; }
+export interface PositionUpdateEvent { provider?: MarketDataProvider; accountId: string; environmentGeneration: number; position: Position; }
+export interface OrdersSnapshotEvent { provider?: MarketDataProvider; accountId: string; environmentGeneration: number; orders: OrderUpdate[]; }
+export interface OrderStreamUpdateEvent { provider?: MarketDataProvider; accountId: string; environmentGeneration: number; order: OrderUpdate; }
+export interface BrokerageStreamStateEvent { provider?: MarketDataProvider; accountId: string; environmentGeneration: number; channel: "positions" | "orders"; state: StreamConnectionState; message?: string; }
+
+export interface SchwabAccountSnapshot {
+  account: Account;
+  positions: Position[];
+  balances: AccountBalance[];
+  beginningOfDayBalances: AccountBalance[];
+  fetchedAt: string;
+  freshness: "fresh" | "stale";
+  connectionState: StreamConnectionState;
+  error?: string;
+}
 
 export type RiskProvenance = "exact" | "inferred" | "unknown";
 export type JournalTradeStatus = "open" | "closed";

@@ -19,7 +19,7 @@ const fallback: WorkspaceState = {
   gexSelections: {},
   activeWorkspace: "charts",
   optionChain: { symbol: "SPY", strikeCount: 20 },
-  watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
+  watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
   settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4 } },
 };
 
@@ -70,10 +70,11 @@ describe("chart workspace", () => {
   });
 
   it("migrates a legacy flat chart workspace", () => {
-    const result = normalizeChartWorkspace({ ...fallback, tabs: undefined, windows: undefined, timeframe: "15m", symbol: fallback.tabs[0].symbol }, fallback);
+    const result = normalizeChartWorkspace({ ...fallback, bottomBrokerPanel: undefined, tabs: undefined, windows: undefined, timeframe: "15m", symbol: fallback.tabs[0].symbol }, fallback);
     expect(result.tabs).toHaveLength(1);
     expect(result.tabs[0].timeframe).toBe("15m");
     expect(result.windows[0].tabIds).toEqual([result.tabs[0].id]);
+    expect(result.bottomBrokerPanel).toBe("combined");
   });
 
   it("normalizes GEX chart and per-symbol expiration preferences", () => {
