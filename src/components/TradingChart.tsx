@@ -10,7 +10,7 @@ import { formatCandleCountdown, formatSchwabDailyCountdown } from "../lib/candle
 import { nearestCandleExtreme, syncedCrosshairPlotTime, type ChartCrosshairUpdate } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
-import { HorizontalRayPrimitive } from "../lib/horizontalRay";
+import { HorizontalRayPrimitive, parseDrawingPriceDraft } from "../lib/horizontalRay";
 import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, formatTradeLineMetrics, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, type OrderProjection, type ProjectedExitField } from "../lib/tradeLines";
 import { NySessionVwapPrimitive } from "../lib/nySessionVwapPrimitive";
 import { buildPointAndFigure, buildRenko, type PointAndFigureColumn, type RenkoBrick } from "../lib/priceBasedCharts";
@@ -117,6 +117,7 @@ const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "
 
 export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, crosshairSyncEnabled, onCrosshairSyncChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const economicEventTooltipId = useId();
+  const drawingPriceErrorId = useId();
   const host = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
@@ -156,6 +157,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const [chartGeneration, setChartGeneration] = useState(0);
   const [drawingMenu, setDrawingMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [drawingAlertDraft, setDrawingAlertDraft] = useState<DrawingAlertConfig | null>(null);
+  const [drawingPriceDraft, setDrawingPriceDraft] = useState("");
+  const [drawingPriceError, setDrawingPriceError] = useState<string | null>(null);
   const [movingDrawingId, setMovingDrawingId] = useState<string | null>(null);
   const [selectedPositionId, setSelectedPositionId] = useState<string | null>(null);
   const [positionCoordinates, setPositionCoordinates] = useState<Record<string, PositionCoordinates>>({});
@@ -550,7 +553,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         const selected = hits.at(-1);
         if (selected) {
           setSelectedPositionId(null);
-          setDrawingMenu({ id: selected.id, x: Math.min(param.point.x + 10, Math.max(8, (host.current?.clientWidth ?? 240) - 190)), y: Math.min(param.point.y + 10, Math.max(8, (host.current?.clientHeight ?? 180) - 170)) });
+          setDrawingMenu({ id: selected.id, x: Math.min(param.point.x + 10, Math.max(8, (host.current?.clientWidth ?? 240) - 190)), y: Math.min(param.point.y + 10, Math.max(8, (host.current?.clientHeight ?? 180) - 274)) });
           return;
         }
       }
@@ -782,6 +785,11 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
 
   useEffect(() => {
     setDrawingAlertDraft(null);
+    const drawing = drawingMenu ? drawings.find((item) => item.id === drawingMenu.id) : undefined;
+    setDrawingPriceDraft(drawing && drawing.kind !== "position" && drawing.points[0]
+      ? drawing.points[0].price.toFixed(pricePrecision(minMove))
+      : "");
+    setDrawingPriceError(null);
   }, [drawingMenu?.id]);
 
   useEffect(() => {
@@ -1040,6 +1048,23 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
   const selectedPosition = selectedDrawing?.kind === "position" ? selectedDrawing : undefined;
   const selectedLineDrawing = selectedDrawing && selectedDrawing.kind !== "position" ? selectedDrawing : undefined;
+  const commitDrawingPrice = () => {
+    if (!selectedLineDrawing?.points[0]) return false;
+    const parsed = parseDrawingPriceDraft(drawingPriceDraft, minMove);
+    if (!parsed.ok) {
+      setDrawingPriceError(parsed.error);
+      return false;
+    }
+    const formattedPrice = parsed.price.toFixed(pricePrecision(minMove));
+    setDrawingPriceDraft(formattedPrice);
+    setDrawingPriceError(null);
+    if (parsed.price !== selectedLineDrawing.points[0].price) {
+      onUpdateDrawing(selectedLineDrawing.id, {
+        points: selectedLineDrawing.points.map((point, index) => index === 0 ? { ...point, price: parsed.price } : point),
+      });
+    }
+    return true;
+  };
   const activeEconomicEventId = pinnedEconomicEventId ?? hoveredEconomicEventId;
   const activeEconomicEvent = economicEventClusters.find((cluster) => cluster.id === activeEconomicEventId);
   const economicEventTooltipLeft = activeEconomicEvent
@@ -1211,6 +1236,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       {selectedLineDrawing && drawingMenu && <>
         <button className="drawing-menu-backdrop" aria-label="Close drawing menu" onClick={() => setDrawingMenu(null)} />
         {!drawingAlertDraft ? <div className="drawing-menu" role="menu" aria-label={`${selectedLineDrawing.kind === "horizontal-ray" ? "Horizontal ray" : "Horizontal line"} options`} style={{ left: drawingMenu.x, top: drawingMenu.y }}>
+          <label className={`drawing-menu-price ${drawingPriceError ? "invalid" : ""}`}><span>Price</span><input type="text" inputMode="decimal" spellCheck={false} disabled={selectedLineDrawing.locked} value={drawingPriceDraft} aria-label="Drawing price" aria-invalid={Boolean(drawingPriceError)} aria-describedby={drawingPriceError ? drawingPriceErrorId : undefined} onChange={(event) => { setDrawingPriceDraft(event.target.value); setDrawingPriceError(null); }} onBlur={commitDrawingPrice} onKeyDown={(event) => { if (event.key !== "Enter") return; event.preventDefault(); event.stopPropagation(); commitDrawingPrice(); }} />{drawingPriceError && <small id={drawingPriceErrorId} role="alert">{drawingPriceError}</small>}</label>
           <label className="drawing-menu-color"><input type="color" value={selectedLineDrawing.color} aria-label="Drawing color" onChange={(event) => onUpdateDrawing(selectedLineDrawing.id, { color: event.target.value })} /><span style={{ background: selectedLineDrawing.color }} />Color</label>
           <label className="drawing-menu-width"><span>Line width</span><select aria-label="Line width" value={selectedLineDrawing.lineWidth ?? 1} onChange={(event) => onUpdateDrawing(selectedLineDrawing.id, { lineWidth: Number(event.target.value) as 1 | 2 | 3 | 4 })}>{[1, 2, 3, 4].map((width) => <option key={width} value={width}>{width}px</option>)}</select></label>
           <button role="menuitem" onClick={() => { prepareAlertAudio(); setDrawingAlertDraft(selectedLineDrawing.alert ? { ...selectedLineDrawing.alert } : defaultDrawingAlert(provider, symbol)); }}>

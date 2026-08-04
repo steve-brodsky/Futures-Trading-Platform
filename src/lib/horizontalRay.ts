@@ -1,5 +1,23 @@
 import type { IChartApi, IPrimitivePaneRenderer, IPrimitivePaneView, ISeriesApi, ISeriesPrimitive, SeriesAttachedParameter, Time } from "lightweight-charts";
 import type { LineDrawing } from "../types";
+import { roundToTick, validateTick } from "./indicators";
+
+export type DrawingPriceDraftResult =
+  | { ok: true; price: number }
+  | { ok: false; error: string };
+
+export function parseDrawingPriceDraft(draft: string, minMove: number): DrawingPriceDraftResult {
+  const text = draft.trim();
+  if (!text) return { ok: false, error: "Enter a price." };
+  const price = Number(text);
+  if (!Number.isFinite(price)) return { ok: false, error: "Enter a valid number." };
+  if (!Number.isFinite(minMove) || minMove <= 0) return { ok: false, error: "Price increment is unavailable." };
+  if (!validateTick(price, minMove)) {
+    const increment = minMove.toFixed(10).replace(/\.?0+$/, "");
+    return { ok: false, error: `Use ${increment} increments.` };
+  }
+  return { ok: true, price: roundToTick(price, minMove) };
+}
 
 export function nearestChartTime(anchor: number, times: number[]): number {
   if (!times.length) return anchor;
