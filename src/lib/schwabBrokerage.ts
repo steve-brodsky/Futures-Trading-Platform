@@ -1,4 +1,4 @@
-import type { OrderUpdate, Position } from "../types";
+import type { OptionContract, OrderUpdate, Position } from "../types";
 
 export function readableBrokerOrderSymbol(order: Pick<OrderUpdate, "symbol" | "assetType">): string {
   if (!(order.assetType ?? "").toUpperCase().includes("OPTION")) return order.symbol;
@@ -34,4 +34,14 @@ export function positionMatchesSchwabChart(position: Position, symbol: string): 
 export function heldOptionsForUnderlying(positions: Position[], underlying: string): Position[] {
   return positions.filter((position) => position.provider === "schwab" && (position.assetType ?? "").toUpperCase().includes("OPTION")
     && position.underlying?.trim().toUpperCase() === underlying.trim().toUpperCase());
+}
+
+export function applySchwabOptionQuote(positions: Position[], contract: Pick<OptionContract, "symbol" | "markPrice" | "bidPrice" | "askPrice" | "multiplier">): Position[] {
+  return positions.map((position) => {
+    if (position.symbol.trim() !== contract.symbol.trim()) return position;
+    const mark = contract.markPrice || (contract.bidPrice + contract.askPrice) / 2;
+    const direction = position.side === "Long" ? 1 : -1;
+    const unrealizedPnl = (mark - position.averagePrice) * direction * position.quantity * (position.multiplier ?? contract.multiplier ?? 100);
+    return { ...position, last: mark, bid: contract.bidPrice, ask: contract.askPrice, unrealizedPnl };
+  });
 }

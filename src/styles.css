@@ -839,9 +839,14 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .connection-actions { display: flex; gap: 8px; margin-bottom: 17px; }
 .connection-actions .primary-button, .connection-actions .secondary-button { width: 100%; margin: 0; }
 .equity-order-disabled { min-height: 250px; display: flex; flex-direction: column; justify-content: center; gap: 7px; padding: 24px 20px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg,rgba(55,213,232,.025),transparent 70%); }
+.equity-order-disabled.has-option-pnl { justify-content: flex-start; }
 .equity-order-disabled > span { color: var(--cyan); font: 650 8px DM Mono, monospace; text-transform: uppercase; letter-spacing: .12em; }
 .equity-order-disabled > strong { color: #e0e6ed; font-size: 13px; font-weight: 600; }
 .equity-order-disabled > p { max-width: 220px; margin: 0; color: #7e8a99; font-size: 9px; line-height: 1.6; }
+.schwab-option-pnl { width: 100%; display: flex; flex-direction: column; gap: 5px; margin-bottom: 9px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.schwab-option-pnl > span { color: #7f8c9d; font: 650 8px DM Mono, monospace; text-transform: uppercase; letter-spacing: .1em; }
+.schwab-option-pnl > strong { font: 650 25px/1.1 DM Mono, monospace; letter-spacing: -.04em; }
+.schwab-option-pnl > small { color: #8794a5; font: 500 8px/1.4 DM Mono, monospace; }
 .entry-rules-builder { margin-top: 0; margin-bottom: 17px; }
 .entry-rules-intro { margin: 0; padding: 13px 0; border-bottom: 1px solid var(--line); color: #8793a3; font-size: 9px; line-height: 1.55; }
 .entry-rules-lock-notice { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 12px; border: 1px solid rgba(240,184,75,.24); border-radius: 5px; color: var(--amber); background: rgba(240,184,75,.055); }

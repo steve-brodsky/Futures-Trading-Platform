@@ -63,7 +63,7 @@ import {
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
 import { minuteTimeframe, normalizeCustomMinuteTimeframes, orderedToolbarTimeframes, parseMinuteTimeframe, removeCustomMinuteTimeframe as removeCustomMinuteTimeframeFromWorkspace, saveCustomMinuteTimeframe, workspaceForPersistence } from "./lib/timeframes";
 import { defaultOptionOrderDraft, optionStreamBudget } from "./lib/optionChain";
-import { combinedCurrencyTotal, positionPnlTotal, readableBrokerOrderSymbol } from "./lib/schwabBrokerage";
+import { applySchwabOptionQuote, combinedCurrencyTotal, heldOptionsForUnderlying, positionPnlTotal, readableBrokerOrderSymbol } from "./lib/schwabBrokerage";
 import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
@@ -203,6 +203,10 @@ function activeProtectionIds(expirations: Map<string, number>, now = Date.now())
 
 function formatPrice(value?: number): string {
   return value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+}
+
+function formatSignedUsd(value: number): string {
+  return `${value >= 0 ? "+" : "-"}$${Math.abs(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function formatRollDate(value: string): string {
@@ -1139,13 +1143,7 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OptionUpdateEvent>("option-update", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
-        setSchwabPositions((current) => current.map((position) => {
-          if (position.symbol.trim() !== payload.contract.symbol.trim()) return position;
-          const mark = payload.contract.markPrice || (payload.contract.bidPrice + payload.contract.askPrice) / 2;
-          const direction = position.side === "Long" ? 1 : -1;
-          const unrealizedPnl = (mark - position.averagePrice) * direction * position.quantity * (position.multiplier ?? payload.contract.multiplier ?? 100);
-          return { ...position, last: mark, bid: payload.contract.bidPrice, ask: payload.contract.askPrice, unrealizedPnl };
-        }));
+        setSchwabPositions((current) => applySchwabOptionQuote(current, payload.contract));
         setGexMarkets((current) => {
           let changed = false;
           const next = { ...current };
@@ -3962,6 +3960,8 @@ function TradingApp() {
   const activeProviderConnected = activeTab.symbol.provider === "schwab" ? schwabAuthenticated : authenticated;
   const providerLabel = activeTab.symbol.provider === "schwab" ? "SCHWAB" : "TRADESTATION";
   const connectionLabel = api.isNative ? (activeProviderConnected ? `${providerLabel} ${market.streamState === "rate-limited" ? "PAUSED" : market.streamState.toUpperCase()}` : `${providerLabel} OFFLINE`) : `${providerLabel} DEMO`;
+  const activeSchwabOptionPositions = activeTab.symbol.provider === "schwab" ? heldOptionsForUnderlying(schwabPositions, activeTab.symbol.symbol) : [];
+  const activeSchwabOptionPnl = activeSchwabOptionPositions.length ? positionPnlTotal(activeSchwabOptionPositions, "unrealizedPnl") : undefined;
   const symbolPickerResults = search.trim() ? searchSuggestions.results : workspace.recentSymbols;
   const closeSymbolPicker = () => {
     setSearchOpen(false);
@@ -4287,7 +4287,14 @@ function TradingApp() {
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>
         {workspace.rightPanelOpen && <div id="order-panel-content" className="right-panel-content">
           {activeTab.symbol.provider === "schwab"
-            ? <div className="equity-order-disabled"><span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p></div>
+            ? <div className={`equity-order-disabled ${activeSchwabOptionPositions.length ? "has-option-pnl" : ""}`}>
+              {activeSchwabOptionPnl != null && <div className="schwab-option-pnl">
+                <span>Live option P&amp;L</span>
+                <strong className={activeSchwabOptionPnl >= 0 ? "positive" : "negative"}>{formatSignedUsd(activeSchwabOptionPnl)}</strong>
+                <small>{activeTab.symbol.symbol} · {activeSchwabOptionPositions.length} open option {activeSchwabOptionPositions.length === 1 ? "position" : "positions"}</small>
+              </div>}
+              <span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p>
+            </div>
             : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} rollStatus={activeRollStatus} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onUseNextContract={useNextActiveContract} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}
         </div>}
       </aside>}
