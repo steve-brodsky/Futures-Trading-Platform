@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     path::Path,
     sync::{
@@ -24,6 +24,12 @@ static PREFERENCES_SYNCING: AtomicBool = AtomicBool::new(false);
 const DEFAULT_COMMISSION_PER_CONTRACT_SIDE: f64 = 0.40;
 const DEFAULT_SCHWAB_OPTION_FEE_PER_CONTRACT_SIDE: f64 = 0.65;
 const DEFAULT_SUPABASE_TOKEN_LIFETIME_SECONDS: u64 = 3600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalCloudSchema {
+    LegacyFutures,
+    Extended,
+}
 
 #[derive(Clone)]
 struct CachedAccessToken {
@@ -2534,6 +2540,89 @@ async fn remote_screenshot(
         .next())
 }
 
+fn trade_upload_rows(
+    db: &Connection,
+    user_id: &str,
+    trade_id: Option<&str>,
+) -> Result<Vec<Value>, AppError> {
+    let mut stmt = db.prepare("SELECT id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,updated_at,provider,asset_class,strategy,underlying FROM journal_trades WHERE (?1 IS NULL OR id=?1)")?;
+    let rows = stmt.query_map(params![trade_id], |row| Ok(json!({
+        "id":row.get::<_,String>(0)?,"user_id":user_id,"environment":row.get::<_,String>(1)?,"account_id":row.get::<_,String>(2)?,
+        "symbol":row.get::<_,String>(3)?,"direction":row.get::<_,String>(4)?,"status":row.get::<_,String>(5)?,"opened_at":row.get::<_,String>(6)?,
+        "closed_at":row.get::<_,Option<String>>(7)?,"entry_quantity":row.get::<_,f64>(8)?,"exit_quantity":row.get::<_,f64>(9)?,
+        "average_entry":row.get::<_,f64>(10)?,"average_exit":row.get::<_,Option<f64>>(11)?,"original_stop":row.get::<_,Option<f64>>(12)?,
+        "original_target":row.get::<_,Option<f64>>(13)?,"planned_risk":row.get::<_,Option<f64>>(14)?,"deployed_risk":row.get::<_,Option<f64>>(15)?,
+        "point_value":row.get::<_,Option<f64>>(16)?,"gross_pnl":row.get::<_,f64>(17)?,"fees":row.get::<_,f64>(18)?,"net_pnl":row.get::<_,f64>(19)?,
+        "r_multiple":row.get::<_,Option<f64>>(20)?,"risk_provenance":row.get::<_,String>(21)?,"updated_at":row.get::<_,String>(22)?,
+        "provider":row.get::<_,String>(23)?,"asset_class":row.get::<_,String>(24)?,"strategy":row.get::<_,String>(25)?,"underlying":row.get::<_,Option<String>>(26)?
+    })))?.collect::<Result<Vec<_>,_>>()?;
+    Ok(rows)
+}
+
+fn legacy_futures_rows(mut rows: Vec<Value>, extended_fields: &[&str]) -> Vec<Value> {
+    rows.retain(|row| {
+        row.get("provider")
+            .and_then(Value::as_str)
+            .unwrap_or("tradestation")
+            == "tradestation"
+    });
+    for row in &mut rows {
+        if let Some(object) = row.as_object_mut() {
+            for field in extended_fields {
+                object.remove(*field);
+            }
+        }
+    }
+    rows
+}
+
+fn missing_extended_journal_schema(error: &AppError) -> bool {
+    let message = error.to_string();
+    message.contains("PGRST204")
+        && ["provider", "asset_class", "strategy", "underlying"]
+            .iter()
+            .any(|field| message.contains(field))
+}
+
+async fn upload_screenshot_parent_trade(
+    client: &reqwest::Client,
+    cfg: &CloudConfig,
+    token: &str,
+    rows: Vec<Value>,
+) -> Result<(), AppError> {
+    match upload(
+        client,
+        cfg,
+        token,
+        "journal_trades",
+        "user_id,id",
+        rows.clone(),
+        false,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if missing_extended_journal_schema(&error) => {
+            let legacy =
+                legacy_futures_rows(rows, &["provider", "asset_class", "strategy", "underlying"]);
+            if legacy.is_empty() {
+                return Err(error);
+            }
+            upload(
+                client,
+                cfg,
+                token,
+                "journal_trades",
+                "user_id,id",
+                legacy,
+                false,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn validate_screenshot(input: &JournalScreenshotInput) -> Result<Vec<u8>, AppError> {
     if DateTime::parse_from_rfc3339(&input.captured_at).is_err() {
         return Err(AppError::Validation(
@@ -2620,6 +2709,15 @@ pub async fn save_entry_screenshot(
         }
         return cache_screenshot_metadata(path, &remote);
     }
+    let trade_rows = trade_upload_rows(&Connection::open(path)?, &cfg.user_id, Some(&trade_id))?;
+    if trade_rows.len() != 1 {
+        return Err(AppError::Api(
+            "Entry chart trade is not available for cloud upload".into(),
+        ));
+    }
+    // Screenshot metadata has a foreign key to journal_trades. Upload the
+    // resolved parent explicitly so capture does not race the background sync.
+    upload_screenshot_parent_trade(&client, &cfg, &token, trade_rows).await?;
     let object_path = screenshot_object_path(&cfg.user_id, &trade_id);
     let response = client
         .post(format!(
@@ -3463,6 +3561,7 @@ async fn pull_cloud(
         Vec<RemoteAnnotationRow>,
         Vec<RemoteEventRow>,
         Vec<RemoteScreenshotRow>,
+        JournalCloudSchema,
     ),
     AppError,
 > {
@@ -3502,9 +3601,22 @@ async fn pull_cloud(
         .headers(headers(cfg, token, false)?)
         .send()
         .await?;
-    if !option_legs_response.status().is_success() {
-        return Err(AppError::Api(format!("Supabase option-leg download failed: {}. Apply the latest journal migration and retry sync", option_legs_response.text().await?)));
-    }
+    let option_legs_status = option_legs_response.status();
+    let option_legs_body = option_legs_response.text().await?;
+    let (option_legs, cloud_schema) = if option_legs_status.is_success() {
+        (
+            serde_json::from_str::<Vec<RemoteOptionLegRow>>(&option_legs_body)?,
+            JournalCloudSchema::Extended,
+        )
+    } else if option_legs_body.contains("journal_option_legs")
+        && (option_legs_status == reqwest::StatusCode::NOT_FOUND
+            || option_legs_body.contains("PGRST205")
+            || option_legs_body.contains("schema cache"))
+    {
+        (Vec::new(), JournalCloudSchema::LegacyFutures)
+    } else {
+        return Err(AppError::Api(format!("Supabase option-leg download failed: {option_legs_body}. Apply the latest journal migration and retry sync")));
+    };
     let mut events_request = client
         .get(format!("{}/rest/v1/journal_events", cfg.project_url))
         .headers(headers(cfg, token, false)?)
@@ -3536,10 +3648,11 @@ async fn pull_cloud(
     }
     Ok((
         trades_response.json().await?,
-        option_legs_response.json().await?,
+        option_legs,
         annotations_response.json().await?,
         events_response.json().await?,
         screenshots_response.json().await?,
+        cloud_schema,
     ))
 }
 
@@ -3645,8 +3758,14 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
     let user_id = cfg.user_id.clone();
     repair_mirrored_duplicate_trades(path)?;
     delete_tombstoned_trades(&client, &cfg, &token, path).await?;
-    let (remote_trades, remote_option_legs, remote_annotations, remote_events, remote_screenshots) =
-        pull_cloud(&client, &cfg, &token).await?;
+    let (
+        remote_trades,
+        remote_option_legs,
+        remote_annotations,
+        remote_events,
+        remote_screenshots,
+        cloud_schema,
+    ) = pull_cloud(&client, &cfg, &token).await?;
     merge_cloud(
         path,
         remote_trades,
@@ -3657,7 +3776,7 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
     )?;
     repair_mirrored_duplicate_trades(path)?;
     delete_tombstoned_trades(&client, &cfg, &token, path).await?;
-    let (events, option_legs, annotations, trades) = {
+    let (mut events, mut option_legs, mut annotations, mut trades) = {
         let db = Connection::open(path)?;
         let events = {
             let mut stmt = db.prepare("SELECT id,event_key,trade_id,environment,account_id,broker_order_id,event_type,occurred_at,source,status,old_price,new_price,quantity,price,note,provider,broker_leg_id,option_symbol FROM journal_events WHERE synced=0")?;
@@ -3690,21 +3809,30 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
             })))?.collect::<Result<Vec<_>,_>>()?;
             rows
         };
-        let trades = {
-            let mut stmt = db.prepare("SELECT id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,updated_at,provider,asset_class,strategy,underlying FROM journal_trades")?;
-            let rows = stmt.query_map([], |row| Ok(json!({
-                "id":row.get::<_,String>(0)?,"user_id":user_id,"environment":row.get::<_,String>(1)?,"account_id":row.get::<_,String>(2)?,
-                "symbol":row.get::<_,String>(3)?,"direction":row.get::<_,String>(4)?,"status":row.get::<_,String>(5)?,"opened_at":row.get::<_,String>(6)?,
-                "closed_at":row.get::<_,Option<String>>(7)?,"entry_quantity":row.get::<_,f64>(8)?,"exit_quantity":row.get::<_,f64>(9)?,
-                "average_entry":row.get::<_,f64>(10)?,"average_exit":row.get::<_,Option<f64>>(11)?,"original_stop":row.get::<_,Option<f64>>(12)?,
-                "original_target":row.get::<_,Option<f64>>(13)?,"planned_risk":row.get::<_,Option<f64>>(14)?,"deployed_risk":row.get::<_,Option<f64>>(15)?,
-                "point_value":row.get::<_,Option<f64>>(16)?,"gross_pnl":row.get::<_,f64>(17)?,"fees":row.get::<_,f64>(18)?,"net_pnl":row.get::<_,f64>(19)?,
-                "r_multiple":row.get::<_,Option<f64>>(20)?,"risk_provenance":row.get::<_,String>(21)?,"updated_at":row.get::<_,String>(22)?,
-                "provider":row.get::<_,String>(23)?,"asset_class":row.get::<_,String>(24)?,"strategy":row.get::<_,String>(25)?,"underlying":row.get::<_,Option<String>>(26)?
-            })))?.collect::<Result<Vec<_>,_>>()?;
-            rows
-        };
+        let trades = trade_upload_rows(&db, &user_id, None)?;
         (events, option_legs, annotations, trades)
+    };
+    let deferred_extended_events = if cloud_schema == JournalCloudSchema::LegacyFutures {
+        let futures_trade_ids: HashSet<String> = trades
+            .iter()
+            .filter(|row| row.get("provider").and_then(Value::as_str) == Some("tradestation"))
+            .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let before = events.len();
+        trades = legacy_futures_rows(
+            trades,
+            &["provider", "asset_class", "strategy", "underlying"],
+        );
+        events = legacy_futures_rows(events, &["provider", "broker_leg_id", "option_symbol"]);
+        annotations.retain(|row| {
+            row.get("trade_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| futures_trade_ids.contains(id))
+        });
+        option_legs.clear();
+        before - events.len()
+    } else {
+        0
     };
     let pending = events.len();
     let uploaded_event_ids: Vec<String> = events
@@ -3724,6 +3852,18 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
         })
         .collect();
     upload(&client,&cfg,&token,"journal_settings","user_id",vec![json!({"user_id":user_id,"timezone":"America/New_York","backfill_start":cfg.backfill_start,"record_from":cfg.record_from,"updated_at":cfg.updated_at})],false).await?;
+    // Parent campaigns must exist before option legs, annotations, or
+    // screenshot metadata can reference them in Supabase.
+    upload(
+        &client,
+        &cfg,
+        &token,
+        "journal_trades",
+        "user_id,id",
+        trades,
+        false,
+    )
+    .await?;
     upload(
         &client,
         &cfg,
@@ -3741,16 +3881,6 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
         "journal_option_legs",
         "user_id,id",
         option_legs,
-        false,
-    )
-    .await?;
-    upload(
-        &client,
-        &cfg,
-        &token,
-        "journal_trades",
-        "user_id,id",
-        trades,
         false,
     )
     .await?;
@@ -3791,7 +3921,11 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
         state: "synced".into(),
         pending_events: 0,
         last_synced_at: Some(synced),
-        message: Some(format!("Uploaded {pending} new journal events")),
+        message: Some(if deferred_extended_events > 0 {
+            format!("Uploaded {pending} TradeStation journal events; {deferred_extended_events} Schwab events remain local until the latest journal migration is applied")
+        } else {
+            format!("Uploaded {pending} new journal events")
+        }),
     })
 }
 
@@ -5402,6 +5536,53 @@ mod tests {
             .contains("not ready"));
         drop(db);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn entry_chart_parent_upload_uses_the_resolved_trade_only() {
+        let path = temp();
+        init(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
+        db.execute("INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,entry_quantity,exit_quantity,average_entry,gross_pnl,fees,net_pnl,risk_provenance,updated_at) VALUES('trade-1','sim','A1','MESU26','Long','open','2026-07-15T20:00:00Z',1,0,6250,0,.4,-.4,'exact','2026-07-15T20:00:00Z')", []).unwrap();
+        db.execute("INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,entry_quantity,exit_quantity,average_entry,gross_pnl,fees,net_pnl,risk_provenance,updated_at) VALUES('trade-2','sim','A1','NQU26','Short','open','2026-07-15T20:01:00Z',1,0,23000,0,.4,-.4,'exact','2026-07-15T20:01:00Z')", []).unwrap();
+
+        let rows = trade_upload_rows(&db, "user-1", Some("trade-1")).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "trade-1");
+        assert_eq!(rows[0]["user_id"], "user-1");
+        assert_eq!(rows[0]["provider"], "tradestation");
+        assert_eq!(rows[0]["asset_class"], "futures");
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_cloud_rows_keep_futures_and_remove_extended_columns() {
+        let rows = vec![
+            json!({"id":"future-1","provider":"tradestation","asset_class":"futures","strategy":"futures-directional","underlying":null}),
+            json!({"id":"option-1","provider":"schwab","asset_class":"option","strategy":"long-strangle","underlying":"SPY"}),
+        ];
+
+        let legacy =
+            legacy_futures_rows(rows, &["provider", "asset_class", "strategy", "underlying"]);
+
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0]["id"], "future-1");
+        assert!(legacy[0].get("provider").is_none());
+        assert!(legacy[0].get("asset_class").is_none());
+        assert!(legacy[0].get("strategy").is_none());
+        assert!(legacy[0].get("underlying").is_none());
+    }
+
+    #[test]
+    fn recognizes_only_missing_extended_columns_as_a_legacy_schema() {
+        let missing = AppError::Api("Supabase journal_trades sync failed (400 Bad Request): {\"code\":\"PGRST204\",\"message\":\"Could not find the 'asset_class' column\"}".into());
+        let unrelated =
+            AppError::Api("Supabase journal_trades sync failed (500): unavailable".into());
+
+        assert!(missing_extended_journal_schema(&missing));
+        assert!(!missing_extended_journal_schema(&unrelated));
     }
 
     #[test]
