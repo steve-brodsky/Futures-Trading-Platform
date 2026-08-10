@@ -51,6 +51,44 @@ export interface TradeLineMetrics {
   rMultiple: number | null;
 }
 
+export function layoutTradeLineLabelTops(
+  lines: Array<Pick<TradeLineModel, "id" | "kind">>,
+  baseTops: Record<string, number>,
+  chartHeight: number,
+  labelHeight: number,
+): Record<string, number> {
+  const visible = lines
+    .map((line, index) => ({ ...line, index, baseTop: baseTops[line.id] }))
+    .filter((line) => Number.isFinite(line.baseTop))
+    .sort((left, right) => left.baseTop - right.baseTop || left.index - right.index);
+  if (!visible.length || chartHeight <= 0 || labelHeight <= 0) return {};
+
+  const spacing = labelHeight + 2;
+  const minimumTop = labelHeight / 2 + 2;
+  const maximumTop = Math.max(minimumTop, chartHeight - labelHeight / 2 - 2);
+  const clusters: typeof visible[] = [];
+  visible.forEach((line) => {
+    const cluster = clusters.at(-1);
+    if (!cluster || line.baseTop - cluster.at(-1)!.baseTop >= spacing) clusters.push([line]);
+    else cluster.push(line);
+  });
+
+  const result: Record<string, number> = {};
+  clusters.forEach((cluster) => {
+    const ordered = [...cluster].sort((left, right) => {
+      const leftPriority = left.kind === "position" ? 0 : 1;
+      const rightPriority = right.kind === "position" ? 0 : 1;
+      return leftPriority - rightPriority || left.baseTop - right.baseTop || left.index - right.index;
+    });
+    const position = ordered.find((line) => line.kind === "position");
+    const preferredStart = position?.baseTop ?? ordered[0].baseTop;
+    const maximumStart = Math.max(minimumTop, maximumTop - (ordered.length - 1) * spacing);
+    const start = Math.max(minimumTop, Math.min(maximumStart, preferredStart));
+    ordered.forEach((line, index) => { result[line.id] = start + index * spacing; });
+  });
+  return result;
+}
+
 const dollarFormatter = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,

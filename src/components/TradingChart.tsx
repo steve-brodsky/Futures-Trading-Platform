@@ -11,7 +11,7 @@ import { nearestCandleExtreme, syncedCrosshairPlotTime, type ChartCrosshairUpdat
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
 import { SessionShading } from "../lib/sessionShading";
 import { HorizontalRayPrimitive, parseDrawingPriceDraft } from "../lib/horizontalRay";
-import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, formatTradeLineMetrics, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, type OrderProjection, type ProjectedExitField } from "../lib/tradeLines";
+import { buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, formatTradeLineMetrics, layoutTradeLineLabelTops, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, type OrderProjection, type ProjectedExitField } from "../lib/tradeLines";
 import { NySessionVwapPrimitive } from "../lib/nySessionVwapPrimitive";
 import { buildPointAndFigure, buildRenko, type PointAndFigureColumn, type RenkoBrick } from "../lib/priceBasedCharts";
 import { PointAndFigureSeries, type PointAndFigureSeriesData } from "../lib/pointAndFigureSeries";
@@ -116,6 +116,20 @@ type PositionDragKind = "body" | "entry" | "stop" | "target" | "start" | "end";
 
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+function bringTradePriceLineToFront(price: ISeriesApi<any>, lines: Map<string, IPriceLine>, lineId: string) {
+  const line = lines.get(lineId);
+  if (!line) return;
+  const options = line.options();
+  price.removePriceLine(line);
+  lines.set(lineId, price.createPriceLine(options));
+}
+
+function keepPositionPriceLinesOnTop(price: ISeriesApi<any>, lines: Map<string, IPriceLine>) {
+  [...lines.keys()].filter((lineId) => lineId.startsWith("position:")).forEach((lineId) => {
+    bringTradePriceLineToFront(price, lines, lineId);
+  });
+}
+
 export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, riskBaselines, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, crosshairSyncEnabled, onCrosshairSyncChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const economicEventTooltipId = useId();
   const drawingPriceErrorId = useId();
@@ -210,6 +224,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         : line.price,
   ]));
   const tradeLineMetrics = buildTradeLineMetrics(tradeLines.map((line) => ({ ...line, price: displayPrices.get(line.id) ?? line.price })), pointValue, currentPrice, projectedEntryPrice, riskBaselines);
+  const tradeLabelHeight = chartLabelSettings.fontSize + 14;
+  const laidOutTradeLineTops = layoutTradeLineLabelTops(tradeLines, tradeLineTops, host.current?.clientHeight ?? 0, tradeLabelHeight);
 
   applySyncedCrosshairRef.current = () => {
     const requested = syncedCrosshairRef.current;
@@ -274,9 +290,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       context.textBaseline = "middle";
       context.fillText(`${symbol}${tradeSymbol && tradeSymbol !== symbol ? `  ·  ${tradeSymbol}` : ""}  ·  ${timeframe}  ·  ${exchange}`, Math.round(13 * scaleX), headerHeight / 2);
 
-      required.forEach((line) => {
+      [...required].sort((left, right) => Number(left?.kind === "position") - Number(right?.kind === "position")).forEach((line) => {
         if (!line) return;
-        const top = (tradeLineTops[line.id] ?? 0) * scaleY;
+        const top = (laidOutTradeLineTops[line.id] ?? tradeLineTops[line.id] ?? 0) * scaleY;
         const priceValue = displayPrices.get(line.id) ?? line.price;
         const metric = tradeLineMetrics.get(line.id);
         const metricText = metric ? formatTradeLineMetrics(metric, chartLabelSettings) : null;
@@ -737,6 +753,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       if (existing) existing.applyOptions(options);
       else tradeLineRefs.current.set(line.id, price.createPriceLine(options));
     });
+    keepPositionPriceLinesOnTop(price, tradeLineRefs.current);
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   }, [orders, positions, tradeSymbol, orderProjection?.takeProfit, orderProjection?.stopLoss, chartGeneration]);
 
@@ -1039,11 +1056,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
 
   const promoteTradeLine = (lineId: string) => {
     const price = priceRef.current;
-    const line = tradeLineRefs.current.get(lineId);
-    if (!price || !line) return;
-    const options = line.options();
-    price.removePriceLine(line);
-    tradeLineRefs.current.set(lineId, price.createPriceLine(options));
+    if (!price || !tradeLineRefs.current.has(lineId)) return;
+    bringTradePriceLineToFront(price, tradeLineRefs.current, lineId);
+    keepPositionPriceLinesOnTop(price, tradeLineRefs.current);
   };
 
   const selectedDrawing = drawingMenu ? drawings.find((drawing) => drawing.id === drawingMenu.id) : undefined;
@@ -1192,15 +1207,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         aria-label={`Current price ${liveBar.close.toFixed(pricePrecision(minMove))}${candleCountdown ? `; candle closes in ${candleCountdown}` : ""}`}
       ><strong>{liveBar.close.toFixed(pricePrecision(minMove))}</strong>{!isSynthetic && <span>{candleCountdown}</span>}</div>}
       {tradeLines.map((line) => {
-        const baseTop = tradeLineTops[line.id];
-        if (baseTop == null) return null;
-        const lineIndex = tradeLines.findIndex((candidate) => candidate.id === line.id);
-        const stackIndex = tradeLines.slice(0, lineIndex).filter((candidate) => candidate.price === line.price).length;
-        const chartHeight = host.current?.clientHeight ?? 0;
-        const labelHeight = chartLabelSettings.fontSize + 14;
-        const stackDirection = baseTop > chartHeight / 2 ? -1 : 1;
-        const rawTop = baseTop + Math.max(0, stackIndex) * (chartLabelSettings.fontSize + 9) * stackDirection;
-        const top = Math.max(labelHeight / 2 + 2, Math.min(chartHeight - labelHeight / 2 - 2, rawTop));
+        const top = laidOutTradeLineTops[line.id];
+        if (top == null) return null;
         const projectionField: ProjectedExitField | undefined = line.kind === "projected-take-profit" ? "takeProfit"
           : line.kind === "projected-stop-loss" ? "stopLoss" : undefined;
         const pending = line.order && replacingOrderIds.has(line.order.id);

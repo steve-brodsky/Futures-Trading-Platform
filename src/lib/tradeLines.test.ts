@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { JournalRiskBaseline, OrderUpdate, Position } from "../types";
-import { applyProjectedExitEdit, buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, flattenOrderDraft, formatTradeLineMetrics, isPositionExit, recalculateOrderProjectionAtR, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, withOrderPrice, type OrderProjection } from "./tradeLines";
+import { applyProjectedExitEdit, buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, flattenOrderDraft, formatTradeLineMetrics, isPositionExit, layoutTradeLineLabelTops, recalculateOrderProjectionAtR, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, withOrderPrice, type OrderProjection } from "./tradeLines";
 
 const position: Position = { id: "p1", symbol: "MES", side: "Long", quantity: 2, averagePrice: 6250, last: 6251, unrealizedPnl: 10 };
 const baseOrder: OrderUpdate = { id: "o1", symbol: "MES", side: "Sell", type: "Limit", quantity: 2, price: 6260, status: "Working", timestamp: "", openOrClose: "Close", groupName: "OCO 1" };
@@ -21,6 +21,35 @@ describe("chart trade lines", () => {
       ["take-profit", true, "#16c79a"],
       ["stop-loss", true, "#ef466f"],
     ]);
+  });
+
+  it("lays out colliding labels with the position above protective orders", () => {
+    const lines = buildTradeLines("MES", [position], [
+      { ...baseOrder, price: position.averagePrice },
+      { ...baseOrder, id: "stop", type: "StopMarket", price: undefined, stopPrice: position.averagePrice },
+    ]);
+    const baseTops = Object.fromEntries(lines.map((line) => [line.id, 100]));
+
+    expect(layoutTradeLineLabelTops(lines, baseTops, 500, 25)).toEqual({
+      "position:p1": 100,
+      "order:o1": 127,
+      "order:stop": 154,
+    });
+  });
+
+  it("keeps position-first collision stacks inside the chart and leaves separated labels anchored", () => {
+    const lines = buildTradeLines("MES", [position], [
+      { ...baseOrder, price: position.averagePrice },
+      { ...baseOrder, id: "stop", type: "StopMarket", price: undefined, stopPrice: position.averagePrice },
+    ]);
+    expect(layoutTradeLineLabelTops(lines.slice(0, 2), { "position:p1": 490, "order:o1": 490 }, 500, 25)).toEqual({
+      "position:p1": 458.5,
+      "order:o1": 485.5,
+    });
+    expect(layoutTradeLineLabelTops(lines.slice(0, 2), { "position:p1": 100, "order:o1": 200 }, 500, 25)).toEqual({
+      "position:p1": 100,
+      "order:o1": 200,
+    });
   });
 
   it("keeps unrelated working orders visible but static", () => {
