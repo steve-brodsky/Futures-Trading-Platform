@@ -4567,6 +4567,15 @@ fn get_journal_trade(
     journal::trade(&state.db_path, &trade_id)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn get_active_journal_risk_baselines(
+    environment: TradingEnvironment,
+    account_id: String,
+    state: State<'_, NativeState>,
+) -> Result<Vec<journal::JournalRiskBaseline>, AppError> {
+    journal::active_risk_baselines(&state.db_path, &environment, &account_id)
+}
+
 #[tauri::command]
 async fn save_journal_entry_screenshot(
     input: journal::JournalScreenshotInput,
@@ -6128,6 +6137,7 @@ pub fn run() {
             get_journal_day,
             get_journal_stats_trades,
             get_journal_trade,
+            get_active_journal_risk_baselines,
             save_journal_entry_screenshot,
             get_journal_entry_screenshot,
             update_journal_annotation,

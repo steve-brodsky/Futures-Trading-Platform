@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
-import type { OrderUpdate, Position } from "../types";
+import type { JournalRiskBaseline, OrderUpdate, Position } from "../types";
 import { applyProjectedExitEdit, buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, flattenOrderDraft, formatTradeLineMetrics, isPositionExit, recalculateOrderProjectionAtR, snapTradeLinePrice, snapshotOrderProjection, tradeLinePriceChanged, withOrderPrice, type OrderProjection } from "./tradeLines";
 
 const position: Position = { id: "p1", symbol: "MES", side: "Long", quantity: 2, averagePrice: 6250, last: 6251, unrealizedPnl: 10 };
 const baseOrder: OrderUpdate = { id: "o1", symbol: "MES", side: "Sell", type: "Limit", quantity: 2, price: 6260, status: "Working", timestamp: "", openOrClose: "Close", groupName: "OCO 1" };
+const riskBaseline = (direction: "Long" | "Short", originalStop: number, deployedRisk = 50, riskProvenance: JournalRiskBaseline["riskProvenance"] = "exact"): JournalRiskBaseline => ({
+  tradeId: `trade-${direction.toLowerCase()}`,
+  symbol: "MES",
+  direction,
+  originalStop,
+  deployedRisk,
+  riskProvenance,
+});
 
 describe("chart trade lines", () => {
   it("classifies positions and bracket exits", () => {
@@ -139,7 +147,7 @@ describe("chart trade lines", () => {
       { ...baseOrder, price: 110 },
       { ...baseOrder, id: "o2", type: "StopMarket", price: undefined, stopPrice: 95 },
     ]);
-    const longMetrics = buildTradeLineMetrics(longLines, 5);
+    const longMetrics = buildTradeLineMetrics(longLines, 5, undefined, undefined, [riskBaseline("Long", 95)]);
     expect(longMetrics.get("position:p1")).toEqual({ dollarAmount: 60, rMultiple: 1.2 });
     expect(longMetrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: 2 });
     expect(longMetrics.get("order:o2")).toEqual({ dollarAmount: -50, rMultiple: -1 });
@@ -149,7 +157,7 @@ describe("chart trade lines", () => {
       { ...baseOrder, side: "Buy", price: 90 },
       { ...baseOrder, id: "o2", side: "Buy", type: "StopMarket", price: undefined, stopPrice: 105 },
     ]);
-    const shortMetrics = buildTradeLineMetrics(shortLines, 5);
+    const shortMetrics = buildTradeLineMetrics(shortLines, 5, undefined, undefined, [riskBaseline("Short", 105)]);
     expect(shortMetrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: 2 });
     expect(shortMetrics.get("order:o2")).toEqual({ dollarAmount: -50, rMultiple: -1 });
   });
@@ -160,21 +168,48 @@ describe("chart trade lines", () => {
       { ...baseOrder, price: 110 },
       { ...baseOrder, id: "o2", type: "StopMarket", price: undefined, stopPrice: 95 },
     ]);
-    const metrics = buildTradeLineMetrics(lines, 5, 102.5);
+    const metrics = buildTradeLineMetrics(lines, 5, 102.5, undefined, [riskBaseline("Long", 95)]);
     expect(metrics.get("position:p1")).toEqual({ dollarAmount: 25, rMultiple: .5 });
     expect(metrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: 2 });
     expect(metrics.get("order:o2")).toEqual({ dollarAmount: -50, rMultiple: -1 });
   });
 
-  it("uses the nearest valid stop as the risk baseline", () => {
+  it("uses persisted initial risk instead of the current working stop", () => {
     const tradePosition = { ...position, averagePrice: 100 };
-    const lines = buildTradeLines("MES", [tradePosition], [
-      { ...baseOrder, id: "near", type: "StopMarket", price: undefined, stopPrice: 95 },
-      { ...baseOrder, id: "far", type: "StopMarket", price: undefined, stopPrice: 90 },
-    ]);
-    const metrics = buildTradeLineMetrics(lines, 5);
-    expect(metrics.get("order:near")?.rMultiple).toBe(-1);
-    expect(metrics.get("order:far")?.rMultiple).toBe(-2);
+    const baseline = [riskBaseline("Long", 95)];
+    const metricsAt = (stopPrice: number) => {
+      const lines = buildTradeLines("MES", [tradePosition], [
+        { ...baseOrder, price: 110 },
+        { ...baseOrder, id: "stop", type: "StopMarket", price: undefined, stopPrice },
+      ]);
+      return buildTradeLineMetrics(lines, 5, 102.5, undefined, baseline);
+    };
+
+    expect(metricsAt(95).get("position:p1")?.rMultiple).toBe(.5);
+    expect(metricsAt(100).get("position:p1")?.rMultiple).toBe(.5);
+    expect(metricsAt(103).get("position:p1")?.rMultiple).toBe(.5);
+    expect(metricsAt(90).get("position:p1")?.rMultiple).toBe(.5);
+    expect(metricsAt(100).get("order:stop")?.rMultiple).toBe(0);
+    expect(metricsAt(103).get("order:stop")?.rMultiple).toBe(.6);
+    expect(metricsAt(90).get("order:stop")?.rMultiple).toBe(-2);
+    expect(metricsAt(103).get("order:o1")?.rMultiple).toBe(2);
+  });
+
+  it("keeps the persisted initial-risk denominator for a short trade", () => {
+    const tradePosition = { ...position, averagePrice: 100, side: "Short" as const };
+    const metricsAt = (stopPrice: number) => {
+      const lines = buildTradeLines("MES", [tradePosition], [
+        { ...baseOrder, side: "Buy", price: 90 },
+        { ...baseOrder, id: "stop", side: "Buy", type: "StopMarket", price: undefined, stopPrice },
+      ]);
+      return buildTradeLineMetrics(lines, 5, 97.5, undefined, [riskBaseline("Short", 105)]);
+    };
+
+    expect(metricsAt(105).get("position:p1")?.rMultiple).toBe(.5);
+    expect(metricsAt(100).get("position:p1")?.rMultiple).toBe(.5);
+    expect(metricsAt(97).get("position:p1")?.rMultiple).toBe(.5);
+    expect(metricsAt(100).get("order:stop")?.rMultiple).toBe(0);
+    expect(metricsAt(97).get("order:stop")?.rMultiple).toBe(.6);
   });
 
   it("keeps position dollars without an R baseline and calculates projected exits from the current price", () => {
@@ -188,6 +223,23 @@ describe("chart trade lines", () => {
     expect(metrics.get("order:o1")).toEqual({ dollarAmount: 100, rMultiple: null });
     expect(metrics.get("projection:take-profit")).toEqual({ dollarAmount: 180, rMultiple: 2 });
     expect(metrics.get("projection:stop-loss")).toEqual({ dollarAmount: -90, rMultiple: -1 });
+  });
+
+  it.each([
+    ["unknown provenance", riskBaseline("Long", 95, 50, "unknown")],
+    ["missing original stop", { ...riskBaseline("Long", 95), originalStop: undefined }],
+    ["invalid original stop", riskBaseline("Long", Number.NaN)],
+    ["zero deployed risk", riskBaseline("Long", 95, 0)],
+    ["invalid deployed risk", riskBaseline("Long", 95, Number.NaN)],
+  ])("shows no live R for %s", (_label, baseline) => {
+    const tradePosition = { ...position, averagePrice: 100, unrealizedPnl: 25 };
+    const lines = buildTradeLines("MES", [tradePosition], [
+      { ...baseOrder, id: "stop", type: "StopMarket", price: undefined, stopPrice: 95 },
+    ]);
+    expect(buildTradeLineMetrics(lines, 5, undefined, undefined, [baseline]).get("position:p1")).toEqual({
+      dollarAmount: 25,
+      rMultiple: null,
+    });
   });
 
   it("calculates short projected exits and updates them with the current price", () => {

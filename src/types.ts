@@ -788,6 +788,16 @@ export interface SchwabAccountSnapshot {
 }
 
 export type RiskProvenance = "exact" | "inferred" | "unknown";
+
+export interface JournalRiskBaseline {
+  tradeId: string;
+  symbol: string;
+  direction: "Long" | "Short";
+  originalStop?: number;
+  deployedRisk?: number;
+  riskProvenance: RiskProvenance;
+}
+
 export type JournalTradeStatus = "open" | "closed";
 export type JournalEventType =
   | "entry-intent"

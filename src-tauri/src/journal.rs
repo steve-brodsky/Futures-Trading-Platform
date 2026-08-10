@@ -225,6 +225,17 @@ pub struct JournalTrade {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct JournalRiskBaseline {
+    pub trade_id: String,
+    pub symbol: String,
+    pub direction: String,
+    pub original_stop: Option<f64>,
+    pub deployed_risk: Option<f64>,
+    pub risk_provenance: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct JournalScreenshotMetadata {
     pub trade_id: String,
     pub captured_at: String,
@@ -2069,6 +2080,47 @@ pub fn has_active_trade(
         symbol,
     )?
     .is_some())
+}
+
+pub fn active_risk_baselines(
+    path: &Path,
+    environment: &TradingEnvironment,
+    account_id: &str,
+) -> Result<Vec<JournalRiskBaseline>, AppError> {
+    init(path)?;
+    let db = Connection::open(path)?;
+    let mut stmt = db.prepare(
+        "SELECT id,symbol,direction,original_stop,deployed_risk,risk_provenance \
+         FROM journal_trades \
+         WHERE provider='tradestation' AND environment=?1 AND account_id=?2 \
+           AND asset_class='futures' AND status='open' \
+         ORDER BY opened_at DESC",
+    )?;
+    let candidates = stmt
+        .query_map(
+            params![environment_key(environment), account_id],
+            |row| {
+                Ok(JournalRiskBaseline {
+                    trade_id: row.get(0)?,
+                    symbol: row.get(1)?,
+                    direction: row.get(2)?,
+                    original_stop: row.get(3)?,
+                    deployed_risk: row.get(4)?,
+                    risk_provenance: row.get(5)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen = HashSet::new();
+    Ok(candidates
+        .into_iter()
+        .filter(|baseline| {
+            seen.insert((
+                baseline.symbol.trim().to_uppercase(),
+                baseline.direction.trim().to_lowercase(),
+            ))
+        })
+        .collect())
 }
 
 fn trade_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JournalTrade> {
@@ -4094,6 +4146,58 @@ mod tests {
             put_call: Some(put_call.into()),
             multiplier: Some(100.0),
         }
+    }
+
+    #[test]
+    fn active_risk_baselines_are_persisted_scoped_and_deduplicated() {
+        let path = temp();
+        init(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
+        let insert = |id: &str,
+                      environment: &str,
+                      account: &str,
+                      symbol: &str,
+                      direction: &str,
+                      status: &str,
+                      opened_at: &str,
+                      original_stop: Option<f64>,
+                      deployed_risk: Option<f64>,
+                      provenance: &str| {
+            db.execute(
+                "INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,original_stop,deployed_risk,risk_provenance,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?7)",
+                params![id, environment, account, symbol, direction, status, opened_at, original_stop, deployed_risk, provenance],
+            )
+            .unwrap();
+        };
+        insert("older-long", "sim", "A1", "MESU26", "Long", "open", "2026-08-10T15:00:00Z", Some(6245.0), Some(25.0), "exact");
+        insert("newer-long", "sim", "A1", "MESU26", "Long", "open", "2026-08-10T15:01:00Z", Some(6246.0), Some(20.0), "inferred");
+        insert("short", "sim", "A1", "NQU26", "Short", "open", "2026-08-10T15:02:00Z", Some(23010.0), Some(40.0), "exact");
+        insert("closed", "sim", "A1", "MCLU26", "Long", "closed", "2026-08-10T15:03:00Z", Some(67.0), Some(50.0), "exact");
+        insert("other-account", "sim", "A2", "MGCQ26", "Long", "open", "2026-08-10T15:04:00Z", Some(2400.0), Some(100.0), "exact");
+        insert("other-environment", "live", "A1", "MYMU26", "Long", "open", "2026-08-10T15:05:00Z", Some(44000.0), Some(50.0), "exact");
+        drop(db);
+
+        let baselines = active_risk_baselines(&path, &TradingEnvironment::Sim, "A1").unwrap();
+        assert_eq!(baselines.len(), 2);
+        assert_eq!(
+            baselines[0],
+            JournalRiskBaseline {
+                trade_id: "short".into(),
+                symbol: "NQU26".into(),
+                direction: "Short".into(),
+                original_stop: Some(23010.0),
+                deployed_risk: Some(40.0),
+                risk_provenance: "exact".into(),
+            }
+        );
+        assert_eq!(baselines[1].trade_id, "newer-long");
+        assert_eq!(baselines[1].original_stop, Some(6246.0));
+        assert_eq!(baselines[1].deployed_risk, Some(20.0));
+        assert_eq!(baselines[1].risk_provenance, "inferred");
+        assert!(active_risk_baselines(&path, &TradingEnvironment::Sim, "missing")
+            .unwrap()
+            .is_empty());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

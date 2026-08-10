@@ -1,4 +1,4 @@
-import type { ChartLabelSettings, OrderDraft, OrderUpdate, Position } from "../types";
+import type { ChartLabelSettings, JournalRiskBaseline, OrderDraft, OrderUpdate, Position } from "../types";
 import { calculateTakeProfitAtR, roundToTick } from "./indicators";
 import { positionMatchesSchwabChart } from "./schwabBrokerage";
 
@@ -140,7 +140,13 @@ export function buildProjectedTradeLines(projection?: OrderProjection): TradeLin
   return lines;
 }
 
-export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: number, currentPrice?: number, projectedEntryPrice = currentPrice): Map<string, TradeLineMetrics> {
+export function buildTradeLineMetrics(
+  lines: TradeLineModel[],
+  pointValue: number,
+  currentPrice?: number,
+  projectedEntryPrice = currentPrice,
+  riskBaselines: JournalRiskBaseline[] = [],
+): Map<string, TradeLineMetrics> {
   const metrics = new Map<string, TradeLineMetrics>();
   if (!Number.isFinite(pointValue) || pointValue <= 0) return metrics;
 
@@ -150,18 +156,23 @@ export function buildTradeLineMetrics(lines: TradeLineModel[], pointValue: numbe
     const quantity = Math.abs(position.quantity);
     if (!Number.isFinite(quantity) || quantity <= 0) return;
     const direction = position.side === "Long" ? 1 : -1;
-    const stopLines = lines.filter((line) => line.kind === "stop-loss" && line.order?.symbol === position.symbol
-      && direction * (line.price - position.averagePrice) < 0);
-    const nearestStop = stopLines.reduce<TradeLineModel | undefined>((nearest, line) => (
-      !nearest || Math.abs(line.price - position.averagePrice) < Math.abs(nearest.price - position.averagePrice) ? line : nearest
-    ), undefined);
-    const riskAmount = nearestStop
-      ? Math.abs(nearestStop.price - position.averagePrice) * pointValue * quantity
+    const baseline = riskBaselines.find((item) => (
+      item.symbol.trim().toUpperCase() === position.symbol.trim().toUpperCase()
+      && item.direction === position.side
+    ));
+    const riskAmount = baseline
+      && baseline.riskProvenance !== "unknown"
+      && baseline.originalStop != null && Number.isFinite(baseline.originalStop) && baseline.originalStop > 0
+      && baseline.deployedRisk != null && Number.isFinite(baseline.deployedRisk) && baseline.deployedRisk > 0
+      ? baseline.deployedRisk
       : null;
-    const withRisk = (dollarAmount: number): TradeLineMetrics => ({
-      dollarAmount,
-      rMultiple: riskAmount != null && riskAmount > 0 ? dollarAmount / riskAmount : null,
-    });
+    const withRisk = (dollarAmount: number): TradeLineMetrics => {
+      const normalizedDollarAmount = dollarAmount === 0 ? 0 : dollarAmount;
+      return {
+        dollarAmount: normalizedDollarAmount,
+        rMultiple: riskAmount != null && riskAmount > 0 ? normalizedDollarAmount / riskAmount : null,
+      };
+    };
 
     const liveDollarAmount = currentPrice != null && Number.isFinite(currentPrice) && currentPrice > 0
       ? direction * (currentPrice - position.averagePrice) * pointValue * quantity

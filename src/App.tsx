@@ -74,7 +74,7 @@ import {
   type RapidMoveTrackerState,
 } from "./lib/truthSocialAlerts";
 import { applySchwabOptionQuote, combinedCurrencyTotal, heldOptionsForUnderlying, positionPnlTotal, readableBrokerOrderSymbol } from "./lib/schwabBrokerage";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, JournalRiskBaseline, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
@@ -536,6 +536,8 @@ function TradingApp() {
   const [schwabAccounts, setSchwabAccounts] = useState<Account[]>(api.isNative ? [] : demoSchwabAccounts);
   const [positions, setPositions] = useState<Position[]>(api.isNative ? [] : demoPositions);
   const [positionsReadyScope, setPositionsReadyScope] = useState<string>();
+  const [journalRiskBaselineState, setJournalRiskBaselineState] = useState<{ scope: string; baselines: JournalRiskBaseline[] }>({ scope: "", baselines: [] });
+  const [journalRiskRevision, setJournalRiskRevision] = useState(0);
   const [orders, setOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoOrders);
   const [balances, setBalances] = useState<AccountBalance[]>([]);
   const [bodBalances, setBodBalances] = useState<AccountBalance[]>([]);
@@ -1592,6 +1594,7 @@ function TradingApp() {
     listen<StripBounds>("chart-strip-bounds", ({ payload }) => stripBoundsRef.current.set(payload.windowId, payload)).then((unlisten) => cleanups.push(unlisten));
     listen<{ tabId: string; range: { from: number; to: number } }>("chart-viewport", ({ payload }) => viewRangesRef.current.set(payload.tabId, payload.range)).then((unlisten) => cleanups.push(unlisten));
     listen<{ reason?: string }>("journal-updated", ({ payload }) => {
+      setJournalRiskRevision((value) => value + 1);
       if (payload.reason === "cloud-configured" || payload.reason === "cloud-disconnected") {
         setPreferenceSyncEpoch((value) => value + 1);
       }
@@ -1723,6 +1726,32 @@ function TradingApp() {
   const selectedSchwabAccount = schwabAccounts.find((account) => account.id === workspace.selectedSchwabAccountId) ?? schwabAccounts[0];
   selectedSchwabAccountIdRef.current = selectedSchwabAccount?.id;
   const entryRuleAccountId = selectedAccount?.id ?? (api.isNative ? undefined : "demo");
+  const journalRiskScope = selectedAccount ? `${environment}:${selectedAccount.id}` : "";
+  const journalRiskPositionKey = positions
+    .filter((position) => Math.abs(position.quantity) > 0)
+    .map((position) => `${position.id}:${position.symbol}:${position.side}`)
+    .sort()
+    .join("|");
+  const activeJournalRiskBaselines = journalRiskBaselineState.scope === journalRiskScope
+    ? journalRiskBaselineState.baselines
+    : [];
+
+  useEffect(() => {
+    if (!selectedAccount) {
+      setJournalRiskBaselineState({ scope: "", baselines: [] });
+      return;
+    }
+    let active = true;
+    const scope = `${environment}:${selectedAccount.id}`;
+    void api.activeJournalRiskBaselines(environment, selectedAccount.id)
+      .then((baselines) => {
+        if (active) setJournalRiskBaselineState({ scope, baselines });
+      })
+      .catch(() => {
+        if (active) setJournalRiskBaselineState({ scope, baselines: [] });
+      });
+    return () => { active = false; };
+  }, [selectedAccount?.id, environment, journalRiskPositionKey, journalRiskRevision]);
 
   useEffect(() => {
     let active = true;
@@ -4344,6 +4373,7 @@ function TradingApp() {
       gexExpirationCount={gexMarket?.selectedDates.length ?? 0}
       orders={tab.symbol.provider === "schwab" ? [] : orders}
       positions={tab.symbol.provider === "schwab" ? schwabPositions : positions}
+      riskBaselines={tab.symbol.provider === "schwab" ? [] : activeJournalRiskBaselines}
       orderProjection={focused ? activeOrderProjection : undefined}
       onOrderProjectionChange={editProjectedExit}
       onOrderProjectionRestore={restoreOrderProjection}

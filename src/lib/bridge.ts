@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, TruthSocialPost, WorkspaceState } from "../types";
+import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalRiskBaseline, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, TruthSocialPost, WorkspaceState } from "../types";
 import { demoAuditExport, demoAuditPage, instrumentDemoApi } from "./audit";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
@@ -346,6 +346,24 @@ const rawApi = {
     const trade = demoJournalTrades().find((item) => item.id === tradeId);
     if (!trade) throw new Error("Trade not found");
     return trade;
+  },
+  async activeJournalRiskBaselines(environment: TradingEnvironment, accountId: string): Promise<JournalRiskBaseline[]> {
+    if (isTauri) return native("get_active_journal_risk_baselines", { environment, accountId });
+    return demoPositions
+      .filter((position) => position.accountId === accountId)
+      .flatMap((position) => {
+        const stop = demoOrders.find((order) => order.symbol === position.symbol && order.type === "StopMarket" && order.status === "Working")?.stopPrice;
+        const pointValue = futures.find((item) => item.symbol === position.symbol)?.pointValue;
+        if (stop == null || pointValue == null) return [];
+        return [{
+          tradeId: `demo:${position.id}`,
+          symbol: position.symbol,
+          direction: position.side,
+          originalStop: stop,
+          deployedRisk: Math.abs(position.averagePrice - stop) * pointValue * Math.abs(position.quantity),
+          riskProvenance: "exact" as const,
+        }];
+      });
   },
   async saveJournalEntryScreenshot(input: { brokerOrderId: string; environment: TradingEnvironment; accountId: string; symbol: string; capturedAt: string; width: number; height: number; dataUrl: string }): Promise<JournalScreenshotMetadata> {
     if (!isTauri) throw new Error("Entry chart screenshots are available in the desktop app.");
