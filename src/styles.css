@@ -636,6 +636,33 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .modal > header { height: 51px; padding: 0 10px 0 17px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .modal h2 { margin: 0; font-size: 13px; font-weight: 600; }
 .modal > :not(header) { margin-left: 17px; margin-right: 17px; }
+.truth-catalyst-backdrop { position: fixed; inset: 0; z-index: 130; display: grid; place-items: center; padding: 20px; background: rgba(2,4,8,.78); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); animation: fade-in .14s ease; }
+.truth-catalyst-modal { width: min(580px,calc(100vw - 40px)); max-height: calc(100vh - 40px); overflow: auto; border: 1px solid #4b4435; border-radius: 9px; color: #e2e7ed; background: #111720; box-shadow: 0 30px 100px rgba(0,0,0,.7),0 0 0 1px rgba(240,184,75,.04); animation: modal-in .19s cubic-bezier(.2,.8,.2,1); }
+.truth-catalyst-modal > header { height: 48px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 17px; border-bottom: 1px solid #393729; background: rgba(240,184,75,.025); }
+.truth-catalyst-modal > header > span { display: flex; align-items: center; gap: 8px; color: #d5b764; font: 650 8px DM Mono,monospace; letter-spacing: .1em; text-transform: uppercase; }
+.truth-catalyst-modal > header i { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 10px rgba(240,184,75,.6); }
+.truth-catalyst-modal > header button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 5px; color: #8290a2; background: transparent; cursor: pointer; }
+.truth-catalyst-modal > header button:hover { color: #eef2f6; background: rgba(255,255,255,.05); }
+.truth-catalyst-move { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 4px 18px; padding: 17px 18px 15px; border-bottom: 1px solid var(--line); }
+.truth-catalyst-move > span { display: flex; align-items: baseline; gap: 9px; color: #9aa7b6; font-size: 9px; }
+.truth-catalyst-move > span strong { color: #edf2f7; font: 700 15px DM Mono,monospace; }
+.truth-catalyst-move > span.up { color: #59d6aa; }.truth-catalyst-move > span.down { color: #ef7892; }
+.truth-catalyst-move > strong { grid-row: span 2; color: var(--amber); font: 700 23px DM Mono,monospace; }
+.truth-catalyst-move > small { color: #68778a; font: 550 8px DM Mono,monospace; }
+.truth-catalyst-post { padding: 17px 18px 18px; border-bottom: 1px solid var(--line); }
+.truth-catalyst-author { display: flex; align-items: center; gap: 10px; }
+.truth-catalyst-author > span { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 50%; color: #111720; background: #d7dde5; font: 800 9px DM Mono,monospace; }
+.truth-catalyst-author h2 { margin: 0; color: #edf2f7; font-size: 11px; font-weight: 650; }.truth-catalyst-author small { display: block; margin-top: 3px; color: #718095; font: 500 8px DM Mono,monospace; }
+.truth-catalyst-post > p { max-height: 240px; margin: 15px 0 0; overflow: auto; color: #cfd7e1; font-size: 11px; line-height: 1.65; white-space: pre-wrap; }
+.truth-catalyst-post > img { width: 100%; max-height: 330px; margin-top: 15px; object-fit: contain; border: 1px solid #2b3542; border-radius: 6px; background: #0b1016; }
+.truth-catalyst-times { display: grid; grid-template-columns: 1fr 1fr; margin: 0; padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.truth-catalyst-times > div + div { padding-left: 18px; border-left: 1px solid var(--line-soft); }
+.truth-catalyst-times dt { color: #68778a; font: 600 7px DM Mono,monospace; letter-spacing: .08em; text-transform: uppercase; }
+.truth-catalyst-times dd { margin: 5px 0 0; color: #d6dee7; font: 600 9px DM Mono,monospace; }.truth-catalyst-times dd small { display: block; margin-top: 4px; color: #6f7e91; font-size: 7px; }
+.truth-catalyst-modal > footer { display: flex; justify-content: flex-end; gap: 7px; padding: 12px 18px; }
+.truth-catalyst-modal > footer button { width: auto; height: 32px; margin: 0; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; }
+.settings-inline-note { margin: 0; padding: 8px 0; color: #6f7d90; font-size: 8px; }
+@media (max-width: 560px) { .truth-catalyst-times { grid-template-columns: 1fr; gap: 10px; }.truth-catalyst-times > div + div { padding: 10px 0 0; border-top: 1px solid var(--line-soft); border-left: 0; }.truth-catalyst-move { grid-template-columns: 1fr; }.truth-catalyst-move > strong { grid-row: auto; }.truth-catalyst-modal > footer { flex-direction: column-reverse; }.truth-catalyst-modal > footer button { width: 100%; } }
 .custom-timeframe-modal { width: 320px; overflow: hidden; }
 .custom-timeframe-modal form { margin: 0 !important; padding: 15px 17px 17px; }
 .custom-timeframe-modal form > p { margin: 0 0 14px; color: var(--muted); font-size: 9px; line-height: 1.45; }

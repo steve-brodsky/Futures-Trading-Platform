@@ -20,7 +20,7 @@ const fallback: WorkspaceState = {
   activeWorkspace: "charts",
   optionChain: { symbol: "SPY", strikeCount: 20 },
   watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 describe("chart workspace", () => {
@@ -260,6 +260,20 @@ describe("chart workspace", () => {
       },
     }, fallback);
     expect(invalid.settings.contractRollAlerts).toEqual(DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS);
+  });
+
+  it("defaults legacy Truth Social alerts off and preserves an explicit toggle", () => {
+    const legacy = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, truthSocialAlerts: undefined },
+    }, fallback);
+    expect(legacy.settings.truthSocialAlerts).toEqual({ enabled: false });
+
+    const configured = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, truthSocialAlerts: { enabled: true } },
+    }, fallback);
+    expect(configured.settings.truthSocialAlerts).toEqual({ enabled: true });
   });
 
   it("accepts changed global settings from a workspace broadcast", () => {

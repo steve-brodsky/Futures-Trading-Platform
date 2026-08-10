@@ -15,7 +15,7 @@ export type SyntheticPriceSource = "close" | "high-low";
 export type OrderType = "Market" | "Limit" | "StopMarket" | "StopLimit";
 export type ChartTimezone = "exchange" | "local" | "UTC" | "America/New_York" | "America/Chicago" | "America/Denver" | "America/Los_Angeles" | "Europe/London" | "Asia/Tokyo";
 export type StreamConnectionState = "connecting" | "streaming" | "stale" | "reconnecting" | "disconnected" | "rate-limited";
-export type BarStreamConsumer = "chart" | "ema-alert" | "vwap";
+export type BarStreamConsumer = "chart" | "ema-alert" | "vwap" | "truth-social-alert";
 
 export interface Bar {
   time: number;
@@ -39,6 +39,34 @@ export interface Quote {
   halted: boolean;
   timestamp: string;
   receivedAt?: number;
+}
+
+export interface TruthSocialAlertSettings {
+  enabled: boolean;
+}
+
+export interface TruthSocialPost {
+  id: string;
+  publishedAt: string;
+  text: string;
+  imageUrl?: string;
+  postUrl: string;
+  handle: string;
+  platform: "Truth Social";
+  deleted: boolean;
+  isRepost: boolean;
+}
+
+export interface RapidMarketMove {
+  provider: MarketDataProvider;
+  symbol: string;
+  direction: "up" | "down";
+  startedAt: number;
+  occurredAt: number;
+  startPrice: number;
+  endPrice: number;
+  changePct: number;
+  volatilityMultiple: number;
 }
 
 export type TradingTodaySnapshotStatus = "live" | "cache" | "demo";
@@ -645,6 +673,7 @@ export interface WorkspaceSettings {
   chartEconomicEvents: ChartEconomicEventSettings;
   orderTicket: OrderTicketSettings;
   contractRollAlerts: ContractRollAlertSettings;
+  truthSocialAlerts: TruthSocialAlertSettings;
   journal: {
     commissionPerContractSide: number;
     schwabOptionFeePerContractSide: number;

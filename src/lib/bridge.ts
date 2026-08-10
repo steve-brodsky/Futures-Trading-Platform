@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "../types";
+import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, TruthSocialPost, WorkspaceState } from "../types";
 import { demoAuditExport, demoAuditPage, instrumentDemoApi } from "./audit";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
@@ -14,6 +14,7 @@ export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 const nativeAuditExcluded = new Set([
   "get_audit_events", "get_audit_health", "export_audit_events", "record_client_audit",
   "get_schwab_accounts", "get_schwab_account_snapshot", "get_schwab_orders",
+  "fetch_truth_social_posts",
 ]);
 const nativeRecordCommands = new Set([
   "save_credentials", "save_schwab_credentials", "set_environment", "save_workspace",
@@ -313,6 +314,12 @@ const rawApi = {
   },
   async setJournalCommission(commissionPerContractSide: number): Promise<void> {
     if (isTauri) await native("set_journal_commission", { commissionPerContractSide });
+  },
+  async fetchTruthSocialPosts(): Promise<TruthSocialPost[]> {
+    return isTauri ? native("fetch_truth_social_posts") : [];
+  },
+  async openTruthSocialPost(url: string): Promise<void> {
+    if (isTauri) await native("open_truth_social_post", { url });
   },
   async setSchwabOptionFee(schwabOptionFeePerContractSide: number): Promise<void> {
     if (isTauri) await native("set_schwab_option_fee", { schwabOptionFeePerContractSide });

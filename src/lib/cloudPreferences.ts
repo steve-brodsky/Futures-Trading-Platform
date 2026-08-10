@@ -67,6 +67,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       },
       alerts: {
         byTabId: Object.fromEntries(workspace.tabs.map((tab) => [tab.id, tab.ema200Alert])),
+        truthSocial: { ...workspace.settings.truthSocialAlerts },
       },
       drawings: { bySymbol: workspace.drawings },
       watchlist: {
@@ -203,6 +204,11 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
       },
       orderTicket: { ...current.settings.orderTicket, ...object(orderEntry?.orderTicket) },
       contractRollAlerts: normalizeContractRollAlertSettings(orderEntry?.contractRollAlerts ?? current.settings.contractRollAlerts),
+      truthSocialAlerts: {
+        enabled: typeof object(alerts?.truthSocial)?.enabled === "boolean"
+          ? object(alerts?.truthSocial)!.enabled as boolean
+          : current.settings.truthSocialAlerts.enabled,
+      },
       journal: {
         commissionPerContractSide: typeof journalFees?.commissionPerContractSide === "number"
           ? journalFees.commissionPerContractSide

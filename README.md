@@ -21,6 +21,7 @@ Northstar Trader is a private multi-provider trading workspace. TradeStation sup
 - New York regular-session shading, an exchange-aware chart timezone selector, current-price label, and candle countdown.
 - EMA 20, EMA 200, SMA 50, and New York session VWAP overlays with visibility and color controls.
 - EMA 200 cross alerts configured independently by chart and timeframe, including sound and duration choices.
+- Opt-in Truth Social catalyst alerts that correlate unusually fast active-chart moves with new original @realDonaldTrump posts through Roll Call's archive. The desktop-only monitor uses a dedicated shared one-minute stream, local post deduplication, and an allowlisted source link.
 
 ### Workspace
 

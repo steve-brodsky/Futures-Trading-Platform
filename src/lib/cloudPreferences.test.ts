@@ -52,6 +52,7 @@ function workspace(): WorkspaceState {
       chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS,
       orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", riskAmount: 150 },
       contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS,
+      truthSocialAlerts: { enabled: true },
       journal: { commissionPerContractSide: 0.75, schwabOptionFeePerContractSide: 0.65 },
     },
   };
@@ -73,6 +74,7 @@ describe("cloud preferences", () => {
     expect(profile.categories.order_entry.entryRuleAlerts).toEqual(original.entryRuleAlerts);
     expect(profile.categories.order_entry.entryRuleLock).toEqual({ enabled: false });
     expect(profile.categories.order_entry.contractRollAlerts).toEqual(original.settings.contractRollAlerts);
+    expect(profile.categories.alerts.truthSocial).toEqual({ enabled: true });
     expect(profile.categories.alerts.entryRules).toBeUndefined();
     expect(serialized).not.toContain("secret-account-id");
     expect(serialized).not.toContain("confirmOrders");
@@ -113,6 +115,7 @@ describe("cloud preferences", () => {
         chartSessions: { ...local.settings.chartSessions, colorMode: "by-session", asiaColor: "#112233" },
         chartEconomicEvents: { ...local.settings.chartEconomicEvents, enabled: true, impactVisibility: { ...local.settings.chartEconomicEvents.impactVisibility, low: false } },
         contractRollAlerts: { audioEnabled: false, sound: "pulse", durationSeconds: 3 },
+        truthSocialAlerts: { enabled: false },
         journal: { commissionPerContractSide: 1.25, schwabOptionFeePerContractSide: 0.65 },
       },
     });
@@ -124,6 +127,7 @@ describe("cloud preferences", () => {
     expect(merged.settings.chartSessions).toMatchObject({ colorMode: "by-session", asiaColor: "#112233" });
     expect(merged.settings.chartEconomicEvents).toEqual({ enabled: true, impactVisibility: { high: true, medium: true, low: false, unrated: true } });
     expect(merged.settings.contractRollAlerts).toEqual({ audioEnabled: false, sound: "pulse", durationSeconds: 3 });
+    expect(merged.settings.truthSocialAlerts).toEqual({ enabled: false });
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "bell", durationSeconds: 5 });
     expect(merged.environment).toBe("live");
     expect(merged.selectedAccountId).toBe("secret-account-id");
@@ -175,6 +179,7 @@ describe("cloud preferences", () => {
     profile.categories.chart_display.fontSize = 900;
     profile.categories.chart_display.sessionShading = { colorMode: "invalid", asiaColor: "red" };
     profile.categories.chart_display.economicEvents = { enabled: "yes", impactVisibility: { high: false, medium: "yes" } };
+    profile.categories.alerts.truthSocial = { enabled: "yes" };
     profile.categories.journal_fees.commissionPerContractSide = -20;
     profile.categories.watchlist.symbols = ["mesu26", 123, "mesu26"];
     profile.categories.order_entry.entryRules = {
@@ -188,6 +193,7 @@ describe("cloud preferences", () => {
     expect(merged.settings.chartLabels.fontSize).toBe(16);
     expect(merged.settings.chartSessions).toEqual(DEFAULT_CHART_SESSION_SETTINGS);
     expect(merged.settings.chartEconomicEvents).toEqual({ enabled: false, impactVisibility: { high: false, medium: true, low: true, unrated: true } });
+    expect(merged.settings.truthSocialAlerts).toEqual({ enabled: true });
     expect(merged.settings.journal.commissionPerContractSide).toBe(0);
     expect(merged.watchlist.map((item) => [item.provider, item.symbol])).toEqual([["tradestation", "MESU26"]]);
     expect(merged.entryRuleAlerts.long).toEqual({ enabled: true, sound: "chime", durationSeconds: 3 });

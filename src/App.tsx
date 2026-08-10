@@ -8,7 +8,7 @@ import {
   GripVertical, LineChart, ListChecks, LockKeyhole, Maximize2, Minimize2, Minus,
   Magnet, MousePointer2, Palette, PanelsTopLeft, Plus,
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingDown, TrendingUp,
-  Table2, Wifi, X, Zap,
+  ExternalLink, Table2, Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
 import { ChartPaneGrid } from "./components/ChartPaneGrid";
@@ -63,8 +63,18 @@ import {
 import { newYorkDateKey, tradingTodayView } from "./lib/tradingToday";
 import { minuteTimeframe, normalizeCustomMinuteTimeframes, orderedToolbarTimeframes, parseMinuteTimeframe, removeCustomMinuteTimeframe as removeCustomMinuteTimeframeFromWorkspace, saveCustomMinuteTimeframe, workspaceForPersistence } from "./lib/timeframes";
 import { defaultOptionOrderDraft, optionStreamBudget } from "./lib/optionChain";
+import {
+  ALERTED_POST_STORAGE_KEY,
+  closestMatchingTruthSocialPost,
+  normalizeAlertedPostIds,
+  rememberAlertedPostId,
+  trackRapidMarketMove,
+  TRUTH_SOCIAL_POLL_DURATION_MS,
+  TRUTH_SOCIAL_POLL_INTERVAL_MS,
+  type RapidMoveTrackerState,
+} from "./lib/truthSocialAlerts";
 import { applySchwabOptionQuote, combinedCurrencyTotal, heldOptionsForUnderlying, positionPnlTotal, readableBrokerOrderSymbol } from "./lib/schwabBrokerage";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
@@ -100,7 +110,7 @@ const defaultWorkspace: WorkspaceState = {
   drawings: {}, gexSelections: {},
   activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -205,6 +215,32 @@ function formatPrice(value?: number): string {
   return value == null ? "—" : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
 }
 
+interface TruthSocialCheckState {
+  timer?: number;
+  hadSuccessfulFetch: boolean;
+}
+
+interface TruthSocialCatalystAlert {
+  move: RapidMarketMove;
+  post: TruthSocialPost;
+}
+
+function loadAlertedTruthSocialPostIds(): string[] {
+  try {
+    return normalizeAlertedPostIds(JSON.parse(localStorage.getItem(ALERTED_POST_STORAGE_KEY) ?? "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function saveAlertedTruthSocialPostIds(ids: string[]) {
+  try {
+    localStorage.setItem(ALERTED_POST_STORAGE_KEY, JSON.stringify(ids));
+  } catch {
+    // The alert remains deduplicated for this session if WebView storage is unavailable.
+  }
+}
+
 function formatSignedUsd(value: number): string {
   return `${value >= 0 ? "+" : "-"}$${Math.abs(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
@@ -305,6 +341,57 @@ function IconButton({ label, active, children, onClick }: { label: string; activ
 
 function Modal({ title, children, onClose, width = 440 }: { title: string; children: React.ReactNode; onClose: () => void; width?: number }) {
   return <div className="modal-backdrop" role="presentation"><section className="modal" role="dialog" aria-modal="true" aria-label={title} style={{ width }}><header><h2>{title}</h2><IconButton label="Close" onClick={onClose}><X size={17} /></IconButton></header>{children}</section></div>;
+}
+
+function catalystTime(value: number | string, timeZone?: string): string {
+  const date = typeof value === "number" ? new Date(value) : new Date(value);
+  if (Number.isNaN(date.getTime())) return "Time unavailable";
+  return new Intl.DateTimeFormat(undefined, {
+    ...(timeZone ? { timeZone } : {}),
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function TruthSocialCatalystModal({ alert, onClose, onOpen }: {
+  alert: TruthSocialCatalystAlert;
+  onClose: () => void;
+  onOpen: (url: string) => void;
+}) {
+  const sourceButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { sourceButtonRef.current?.focus(); }, []);
+  const { move, post } = alert;
+  const mediaOnly = !post.text.trim() || /^\[(?:image|video)\]$/i.test(post.text.trim());
+  return <div className="truth-catalyst-backdrop" role="presentation">
+    <section className="truth-catalyst-modal" role="alertdialog" aria-modal="true" aria-labelledby="truth-catalyst-title" aria-describedby="truth-catalyst-copy">
+      <header>
+        <span><i />Possible market catalyst</span>
+        <button type="button" aria-label="Dismiss Truth Social alert" onClick={onClose}><X size={17} /></button>
+      </header>
+      <div className="truth-catalyst-move">
+        <span className={move.direction}><strong>{move.symbol}</strong>{move.direction === "up" ? "Rapid move up" : "Rapid move down"}</span>
+        <strong>{move.changePct > 0 ? "+" : ""}{move.changePct.toFixed(2)}%</strong>
+        <small>30 seconds / {move.volatilityMultiple.toFixed(1)}x recent 1-minute volatility</small>
+      </div>
+      <div className="truth-catalyst-post">
+        <div className="truth-catalyst-author"><span>TS</span><div><h2 id="truth-catalyst-title">Donald J. Trump</h2><small>@realDonaldTrump / Truth Social</small></div></div>
+        {mediaOnly && post.imageUrl && <img src={post.imageUrl} alt="Archived media from the matched Truth Social post" />}
+        <p id="truth-catalyst-copy">{mediaOnly ? "This post contains media. Open the original post to view it on Truth Social." : post.text}</p>
+      </div>
+      <dl className="truth-catalyst-times">
+        <div><dt>Post published</dt><dd>{catalystTime(post.publishedAt)}<small>{catalystTime(post.publishedAt, "America/New_York")} / Eastern</small></dd></div>
+        <div><dt>Market move</dt><dd>{catalystTime(move.occurredAt)}<small>{catalystTime(move.occurredAt, "America/New_York")} / Eastern</small></dd></div>
+      </dl>
+      <footer>
+        <button type="button" className="secondary-button" onClick={onClose}>Dismiss</button>
+        <button ref={sourceButtonRef} type="button" className="primary-button" onClick={() => onOpen(post.postUrl)}>Open on Truth Social <ExternalLink size={13} /></button>
+      </footer>
+    </section>
+  </div>;
 }
 
 function EntryRuleUnlockChallenge({ onClose, onUnlocked }: { onClose: () => void; onUnlocked: () => void }) {
@@ -515,6 +602,7 @@ function TradingApp() {
   const [tradingTodayWarning, setTradingTodayWarning] = useState<string>();
   const [tradingTodayTimezone, setTradingTodayTimezone] = useState<ChartTimezone>("America/New_York");
   const tradingTodayPresentation = useMemo(() => tradingTodayView(tradingTodayDate), [tradingTodayDate]);
+  const [truthSocialAlert, setTruthSocialAlert] = useState<TruthSocialCatalystAlert | null>(null);
   const [review, setReview] = useState<ReviewState | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [envConfirm, setEnvConfirm] = useState<TradingEnvironment | null>(null);
@@ -587,6 +675,11 @@ function TradingApp() {
   const alertLoadedEpochRef = useRef(new Map<string, string>());
   const alertDesiredRef = useRef(new Set<string>());
   const alertDataEpochRef = useRef("");
+  const truthSocialSubscriptionRef = useRef<BarSubscription | undefined>(undefined);
+  const truthSocialBarsRef = useRef<Bar[]>([]);
+  const truthSocialMoveTrackerRef = useRef<RapidMoveTrackerState | undefined>(undefined);
+  const truthSocialCheckRef = useRef<TruthSocialCheckState | undefined>(undefined);
+  const truthSocialAlertedIdsRef = useRef<string[]>(loadAlertedTruthSocialPostIds());
   const entryRuleAlertTrackerRef = useRef<EntryRuleAlertTrackerState | undefined>(undefined);
   const entryRuleSignalTimersRef = useRef(new Map<string, number>());
   const entryRuleAudioTimersRef = useRef(new Set<number>());
@@ -999,6 +1092,99 @@ function TradingApp() {
     });
   }
 
+  function stopTruthSocialCheck() {
+    const check = truthSocialCheckRef.current;
+    if (check?.timer != null) window.clearTimeout(check.timer);
+    truthSocialCheckRef.current = undefined;
+  }
+
+  function rememberTruthSocialAlert(id: string) {
+    const next = rememberAlertedPostId(truthSocialAlertedIdsRef.current, id);
+    truthSocialAlertedIdsRef.current = next;
+    saveAlertedTruthSocialPostIds(next);
+  }
+
+  function startTruthSocialCheck(move: RapidMarketMove) {
+    if (truthSocialCheckRef.current || currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
+    const check: TruthSocialCheckState = {
+      hadSuccessfulFetch: false,
+    };
+    truthSocialCheckRef.current = check;
+
+    const poll = async () => {
+      if (truthSocialCheckRef.current !== check || !workspaceRef.current.settings.truthSocialAlerts.enabled) return;
+      try {
+        const posts = await api.fetchTruthSocialPosts();
+        check.hadSuccessfulFetch = true;
+        const match = closestMatchingTruthSocialPost(posts, move.occurredAt, new Set(truthSocialAlertedIdsRef.current));
+        if (match) {
+          rememberTruthSocialAlert(match.id);
+          truthSocialCheckRef.current = undefined;
+          setTruthSocialAlert({ move, post: match });
+          setNotifications((current) => [{
+            id: crypto.randomUUID(),
+            symbol: move.symbol,
+            time: new Date().toISOString(),
+            title: "Possible Truth Social catalyst",
+            text: `${move.symbol} moved ${Math.abs(move.changePct).toFixed(2)}% in 30 seconds near a new @realDonaldTrump post.`,
+            level: "warning" as const,
+          }, ...current].slice(0, 250));
+          return;
+        }
+      } catch {
+        // The native bridge records each failed request in the audit log.
+      }
+
+      if (Date.now() >= move.occurredAt + TRUTH_SOCIAL_POLL_DURATION_MS) {
+        truthSocialCheckRef.current = undefined;
+        if (!check.hadSuccessfulFetch) {
+          setNotifications((current) => [{
+            id: crypto.randomUUID(),
+            symbol: move.symbol,
+            time: new Date().toISOString(),
+            title: "Truth Social catalyst check unavailable",
+            text: "Roll Call could not be reached during the rapid-move matching window.",
+            level: "warning" as const,
+          }, ...current].slice(0, 250));
+        }
+        return;
+      }
+      check.timer = window.setTimeout(() => { void poll(); }, TRUTH_SOCIAL_POLL_INTERVAL_MS);
+    };
+    void poll();
+  }
+
+  function handleTruthSocialQuote(quote: Quote, receivedAt: number) {
+    if (currentWindowId !== MAIN_WINDOW_ID || !api.isNative || !workspaceRef.current.settings.truthSocialAlerts.enabled
+      || quote.delayed || quote.halted) return;
+    const mainWindow = workspaceRef.current.windows.find((item) => item.id === MAIN_WINDOW_ID);
+    const tab = workspaceRef.current.tabs.find((item) => item.id === mainWindow?.activeTabId);
+    if (!tab || tab.symbol.provider !== quote.provider
+      || tab.symbol.symbol.trim().toUpperCase() !== quote.symbol.trim().toUpperCase()) return;
+    const sourceAt = Date.parse(quote.timestamp);
+    const occurredAt = Number.isFinite(sourceAt) ? sourceAt : receivedAt;
+    const tracked = trackRapidMarketMove(truthSocialMoveTrackerRef.current, {
+      provider: quote.provider,
+      symbol: quote.symbol,
+      price: quote.last,
+      occurredAt,
+      receivedAt,
+      minMove: tab.symbol.minMove,
+      oneMinuteBars: truthSocialBarsRef.current,
+    });
+    truthSocialMoveTrackerRef.current = tracked.state;
+    if (tracked.move) startTruthSocialCheck(tracked.move);
+  }
+
+  function handleTruthSocialBars(payload: BarSnapshotEvent | BarUpdateEvent) {
+    const subscription = truthSocialSubscriptionRef.current;
+    if (!subscription || payload.subscriptionId !== subscription.subscriptionId
+      || payload.provider !== subscription.provider || payload.symbol !== subscription.symbol
+      || payload.timeframe !== "1m" || payload.generation !== subscription.generation) return;
+    const incoming = "bars" in payload ? payload.bars : [payload.bar];
+    truthSocialBarsRef.current = mergeBars(truthSocialBarsRef.current, incoming).slice(-90);
+  }
+
   function nextBarSubscriptionGeneration(): number {
     barSubscriptionGenerationRef.current += 1;
     return barSubscriptionGenerationRef.current;
@@ -1100,6 +1286,7 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<string>("schwab-auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
+        handleTruthSocialBars(payload);
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
         if (acceptsWindowBarEvent(tab, payload)) {
           setTabMarkets((current) => {
@@ -1116,6 +1303,7 @@ function TradingApp() {
         if (payload.provider === "schwab" || payload.environment === environmentRef.current) primeAlertMarket(payload.symbol, payload.timeframe, payload.bars, false);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
+        handleTruthSocialBars(payload);
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
         if (acceptsWindowBarEvent(tab, payload)) {
           setTabMarkets((current) => {
@@ -1134,7 +1322,9 @@ function TradingApp() {
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
         if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "tradestation" && payload.environment !== environmentRef.current) return;
-        setQuotes((current) => ({ ...current, [instrumentKey(payload.quote)]: { ...payload.quote, receivedAt: Date.now() } }));
+        const receivedAt = Date.now();
+        handleTruthSocialQuote(payload.quote, receivedAt);
+        setQuotes((current) => ({ ...current, [instrumentKey(payload.quote)]: { ...payload.quote, receivedAt } }));
         if (payload.provider === "schwab") setSchwabPositions((current) => current.map((position) => {
           if ((position.assetType ?? "").toUpperCase().includes("OPTION") || position.symbol.trim().toUpperCase() !== payload.quote.symbol.trim().toUpperCase()) return position;
           const direction = position.side === "Long" ? 1 : -1;
@@ -1804,6 +1994,53 @@ function TradingApp() {
       }
     });
   }, [tabStreamKey, authEpoch, authenticated, schwabAuthEpoch, schwabAuthenticated, environment, workspaceLoaded]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    truthSocialBarsRef.current = [];
+    truthSocialMoveTrackerRef.current = undefined;
+    const enabled = workspace.settings.truthSocialAlerts.enabled && api.isNative;
+    const providerAuthenticated = activeTab.symbol.provider === "schwab" ? schwabAuthenticated : authenticated;
+    if (!enabled || !providerAuthenticated) {
+      if (!workspace.settings.truthSocialAlerts.enabled) {
+        stopTruthSocialCheck();
+        setTruthSocialAlert(null);
+      }
+      return;
+    }
+
+    const subscriptionId = "truth-social-alert:active-main-chart";
+    const generation = nextBarSubscriptionGeneration();
+    const subscription: BarSubscription = {
+      subscriptionId,
+      provider: activeTab.symbol.provider,
+      symbol: activeTab.symbol.symbol,
+      timeframe: "1m",
+      epoch: `${activeTab.symbol.provider}:${environment}:${authEpoch}:${schwabAuthEpoch}`,
+      generation,
+    };
+    truthSocialSubscriptionRef.current = subscription;
+    api.cachedBars(subscription.provider, subscription.symbol, "1m").then((cached) => {
+      if (truthSocialSubscriptionRef.current?.generation === generation) {
+        truthSocialBarsRef.current = mergeBars([], cached).slice(-90);
+      }
+    }).catch(() => undefined);
+    api.startBarStream(subscriptionId, subscription.provider, subscription.symbol, "1m", "truth-social-alert", generation).catch((error) => {
+      if (truthSocialSubscriptionRef.current?.generation !== generation) return;
+      setNotifications((current) => [{
+        id: crypto.randomUUID(),
+        symbol: subscription.symbol,
+        time: new Date().toISOString(),
+        title: "Truth Social move detector unavailable",
+        text: String(error),
+        level: "warning" as const,
+      }, ...current].slice(0, 250));
+    });
+    return () => {
+      if (truthSocialSubscriptionRef.current?.generation === generation) truthSocialSubscriptionRef.current = undefined;
+      void api.stopBarStream(subscriptionId, nextBarSubscriptionGeneration());
+    };
+  }, [workspaceLoaded, workspace.settings.truthSocialAlerts.enabled, activeTab.id, activeTab.symbol.provider, activeTab.symbol.symbol, authenticated, authEpoch, schwabAuthenticated, schwabAuthEpoch, environment]);
 
   useEffect(() => {
     if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
@@ -3154,6 +3391,16 @@ function TradingApp() {
     }));
   }
 
+  function updateTruthSocialAlertSettings(patch: Partial<TruthSocialAlertSettings>) {
+    commitWorkspace((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        truthSocialAlerts: { ...current.settings.truthSocialAlerts, ...patch },
+      },
+    }));
+  }
+
   function updateTab(tabId: string, patch: Partial<ChartTabState>) {
     commitWorkspace((current) => ({ ...current, tabs: current.tabs.map((tab) => tab.id === tabId ? { ...tab, ...patch } : tab) }));
   }
@@ -4380,6 +4627,11 @@ function TradingApp() {
       <WatchlistSettings workspace={workspace} onChange={(watchlist) => updateWorkspace({ watchlist })} onNotify={showToast} />
       <section className="settings-section" aria-labelledby="chart-label-settings"><header><span>Chart</span><h3 id="chart-label-settings">Chart display</h3><p>Configure tab signals and the values shown beside open positions and protective orders.</p></header><label className="switch-row settings-row"><span><strong>EMA 200 tab status</strong><small>Green above EMA 200, red below</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showEma200TabDots} onChange={(event) => updateChartLabelSettings({ showEma200TabDots: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show dollar amount</strong><small>Full-position profit or loss</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showDollarAmount} onChange={(event) => updateChartLabelSettings({ showDollarAmount: event.target.checked })} /></label><label className="switch-row settings-row"><span><strong>Show R value</strong><small>Profit or loss relative to initial risk</small></span><input type="checkbox" checked={workspace.settings.chartLabels.showRMultiple} onChange={(event) => updateChartLabelSettings({ showRMultiple: event.target.checked })} /></label><label className="settings-font-row"><span><strong>Label font size</strong><small>Adjusts every position and order label</small></span><div><input type="range" min="8" max="16" step="1" value={workspace.settings.chartLabels.fontSize} onChange={(event) => updateChartLabelSettings({ fontSize: Number(event.target.value) })} aria-label="Chart label font size" /><output>{workspace.settings.chartLabels.fontSize}px</output></div></label></section>
       <section className="settings-section" aria-labelledby="order-entry-settings"><header><span>Trading</span><h3 id="order-entry-settings">Order entry</h3><p>Configure risk sizing and projected swing stops.</p></header><label className="settings-control-row"><span><strong>Risk budget behavior</strong><small>Choose whether risk sizing may exceed the limit</small></span><select aria-label="Risk budget behavior" value={workspace.settings.orderTicket.riskSizingPolicy} onChange={(event) => updateOrderTicketSettings({ riskSizingPolicy: event.target.value as OrderTicketSettings["riskSizingPolicy"] })}><option value="strict">Stay within risk</option><option value="minimum-one">Always allow 1 contract</option></select></label><label className="settings-control-row"><span><strong>Swing pivot strength</strong><small>Completed candles required on each side</small></span><select aria-label="Swing stop pivot strength" value={workspace.settings.orderTicket.swingStopPivotBars} onChange={(event) => updateOrderTicketSettings({ swingStopPivotBars: Number(event.target.value) as 2 | 3 })}><option value="2">2-bar pivot</option><option value="3">3-bar pivot</option></select></label><label className="settings-control-row"><span><strong>Stop offset</strong><small>Minimum ticks beyond the swing high or low</small></span><div className="settings-number-control"><input aria-label="Swing stop offset ticks" type="number" min="1" max="100" step="1" value={workspace.settings.orderTicket.swingStopOffsetTicks} onChange={(event) => updateOrderTicketSettings({ swingStopOffsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label></section>
+      <section className="settings-section" aria-labelledby="truth-social-alert-settings">
+        <header><span>Market alerts</span><h3 id="truth-social-alert-settings">Truth Social catalyst alerts</h3><p>Check Trump originals when the active main-window chart makes an unusually fast move.</p></header>
+        <label className="switch-row settings-row"><span><strong>Monitor rapid moves</strong><small>30-second move at 3x recent 1-minute volatility / 4-tick minimum</small></span><input type="checkbox" disabled={!api.isNative} checked={api.isNative && workspace.settings.truthSocialAlerts.enabled} onChange={(event) => updateTruthSocialAlertSettings({ enabled: event.target.checked })} /></label>
+        {!api.isNative && <p className="settings-inline-note">Available in the desktop app.</p>}
+      </section>
       <section className="settings-section" aria-labelledby="contract-roll-alert-settings">
         <header><span>Trading</span><h3 id="contract-roll-alert-settings">Contract rollover alerts</h3><p>Visual warnings and order acknowledgment stay active. Configure the once-daily alert sound.</p></header>
         <label className="switch-row settings-row"><span><strong>Daily sound</strong><small>Once per affected contract and Chicago calendar date</small></span><input type="checkbox" checked={workspace.settings.contractRollAlerts.audioEnabled} onChange={(event) => updateContractRollAlertSettings({ audioEnabled: event.target.checked })} /></label>
@@ -4527,6 +4779,12 @@ function TradingApp() {
       {reviewEntryEligibility && <p className={`entry-review-rule ${reviewEntryEligibility.status}`}>{reviewEntryEligibility.reason}</p>}
       <button className={review.draft.side === "Buy" ? "buy-button" : "sell-button"} disabled={!review.preview?.valid || busy || Boolean(review.kind === "entry" && review.rolloverStatus && !review.rolloverAcknowledged) || Boolean(reviewEntryEligibility && !reviewEntryEligibility.allowed)} onClick={submitReviewed}>{review.kind === "close-position" ? "Close position" : `Send ${review.draft.side} order`}</button>
     </Modal>}
+
+    {truthSocialAlert && <TruthSocialCatalystModal
+      alert={truthSocialAlert}
+      onClose={() => setTruthSocialAlert(null)}
+      onOpen={(url) => { void api.openTruthSocialPost(url).catch((error) => showToast(String(error))); }}
+    />}
 
     {toast && <div className="toast" role="status">{toast}</div>}
   </main>;

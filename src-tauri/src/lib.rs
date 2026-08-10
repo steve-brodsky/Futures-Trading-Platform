@@ -8,6 +8,7 @@ mod schwab_streamer;
 mod storage;
 mod tradestation;
 mod trading_today;
+mod truth_social;
 
 use chrono::{DateTime, TimeZone, Timelike, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -784,7 +785,7 @@ async fn start_bar_stream(
                 .ok_or_else(|| AppError::Validation("Unsupported Schwab timeframe".into()))?;
         }
     }
-    if !matches!(consumer.as_str(), "chart" | "ema-alert" | "vwap") {
+    if !matches!(consumer.as_str(), "chart" | "ema-alert" | "vwap" | "truth-social-alert") {
         return Err(AppError::Validation("Invalid bar stream consumer".into()));
     }
     let environment = state.api.environment().await;
@@ -3759,6 +3760,37 @@ fn open_trading_today_source(source: String) -> Result<(), AppError> {
         .map_err(|error| AppError::Api(format!("Could not open Trading Today source: {error}")))
 }
 
+#[tauri::command]
+async fn fetch_truth_social_posts(
+    state: State<'_, NativeState>,
+) -> Result<Vec<truth_social::TruthSocialPost>, AppError> {
+    let span = state.audit.begin_api(
+        "roll-call",
+        "fetch-truth-social-posts",
+        "GET",
+        truth_social::FEED_URL,
+        None,
+        Some(uuid::Uuid::new_v4().to_string()),
+    );
+    match truth_social::fetch_latest().await {
+        Ok(posts) => {
+            span.success(Some(200), Some(serde_json::json!({ "postCount": posts.len() })));
+            Ok(posts)
+        }
+        Err(error) => {
+            span.error(None, error.to_string());
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+fn open_truth_social_post(url: String) -> Result<(), AppError> {
+    let url = truth_social::validate_post_url(&url)?;
+    open::that(url.as_str())
+        .map_err(|error| AppError::Api(format!("Could not open Truth Social post: {error}")))
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn sync_app_preferences(
     cloud_profile: Value,
@@ -6078,6 +6110,8 @@ pub fn run() {
             get_trading_today_cache,
             refresh_trading_today,
             open_trading_today_source,
+            fetch_truth_social_posts,
+            open_truth_social_post,
             sync_app_preferences,
             start_preference_realtime,
             stop_preference_realtime,

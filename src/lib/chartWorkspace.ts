@@ -348,6 +348,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
   const savedChartEconomicEvents = value.settings?.chartEconomicEvents;
   const savedOrderTicket = value.settings?.orderTicket;
   const savedContractRollAlerts = value.settings?.contractRollAlerts;
+  const savedTruthSocialAlerts = value.settings?.truthSocialAlerts;
   const savedJournal = value.settings?.journal;
   const entryRules = normalizeEntryRules(value.entryRules);
   const entryRuleAlerts = normalizeEntryRuleAlerts(value.entryRuleAlerts);
@@ -438,6 +439,11 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
           : undefined,
       },
       contractRollAlerts: normalizeContractRollAlertSettings(savedContractRollAlerts ?? fallback.settings.contractRollAlerts),
+      truthSocialAlerts: {
+        enabled: typeof savedTruthSocialAlerts?.enabled === "boolean"
+          ? savedTruthSocialAlerts.enabled
+          : fallback.settings.truthSocialAlerts.enabled,
+      },
       journal: {
         commissionPerContractSide: typeof savedJournal?.commissionPerContractSide === "number" && Number.isFinite(savedJournal.commissionPerContractSide)
           ? Math.max(0, Math.min(100, savedJournal.commissionPerContractSide))
