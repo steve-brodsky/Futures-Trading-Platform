@@ -20,7 +20,7 @@ const fallback: WorkspaceState = {
   activeWorkspace: "charts",
   optionChain: { symbol: "SPY", strikeCount: 20 },
   watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 describe("chart workspace", () => {
@@ -182,19 +182,30 @@ describe("chart workspace", () => {
 
   it("defaults, preserves, and clamps swing-stop settings", () => {
     const legacy = normalizeChartWorkspace({ ...fallback, settings: { chartLabels: fallback.settings.chartLabels } }, fallback);
-    expect(legacy.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", riskAmount: undefined });
+    expect(legacy.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC", riskAmount: undefined });
 
     const saved = normalizeChartWorkspace({
       ...fallback,
       settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 12.6 } },
     }, fallback);
-    expect(saved.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 13, sizingMode: "contracts", riskSizingPolicy: "strict", riskAmount: undefined });
+    expect(saved.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 13, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC", riskAmount: undefined });
 
     const clamped = normalizeChartWorkspace({
       ...fallback,
       settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 4, swingStopOffsetTicks: 500 } },
     }, fallback);
-    expect(clamped.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 100, sizingMode: "contracts", riskSizingPolicy: "strict", riskAmount: undefined });
+    expect(clamped.settings.orderTicket).toEqual({ swingStopPivotBars: 2, swingStopOffsetTicks: 100, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC", riskAmount: undefined });
+  });
+
+  it("defaults time in force to GTC and preserves a saved selection", () => {
+    const legacy = normalizeChartWorkspace({ ...fallback, settings: { ...fallback.settings, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1 } } }, fallback);
+    expect(legacy.settings.orderTicket.timeInForce).toBe("GTC");
+
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      settings: { ...fallback.settings, orderTicket: { ...fallback.settings.orderTicket, timeInForce: "DAY" } },
+    }, fallback);
+    expect(saved.settings.orderTicket.timeInForce).toBe("DAY");
   });
 
   it("defaults legacy journal commission and preserves a configured rate", () => {
@@ -326,10 +337,10 @@ describe("chart workspace", () => {
     const broadcast = normalizeChartWorkspace({
       ...current,
       revision: 2,
-      settings: { ...current.settings, orderTicket: { ...current.settings.orderTicket, swingStopPivotBars: 3, swingStopOffsetTicks: 4, sizingMode: "risk", riskSizingPolicy: "minimum-one", riskAmount: 150 } },
+      settings: { ...current.settings, orderTicket: { ...current.settings.orderTicket, swingStopPivotBars: 3, swingStopOffsetTicks: 4, sizingMode: "risk", riskSizingPolicy: "minimum-one", timeInForce: "DAY", riskAmount: 150 } },
     }, fallback);
     const result = stabilizeChartWorkspace(current, broadcast);
-    expect(result.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 4, sizingMode: "risk", riskSizingPolicy: "minimum-one", riskAmount: 150 });
+    expect(result.settings.orderTicket).toEqual({ swingStopPivotBars: 3, swingStopOffsetTicks: 4, sizingMode: "risk", riskSizingPolicy: "minimum-one", timeInForce: "DAY", riskAmount: 150 });
     expect(result.settings).not.toBe(current.settings);
   });
 

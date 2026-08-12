@@ -434,6 +434,9 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
         riskSizingPolicy: savedOrderTicket?.riskSizingPolicy === "minimum-one" || savedOrderTicket?.riskSizingPolicy === "strict"
           ? savedOrderTicket.riskSizingPolicy
           : fallback.settings.orderTicket.riskSizingPolicy,
+        timeInForce: savedOrderTicket?.timeInForce === "DAY" || savedOrderTicket?.timeInForce === "GTC"
+          ? savedOrderTicket.timeInForce
+          : fallback.settings.orderTicket.timeInForce,
         riskAmount: typeof savedOrderTicket?.riskAmount === "number" && Number.isFinite(savedOrderTicket.riskAmount) && savedOrderTicket.riskAmount > 0
           ? savedOrderTicket.riskAmount
           : undefined,

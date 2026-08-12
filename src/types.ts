@@ -658,6 +658,7 @@ export interface OrderTicketSettings {
   swingStopOffsetTicks: number;
   sizingMode: "contracts" | "risk";
   riskSizingPolicy: "strict" | "minimum-one";
+  timeInForce: "DAY" | "GTC";
   riskAmount?: number;
 }
 

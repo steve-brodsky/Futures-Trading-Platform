@@ -50,7 +50,7 @@ function workspace(): WorkspaceState {
       chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 12 },
       chartSessions: DEFAULT_CHART_SESSION_SETTINGS,
       chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS,
-      orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", riskAmount: 150 },
+      orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", timeInForce: "GTC", riskAmount: 150 },
       contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS,
       truthSocialAlerts: { enabled: true },
       journal: { commissionPerContractSide: 0.75, schwabOptionFeePerContractSide: 0.65 },
@@ -187,6 +187,16 @@ describe("cloud preferences", () => {
     const profile = cloudPreferenceProfile(local);
     const merged = applyCloudPreferenceProfile(workspace(), profile);
     expect(merged.entryRuleLock).toEqual({ enabled: true, lockedAt: "2026-07-31T12:00:00.000Z" });
+  });
+
+  it("round-trips time in force through order-entry preferences", () => {
+    const remote = workspace();
+    remote.settings.orderTicket.timeInForce = "DAY";
+    const profile = cloudPreferenceProfile(remote);
+    expect(profile.categories.order_entry.orderTicket).toMatchObject({ timeInForce: "DAY" });
+
+    const merged = applyCloudPreferenceProfile(workspace(), profile);
+    expect(merged.settings.orderTicket.timeInForce).toBe("DAY");
   });
 
   it("normalizes malformed downloaded values", () => {
