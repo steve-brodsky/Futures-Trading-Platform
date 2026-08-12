@@ -499,9 +499,15 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
       && prior.symbol.underlying === tab.symbol.underlying
       ? prior.symbol
       : tab.symbol;
-    const indicators = sameArray(prior.indicators, tab.indicators, (a, b) => (
-      a.id === b.id && a.kind === b.kind && a.period === b.period && a.color === b.color && a.visible === b.visible
-    )) ? prior.indicators : tab.indicators;
+    const indicators = sameArray(prior.indicators, tab.indicators, (a, b) => {
+      if (a.id !== b.id || a.kind !== b.kind || a.visible !== b.visible) return false;
+      if (a.kind === "FAILED_BREAKOUT" && b.kind === "FAILED_BREAKOUT") {
+        return a.pivotBars === b.pivotBars && a.toleranceTicks === b.toleranceTicks
+          && a.reclaimBars === b.reclaimBars && a.pairMode === b.pairMode;
+      }
+      if (a.kind === "FAILED_BREAKOUT" || b.kind === "FAILED_BREAKOUT") return false;
+      return a.period === b.period && a.color === b.color;
+    }) ? prior.indicators : tab.indicators;
     const ema200Alert = sameEma200Alert(prior.ema200Alert, tab.ema200Alert) ? prior.ema200Alert : tab.ema200Alert;
     return symbol === prior.symbol && indicators === prior.indicators && ema200Alert === prior.ema200Alert
       && prior.timeframe === tab.timeframe && prior.chartKind === tab.chartKind

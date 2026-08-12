@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WorkspaceState } from "../types";
+import type { FailedBreakoutIndicatorConfig, PriceOverlayIndicatorConfig, WorkspaceState } from "../types";
 import { defaultEntryRules } from "./entryRules";
 import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./chartSessions";
@@ -386,12 +386,31 @@ describe("chart workspace", () => {
   it("deep clones mutable chart settings", () => {
     const source = { ...fallback.tabs[0], indicators: [{ id: "ema", kind: "EMA" as const, period: 20, color: "#fff", visible: true }] };
     const clone = cloneChartTab(source, "copy");
-    clone.indicators[0].color = "#000";
+    const clonedEma = clone.indicators.find((indicator): indicator is PriceOverlayIndicatorConfig => indicator.kind === "EMA");
+    if (clonedEma) clonedEma.color = "#000";
     clone.ema200Alert["1m"].enabled = true;
     clone.renkoSettings.brickSizeTicks = 20;
     expect(source.indicators[0].color).toBe("#fff");
     expect(source.ema200Alert["1m"].enabled).toBe(false);
     expect(source.renkoSettings.brickSizeTicks).toBe(4);
+  });
+
+  it("deep clones per-tab Failed Breakout settings", () => {
+    const source = normalizeChartWorkspace({
+      ...fallback,
+      tabs: [{ ...fallback.tabs[0], indicators: [{
+        id: "failed-breakout", kind: "FAILED_BREAKOUT", visible: true, pivotBars: 2,
+        toleranceTicks: 4, reclaimBars: 3, pairMode: "consecutive",
+      }] }],
+    }, fallback).tabs[0];
+    const clone = cloneChartTab(source, "copy");
+    const originalConfig = source.indicators.find((indicator): indicator is FailedBreakoutIndicatorConfig => indicator.kind === "FAILED_BREAKOUT");
+    const clonedConfig = clone.indicators.find((indicator): indicator is FailedBreakoutIndicatorConfig => indicator.kind === "FAILED_BREAKOUT");
+
+    expect(clonedConfig).toEqual(originalConfig);
+    expect(clonedConfig).not.toBe(originalConfig);
+    if (clonedConfig) clonedConfig.toleranceTicks = 12;
+    expect(originalConfig?.toleranceTicks).toBe(4);
   });
 
   it("defaults and clamps synthetic chart settings", () => {
@@ -495,6 +514,38 @@ describe("chart workspace", () => {
       entryRuleAlerts: { ...defaultEntryRuleAlerts(), long: { enabled: true, sound: "bell", durationSeconds: 5 } },
     }, fallback);
     expect(inconsistent.entryRuleAlerts.long).toEqual({ enabled: false, sound: "bell", durationSeconds: 5 });
+  });
+
+  it("stabilizes all Failed Breakout settings and detects a setting-only change", () => {
+    const current = normalizeChartWorkspace({
+      ...fallback,
+      tabs: [{ ...fallback.tabs[0], indicators: [{
+        id: "failed-breakout", kind: "FAILED_BREAKOUT", visible: true, pivotBars: 2,
+        toleranceTicks: 4, reclaimBars: 3, pairMode: "consecutive",
+      }] }],
+    }, fallback);
+    const unchanged = stabilizeChartWorkspace(current, normalizeChartWorkspace({ ...current }, fallback));
+    expect(unchanged.tabs[0].indicators).toBe(current.tabs[0].indicators);
+
+    const changes: Array<Partial<FailedBreakoutIndicatorConfig>> = [
+      { visible: false },
+      { pivotBars: 3 },
+      { toleranceTicks: 8 },
+      { reclaimBars: 5 },
+      { pairMode: "latest-matching" },
+    ];
+    for (const change of changes) {
+      const incoming = normalizeChartWorkspace({
+        ...current,
+        tabs: current.tabs.map((tab) => ({
+          ...tab,
+          indicators: tab.indicators.map((indicator) => indicator.kind === "FAILED_BREAKOUT"
+            ? { ...indicator, ...change }
+            : indicator),
+        })),
+      }, fallback);
+      expect(stabilizeChartWorkspace(current, incoming).tabs[0].indicators).not.toBe(current.tabs[0].indicators);
+    }
   });
 
   it("persists and stabilizes the global entry-rule lock", () => {

@@ -30,6 +30,66 @@ describe("indicator workspace normalization", () => {
     expect(normalizeIndicators(savedIndicators)).toContainEqual(savedIndicators[2]);
   });
 
+  it("adds Failed Breakout disabled defaults to legacy workspaces", () => {
+    expect(normalizeIndicators(savedIndicators)).toContainEqual({
+      id: "failed-breakout",
+      kind: "FAILED_BREAKOUT",
+      visible: false,
+      pivotBars: 2,
+      toleranceTicks: 4,
+      reclaimBars: 3,
+      pairMode: "consecutive",
+    });
+  });
+
+  it("normalizes and clamps saved Failed Breakout settings", () => {
+    const normalized = normalizeIndicators([...savedIndicators, {
+      id: "renamed-by-save",
+      kind: "FAILED_BREAKOUT",
+      visible: true,
+      pivotBars: 9.8,
+      toleranceTicks: -2.4,
+      reclaimBars: 1000,
+      pairMode: "latest-matching",
+    }]).find((indicator) => indicator.kind === "FAILED_BREAKOUT");
+
+    expect(normalized).toEqual({
+      id: "failed-breakout",
+      kind: "FAILED_BREAKOUT",
+      visible: true,
+      pivotBars: 3,
+      toleranceTicks: 0,
+      reclaimBars: 100,
+      pairMode: "latest-matching",
+    });
+  });
+
+  it("uses Failed Breakout defaults for malformed settings", () => {
+    const normalized = normalizeIndicators([{
+      id: "failed-breakout",
+      kind: "FAILED_BREAKOUT",
+      visible: "yes",
+      pivotBars: Number.NaN,
+      toleranceTicks: "4",
+      reclaimBars: null,
+      pairMode: "unknown",
+    }]).find((indicator) => indicator.kind === "FAILED_BREAKOUT");
+
+    expect(normalized).toMatchObject({ visible: false, pivotBars: 2, toleranceTicks: 4, reclaimBars: 3, pairMode: "consecutive" });
+  });
+
+  it("does not let an incompatible saved kind replace Failed Breakout", () => {
+    const normalized = normalizeIndicators([{
+      id: "failed-breakout",
+      kind: "EMA",
+      period: 10,
+      color: "#ffffff",
+      visible: true,
+    }]);
+
+    expect(normalized.find((indicator) => indicator.id === "failed-breakout")?.kind).toBe("FAILED_BREAKOUT");
+  });
+
   it("removes retired RSI and MACD indicators from legacy workspaces", () => {
     const legacyIndicators = [
       ...savedIndicators,

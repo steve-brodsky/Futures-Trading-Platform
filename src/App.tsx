@@ -74,9 +74,12 @@ import {
   type RapidMoveTrackerState,
 } from "./lib/truthSocialAlerts";
 import { applySchwabOptionQuote, combinedCurrencyTotal, heldOptionsForUnderlying, positionPnlTotal, readableBrokerOrderSymbol } from "./lib/schwabBrokerage";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, JournalRiskBaseline, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, FailedBreakoutIndicatorConfig, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, JournalRiskBaseline, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
+type IndicatorPatch<T extends IndicatorConfig = IndicatorConfig> = T extends IndicatorConfig
+  ? Partial<Omit<T, "id" | "kind">>
+  : never;
 const chartStyles: Array<{ kind: ChartKind; label: string; description: string }> = [
   { kind: "candles", label: "Candles", description: "Time-based OHLC" },
   { kind: "line", label: "Line", description: "Close price" },
@@ -3477,8 +3480,8 @@ function TradingApp() {
       : drawing));
   }
 
-  function updateIndicator(id: string, patch: Partial<IndicatorConfig>) {
-    updateActiveTab({ indicators: activeTab.indicators.map((indicator) => indicator.id === id ? { ...indicator, ...patch } : indicator) });
+  function updateIndicator(id: string, patch: IndicatorPatch) {
+    updateActiveTab({ indicators: activeTab.indicators.map((indicator) => indicator.id === id ? { ...indicator, ...patch } as IndicatorConfig : indicator) });
   }
 
   function updateGexTab(patch: Partial<ChartTabState["gex"]>) {
@@ -4289,6 +4292,11 @@ function TradingApp() {
   const activeGexContractCount = activeGexMarket ? Object.keys(activeGexMarket.contracts).length : 0;
   const activeGexCoverage = gexCoverage[activeTab.symbol.symbol] ?? 0;
   const activeGexStatus = activeGexMarket ? gexStatusLabel(activeGexMarket.status) : activeTab.gex.enabled ? "Loading" : "Off";
+  const activeIndicatorCount = activeTab.indicators.filter((indicator) => indicator.visible && (
+    indicator.kind === "FAILED_BREAKOUT"
+      ? activeTab.chartKind === "candles"
+      : indicator.kind !== "VWAP" || (activeTab.chartKind !== "renko" && activeTab.chartKind !== "point-and-figure")
+  )).length + (activeGexSupported && activeTab.gex.enabled ? 1 : 0);
   const optionWorkspaceActive = !isDetached && workspace.activeWorkspace === "options";
   const tradeContractStatus = !activeContinuous ? undefined
     : !activeTradeSymbol ? "Auto unavailable: TradeStation did not return an underlying contract."
@@ -4475,7 +4483,8 @@ function TradingApp() {
       </div>
       <div className="toolbar-popover-anchor">
         <button className={`text-tool-button ${indicatorOpen ? "active" : ""}`} onClick={() => { setAlertOpen(false); setChartStyleOpen(false); setIndicatorOpen((value) => !value); }}><SlidersHorizontal size={16} />Indicators</button>
-        {indicatorOpen && <div className={`popover indicator-popover ${activeGexSupported ? "with-gex" : ""}`}><header><strong>Indicators</strong><span>{activeTab.indicators.filter((i) => i.visible && (i.kind !== "VWAP" || (activeTab.chartKind !== "renko" && activeTab.chartKind !== "point-and-figure"))).length + (activeGexSupported && activeTab.gex.enabled ? 1 : 0)} active</span></header>{activeTab.indicators.map((indicator) => {
+        {indicatorOpen && <div className={`popover indicator-popover ${activeGexSupported ? "with-gex" : ""}`}><header><strong>Indicators</strong><span>{activeIndicatorCount} active</span></header>{activeTab.indicators.map((indicator) => {
+          if (indicator.kind === "FAILED_BREAKOUT") return <FailedBreakoutIndicatorRow key={indicator.id} indicator={indicator} chartKind={activeTab.chartKind} onChange={(patch) => updateIndicator(indicator.id, patch)} />;
           const unavailable = indicator.kind === "VWAP" && (activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure");
           return <div key={indicator.id} className={`indicator-row ${unavailable ? "unavailable" : ""}`}><label className="indicator-color" title={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`}><input type="color" value={indicator.color} disabled={unavailable} aria-label={`Change ${indicator.kind === "VWAP" ? "NY Session VWAP" : `${indicator.kind} ${indicator.period}`} color`} onChange={(event) => updateIndicator(indicator.id, { color: event.target.value })} /><span className="indicator-swatch" style={{ background: indicator.color }} /></label><button className="indicator-toggle-button" disabled={unavailable} aria-pressed={unavailable ? false : indicator.visible} onClick={() => updateIndicator(indicator.id, { visible: !indicator.visible })}><span><strong>{indicator.kind === "VWAP" ? "NY Session VWAP" : indicator.kind}</strong><small>{unavailable ? "Time-based charts only" : indicator.kind === "VWAP" ? isIntradayTimeframe(activeTab.timeframe) ? "9:30 AM–4:00 PM ET" : "Intraday only" : `${activeTab.chartKind === "renko" || activeTab.chartKind === "point-and-figure" ? "Synthetic" : "Source"} length ${indicator.period}`}</small></span><span className={`toggle ${!unavailable && indicator.visible ? "on" : ""}`} /></button></div>;
         })}{activeGexSupported && <section className={`gex-settings ${activeTab.gex.enabled ? "enabled" : ""}`} aria-label="Gamma exposure settings">
@@ -4818,6 +4827,38 @@ function TradingApp() {
 
     {toast && <div className="toast" role="status">{toast}</div>}
   </main>;
+}
+
+function FailedBreakoutIndicatorRow({ indicator, chartKind, onChange }: {
+  indicator: FailedBreakoutIndicatorConfig;
+  chartKind: ChartKind;
+  onChange: (patch: IndicatorPatch<FailedBreakoutIndicatorConfig>) => void;
+}) {
+  const unavailable = chartKind !== "candles";
+  const clampInteger = (value: string, fallback: number, min: number, max: number) => {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? Math.max(min, Math.min(max, Math.round(numeric))) : fallback;
+  };
+
+  return <section className={`failed-breakout-settings ${indicator.visible ? "enabled" : ""} ${unavailable ? "unavailable" : ""}`} aria-label="Failed Breakout indicator settings">
+    <div className="failed-breakout-row">
+      <span className="failed-breakout-swatch" aria-hidden="true"><TrendingUp size={13} /><TrendingDown size={13} /></span>
+      <button className="indicator-toggle-button" type="button" disabled={unavailable} aria-pressed={!unavailable && indicator.visible} onClick={() => onChange({ visible: !indicator.visible })}>
+        <span><strong>Failed Breakout</strong><small>{unavailable
+          ? "Candlestick charts only"
+          : indicator.visible
+            ? `${indicator.pivotBars}-bar pivots · ${indicator.toleranceTicks} ticks · ${indicator.reclaimBars} candles`
+            : "Wick break with a closing reclaim"}</small></span>
+        <span className={`toggle ${!unavailable && indicator.visible ? "on" : ""}`} />
+      </button>
+    </div>
+    {indicator.visible && !unavailable && <div className="failed-breakout-controls">
+      <label><span>Pivot strength</span><select aria-label="Failed Breakout pivot strength" value={indicator.pivotBars} onChange={(event) => onChange({ pivotBars: Number(event.target.value) as 1 | 2 | 3 })}><option value="1">1 bar</option><option value="2">2 bars</option><option value="3">3 bars</option></select></label>
+      <label><span>Swing tolerance</span><div className="failed-breakout-number"><input aria-label="Failed Breakout swing tolerance ticks" type="number" min="0" max="100" step="1" value={indicator.toleranceTicks} onChange={(event) => onChange({ toleranceTicks: clampInteger(event.target.value, 4, 0, 100) })} /><em>ticks</em></div></label>
+      <label><span>Reclaim window</span><div className="failed-breakout-number"><input aria-label="Failed Breakout reclaim window candles" type="number" min="1" max="100" step="1" value={indicator.reclaimBars} onChange={(event) => onChange({ reclaimBars: clampInteger(event.target.value, 3, 1, 100) })} /><em>bars</em></div></label>
+      <label className="failed-breakout-pair-mode"><span>Swing pairing</span><select aria-label="Failed Breakout swing pairing" value={indicator.pairMode} onChange={(event) => onChange({ pairMode: event.target.value as FailedBreakoutIndicatorConfig["pairMode"] })}><option value="consecutive">Latest consecutive</option><option value="latest-matching">Latest matching</option></select></label>
+    </div>}
+  </section>;
 }
 
 function DrawingAlertsManager({ alerts, onChange, onDisable, onRemove }: {

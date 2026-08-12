@@ -156,6 +156,23 @@ describe("cloud preferences", () => {
     expect(merged.recentSymbols).toEqual([vix]);
   });
 
+  it("round-trips per-tab Failed Breakout settings through chart preferences", () => {
+    const remote = workspace();
+    remote.tabs[0].indicators = remote.tabs[0].indicators.map((indicator) => indicator.kind === "FAILED_BREAKOUT"
+      ? { ...indicator, visible: true, pivotBars: 3, toleranceTicks: 8, reclaimBars: 5, pairMode: "latest-matching" }
+      : indicator);
+    const merged = applyCloudPreferenceProfile(workspace(), cloudPreferenceProfile(remote));
+    expect(merged.tabs[0].indicators.find((indicator) => indicator.kind === "FAILED_BREAKOUT")).toEqual({
+      id: "failed-breakout",
+      kind: "FAILED_BREAKOUT",
+      visible: true,
+      pivotBars: 3,
+      toleranceTicks: 8,
+      reclaimBars: 5,
+      pairMode: "latest-matching",
+    });
+  });
+
   it("round-trips blanket entry-side restrictions through cloud preferences", () => {
     const local = workspace();
     local.entryRules.allowEntries.short = false;

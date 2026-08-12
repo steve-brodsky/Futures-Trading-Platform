@@ -308,13 +308,27 @@ export interface OrderPreview {
   errors: string[];
 }
 
-export interface IndicatorConfig {
+export interface PriceOverlayIndicatorConfig {
   id: string;
   kind: "SMA" | "EMA" | "VWAP";
   period: number;
   color: string;
   visible: boolean;
 }
+
+export type FailedBreakoutPairMode = "consecutive" | "latest-matching";
+
+export interface FailedBreakoutIndicatorConfig {
+  id: string;
+  kind: "FAILED_BREAKOUT";
+  visible: boolean;
+  pivotBars: 1 | 2 | 3;
+  toleranceTicks: number;
+  reclaimBars: number;
+  pairMode: FailedBreakoutPairMode;
+}
+
+export type IndicatorConfig = PriceOverlayIndicatorConfig | FailedBreakoutIndicatorConfig;
 
 export interface TimeframeAlertConfig {
   enabled: boolean;

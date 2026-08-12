@@ -31,6 +31,7 @@ TradeStation and Schwab authenticate, stream, and reconnect independently. Switc
 - A quota-aware TradeStation scheduler with response-header reconciliation, historical-credit pacing, trading reserves, rate-limit state, and reset-aware reconnects.
 - Exchange/local/UTC and named-market timezone choices, a current-price marker, candle countdown, scroll-to-latest control, and configurable overnight shading with uniform or separate Asia/London colors.
 - Fixed EMA 20, EMA 200, SMA 50, and New York regular-session VWAP overlays with per-overlay visibility and color controls.
+- Opt-in Failed Breakout entry markers on candlestick charts, with per-tab pivot strength, futures tick tolerance, reclaim window, and swing-pairing controls. It defaults to off with 2-bar pivots, 4 ticks, a 3-candle reclaim window, and consecutive pairing; historical and completed real-time candles are evaluated with the same rules.
 - Schwab equity/ETF gamma-exposure overlays built from the current option chain and updated by the option stream. Views include Net GEX, Calls/Puts, or Open Interest; expirations can be aggregated or displayed separately and selected by preset or date.
 - Optional Trading Today event markers on eligible intraday candle, line, and area charts, filtered by impact. Markers use the chart timezone and support hover/focus details and pinning.
 
@@ -341,7 +342,7 @@ The main React window orchestrates broker subscriptions, brokerage monitoring, o
 - Both a valid take-profit and stop-loss are required for a new entry.
 - Schwab equity and option execution is not implemented. The Options workspace ticket is explicitly draft-only.
 - Drawing UI supports horizontal lines, horizontal rays, and analysis-only long/short position tools.
-- Indicators are fixed EMA 20, EMA 200, SMA 50, and NY-session VWAP presets; arbitrary periods and multiple custom instances are not exposed.
+- Indicators are fixed EMA 20, EMA 200, SMA 50, NY-session VWAP, and Failed Breakout presets; arbitrary moving-average periods and multiple custom instances are not exposed.
 - There is one editable watchlist rather than multiple named lists.
 - Chart tabs are capped at twelve. The workspace quote union—charts, resolved futures contracts, watchlist symbols, and drawing-alert-only instruments—is capped at 100 instruments; Options and held-position subscriptions are managed separately.
 - GEX and option chains are current-snapshot/live-stream tools; Northstar does not retain historical option-chain data.

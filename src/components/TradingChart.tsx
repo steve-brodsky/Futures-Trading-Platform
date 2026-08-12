@@ -1,10 +1,10 @@
 import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { Bell, BellOff, ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, Volume2, X } from "lucide-react";
 import {
-  AreaSeries, CandlestickSeries, ColorType, createChart, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
-  type IChartApi, type IPriceLine, type ISeriesApi, type Logical, type LogicalRange, type Time,
+  AreaSeries, CandlestickSeries, ColorType, createChart, createSeriesMarkers, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
+  type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type Logical, type LogicalRange, type SeriesMarker, type Time,
 } from "lightweight-charts";
-import type { AlertDurationSeconds, AlertSound, Bar, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, EconomicEvent, GexExpirationDisplay, GexView, IndicatorConfig, JournalRiskBaseline, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, RenkoSettings, Timeframe } from "../types";
+import type { AlertDurationSeconds, AlertSound, Bar, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, EconomicEvent, GexExpirationDisplay, GexView, IndicatorConfig, JournalRiskBaseline, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, PriceOverlayIndicatorConfig, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
 import { formatCandleCountdown, formatSchwabDailyCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme, syncedCrosshairPlotTime, type ChartCrosshairUpdate } from "../lib/crosshair";
@@ -27,6 +27,7 @@ import {
   visibleEconomicEvents, type EconomicEventCluster,
 } from "../lib/economicEvents";
 import { formatEventTime } from "../lib/tradingToday";
+import { findFailedBreakouts, type FailedBreakoutSignal } from "../lib/failedBreakout";
 
 interface Props {
   bars: Bar[];
@@ -137,7 +138,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const chartRef = useRef<IChartApi | null>(null);
   const priceRef = useRef<ISeriesApi<any> | null>(null);
   const volumeRef = useRef<ISeriesApi<any> | null>(null);
-  const indicatorRefs = useRef<Array<{ config: IndicatorConfig; series: ISeriesApi<any> }>>([]);
+  const indicatorRefs = useRef<Array<{ config: PriceOverlayIndicatorConfig; series: ISeriesApi<any> }>>([]);
+  const failedBreakoutMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const tradeLineRefs = useRef<Map<string, IPriceLine>>(new Map());
   const drawingLineRefs = useRef<IPriceLine[]>([]);
   const rayPrimitiveRef = useRef<HorizontalRayPrimitive | null>(null);
@@ -200,7 +202,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     drawing: PositionDrawing;
   } | null>(null);
   const isSynthetic = kind === "renko" || kind === "point-and-figure";
-  const vwapIndicator = indicators.find((indicator) => indicator.kind === "VWAP" && indicator.visible);
+  const vwapIndicator = indicators.find((indicator): indicator is PriceOverlayIndicatorConfig => indicator.kind === "VWAP" && indicator.visible);
   const chartBarTimes = useMemo(() => bars.map((bar) => bar.time), [bars]);
   const renkoBricks = useMemo(() => kind === "renko" ? buildRenko(bars, minMove, renkoSettings) : [], [bars, kind, minMove, renkoSettings]);
   const pointAndFigureColumns = useMemo(() => kind === "point-and-figure" ? buildPointAndFigure(bars, minMove, pointAndFigureSettings) : [], [bars, kind, minMove, pointAndFigureSettings]);
@@ -641,6 +643,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       resizeObserver.disconnect();
       host.current?.removeEventListener("wheel", syncLabels);
       host.current?.removeEventListener("pointermove", syncLabels);
+      failedBreakoutMarkersRef.current?.setMarkers([]);
+      failedBreakoutMarkersRef.current?.detach();
+      failedBreakoutMarkersRef.current = null;
       chart.remove(); chartRef.current = null; priceRef.current = null; volumeRef.current = null; installedPlotTimesRef.current.clear(); syncedCrosshairPriceLineRef.current = null; indicatorRefs.current = []; tradeLineRefs.current = new Map(); drawingLineRefs.current = []; rayPrimitiveRef.current = null; sessionShadingRef.current = null; vwapPrimitiveRef.current = null; gexPrimitiveRef.current = null;
     };
   }, [kind, symbol, exchange, minMove, timeframe, timezone, renkoSettings.brickSizeTicks, renkoSettings.priceSource, renkoSettings.reversalBricks, pointAndFigureSettings.boxSizeTicks, pointAndFigureSettings.priceSource, pointAndFigureSettings.reversalBoxes]);
@@ -690,7 +695,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     if (!chart) return;
 
     const priceFormat = { type: "price" as const, precision: pricePrecision(minMove), minMove };
-    const visible = indicators.filter((item) => item.visible && ["SMA", "EMA"].includes(item.kind));
+    const visible = indicators.filter((item): item is PriceOverlayIndicatorConfig => item.visible && (item.kind === "SMA" || item.kind === "EMA"));
     const visibleIds = new Set(visible.map((config) => config.id));
     const existing = new Map(indicatorRefs.current.map((item) => [item.config.id, item]));
 
@@ -868,6 +873,22 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     applySyncedCrosshairRef.current();
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   }, [bars, kind, chartGeneration, displayItems, renkoBricks, pointAndFigureColumns, pointAndFigureSettings.boxSizeTicks, minMove]);
+
+  useEffect(() => {
+    const price = priceRef.current;
+    const config = indicators.find((indicator) => indicator.kind === "FAILED_BREAKOUT");
+    if (!price || kind !== "candles" || !config?.visible) {
+      failedBreakoutMarkersRef.current?.setMarkers([]);
+      return;
+    }
+
+    const markerPlugin = failedBreakoutMarkersRef.current ?? createSeriesMarkers(price);
+    failedBreakoutMarkersRef.current = markerPlugin;
+    const markers: SeriesMarker<Time>[] = findFailedBreakouts(bars, minMove, config).map((signal: FailedBreakoutSignal) => signal.side === "long"
+      ? { id: signal.id, time: asTime(signal.entryTime), position: "belowBar", shape: "arrowUp", color: "#16c79a", text: "FB Long" }
+      : { id: signal.id, time: asTime(signal.entryTime), position: "aboveBar", shape: "arrowDown", color: "#ef466f", text: "FB Short" });
+    markerPlugin.setMarkers(markers);
+  }, [bars, indicators, kind, minMove, chartGeneration]);
 
   const startOrderDrag = (event: ReactPointerEvent<HTMLDivElement>, order: OrderUpdate, price: number) => {
     if (replacingOrderIds.has(order.id)) return;
