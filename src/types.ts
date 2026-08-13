@@ -708,6 +708,7 @@ export interface WorkspaceState {
   activeWorkspace: "charts" | "options";
   optionChain: OptionChainPreferences;
   rightPanelOpen: boolean;
+  rightPanelMode: "order-entry" | "trade-management";
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
   bottomBrokerPanel: "combined" | "tradestation" | "schwab";
   bottomPanelOpen: boolean;

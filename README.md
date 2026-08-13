@@ -154,7 +154,7 @@ npm run tauri dev
 On a Windows machine where the Visual Studio developer environment does not include the installed SDK paths, use the included launcher. It detects x64 Build Tools and Windows Kits installed in their standard `C:\Program Files (x86)` locations:
 
 ```powershell
-C
+npm run desktop:windows
 ```
 
 ### Build for macOS

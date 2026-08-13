@@ -39,7 +39,8 @@ import { quoteDayChangePercent } from "./lib/quotes";
 import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
 import { calculateSwingStop } from "./lib/swingStop";
 import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, shouldRetryEntryScreenshots, ENTRY_SCREENSHOT_QUEUE_LIMIT } from "./lib/entryScreenshot";
-import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
+import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, tradeLinePriceChanged, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
+import { breakEvenPrice, currentRMultiple, findManagedPosition, managedProtectiveOrders, originalRiskBaseline, stopIsAtBreakEven, takeProfitAtOriginalR } from "./lib/tradeManagement";
 import { isTargetOutside } from "./lib/menuFocus";
 import { autocompleteKeyAction, useSymbolSuggestions } from "./lib/symbolSearch";
 import { defaultIndicators } from "./lib/workspace";
@@ -112,7 +113,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
-  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
+  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, rightPanelMode: "order-entry", bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
   settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
@@ -4585,7 +4586,11 @@ function TradingApp() {
       {!isDetached && <aside className={`right-panel ${workspace.rightPanelOpen ? "open" : "collapsed"}`} aria-labelledby="order-panel-title">
         <header className="right-panel-header"><strong id="order-panel-title">Order Panel</strong><button type="button" aria-label={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} aria-expanded={workspace.rightPanelOpen} aria-controls="order-panel-content" title={workspace.rightPanelOpen ? "Collapse order panel" : "Open order panel"} onClick={() => updateWorkspace({ rightPanelOpen: !workspace.rightPanelOpen })}>{workspace.rightPanelOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}</button></header>
         {workspace.rightPanelOpen && <div id="order-panel-content" className="right-panel-content">
-          {activeTab.symbol.provider === "schwab"
+          <nav className="right-panel-modes" role="tablist" aria-label="Order panel mode">
+            <button id="order-entry-mode-tab" type="button" role="tab" aria-selected={workspace.rightPanelMode === "order-entry"} aria-controls="order-entry-mode-panel" className={workspace.rightPanelMode === "order-entry" ? "active" : ""} onClick={() => updateWorkspace({ rightPanelMode: "order-entry" })}>Order Entry</button>
+            <button id="trade-management-mode-tab" type="button" role="tab" aria-selected={workspace.rightPanelMode === "trade-management"} aria-controls="trade-management-mode-panel" className={workspace.rightPanelMode === "trade-management" ? "active" : ""} onClick={() => updateWorkspace({ rightPanelMode: "trade-management" })}>Trade Management</button>
+          </nav>
+          {workspace.rightPanelMode === "order-entry" ? <div id="order-entry-mode-panel" role="tabpanel" aria-labelledby="order-entry-mode-tab">{activeTab.symbol.provider === "schwab"
             ? <div className={`equity-order-disabled ${activeSchwabOptionPositions.length ? "has-option-pnl" : ""}`}>
               {activeSchwabOptionPnl != null && <div className="schwab-option-pnl">
                 <span>Live option P&amp;L</span>
@@ -4594,7 +4599,8 @@ function TradingApp() {
               </div>}
               <span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p>
             </div>
-            : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} rollStatus={activeRollStatus} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onUseNextContract={useNextActiveContract} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}
+            : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} rollStatus={activeRollStatus} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onUseNextContract={useNextActiveContract} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}</div>
+            : <div id="trade-management-mode-panel" role="tabpanel" aria-labelledby="trade-management-mode-tab"><TradeManagementPanel provider={activeTab.symbol.provider} tradeSymbol={activeTradeSymbol} minMove={activeTradeMeta?.minMove ?? activeTab.symbol.minMove} quote={activeTradeQuote} account={selectedAccount} environment={environment} positions={positions} orders={orders} riskBaselines={activeJournalRiskBaselines} nativeTrading={api.isNative} busy={busy || environmentTransitioning} replacingOrderIds={replacingOrderIds} closingPositionIds={closingPositionIds} onReplaceOrder={replaceChartOrder} onCloseTrade={requestClosePosition} /></div>}
         </div>}
       </aside>}
 
@@ -5228,6 +5234,106 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
       {!workspace.watchlist.length && <div className="watchlist-editor-empty"><strong>No symbols saved</strong><span>Use the search above to build your top bar watchlist.</span></div>}
     </div>
   </section>;
+}
+
+function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, environment, positions, orders, riskBaselines, nativeTrading, busy, replacingOrderIds, closingPositionIds, onReplaceOrder, onCloseTrade }: {
+  provider: MarketDataProvider;
+  tradeSymbol?: string;
+  minMove: number;
+  quote: Quote;
+  account?: Account;
+  environment: TradingEnvironment;
+  positions: Position[];
+  orders: OrderUpdate[];
+  riskBaselines: JournalRiskBaseline[];
+  nativeTrading: boolean;
+  busy: boolean;
+  replacingOrderIds: Set<string>;
+  closingPositionIds: Set<string>;
+  onReplaceOrder: (order: OrderUpdate, newPrice: number) => Promise<void>;
+  onCloseTrade: (position: Position) => void;
+}) {
+  const position = provider === "tradestation" ? findManagedPosition(tradeSymbol, account?.id, positions) : undefined;
+  const protective = managedProtectiveOrders(position, account?.id, orders);
+  const stopOrder = protective.stops.length === 1 ? protective.stops[0] : undefined;
+  const targetOrder = protective.targets.length === 1 ? protective.targets[0] : undefined;
+  const baseline = originalRiskBaseline(position, riskBaselines);
+  const breakEven = breakEvenPrice(position, minMove);
+  const [rInput, setRInput] = useState("2");
+  const rMultiple = Number(rInput);
+  const rValid = rInput.trim() !== "" && Number.isFinite(rMultiple) && rMultiple > 0;
+  const targetPrice = rValid ? takeProfitAtOriginalR(position, baseline, rMultiple, minMove) : null;
+  const stopReplacing = stopOrder ? replacingOrderIds.has(stopOrder.id) : false;
+  const targetReplacing = targetOrder ? replacingOrderIds.has(targetOrder.id) : false;
+  const closing = position ? closingPositionIds.has(position.id) : false;
+  const atBreakEven = stopIsAtBreakEven(stopOrder, breakEven, minMove);
+  const existingTargetPrice = targetOrder?.price ?? targetOrder?.stopPrice;
+  const targetUnchanged = existingTargetPrice != null && targetPrice != null && !tradeLinePriceChanged(existingTargetPrice, targetPrice, minMove);
+  const livePrice = quote.last > 0 ? quote.last : position?.last;
+  const currentR = currentRMultiple(position, baseline);
+
+  useEffect(() => { setRInput("2"); }, [position?.id]);
+
+  if (provider === "schwab") return <div className="trade-management-empty">
+    <span>Schwab</span><strong>Trade management unavailable</strong><p>Schwab positions are monitoring-only. Open a TradeStation futures chart to manage a live trade.</p>
+  </div>;
+
+  if (!position) return <div className="trade-management-empty">
+    <span>{tradeSymbol ?? "Active chart"}</span><strong>No open trade</strong><p>Trade Management follows the active chart. Open a chart with a position in the selected TradeStation account.</p>
+  </div>;
+
+  const stopReason = !nativeTrading ? "Broker actions are disabled in browser demo mode."
+    : protective.stops.length === 0 ? "No working protective stop is available."
+      : protective.stops.length > 1 ? "Multiple protective stops are working; adjust them individually on the chart."
+        : breakEven == null ? "The break-even price is unavailable."
+          : atBreakEven ? "The stop is already at break-even."
+            : stopReplacing ? "Stop replacement is in progress."
+              : `Move the stop to ${formatPrice(breakEven)}.`;
+  const moveStopDisabled = busy || !nativeTrading || protective.stops.length !== 1 || breakEven == null || atBreakEven || stopReplacing;
+  const targetReason = !nativeTrading ? "Broker actions are disabled in browser demo mode."
+    : protective.targets.length === 0 ? "No working take-profit order is available."
+      : protective.targets.length > 1 ? "Multiple take-profit orders are working; adjust them individually on the chart."
+        : !baseline ? "Original trade risk is unavailable, so an R target cannot be calculated."
+          : !rValid ? "Enter a positive R multiple."
+            : targetPrice == null ? "This R multiple does not produce a valid target."
+              : targetUnchanged ? `Take profit is already at ${formatPrice(targetPrice)}.`
+                : targetReplacing ? "Take-profit replacement is in progress."
+                  : `Move take profit to ${formatPrice(targetPrice)}.`;
+  const moveTargetDisabled = busy || !nativeTrading || protective.targets.length !== 1 || !baseline || !rValid || targetPrice == null || targetUnchanged || targetReplacing;
+
+  return <div className="trade-management-panel">
+    <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
+    <header className="managed-trade-lead">
+      <span className={position.side === "Long" ? "long" : "short"}>{position.side.toUpperCase()}</span>
+      <div><strong>{position.symbol}</strong><small>{Math.abs(position.quantity)} contract{Math.abs(position.quantity) === 1 ? "" : "s"}</small></div>
+      <strong className={position.unrealizedPnl >= 0 ? "positive" : "negative"}>{formatSignedUsd(position.unrealizedPnl)}</strong>
+    </header>
+    <dl className="managed-trade-data">
+      <div><dt>Average entry</dt><dd>{formatPrice(position.averagePrice)}</dd></div>
+      <div><dt>Last price</dt><dd>{formatPrice(livePrice)}</dd></div>
+      <div><dt>Current stop</dt><dd className="negative">{formatPrice(stopOrder?.stopPrice ?? stopOrder?.price)}</dd></div>
+      <div><dt>Current target</dt><dd className="positive">{formatPrice(targetOrder?.price ?? targetOrder?.stopPrice)}</dd></div>
+      <div><dt>Open P&amp;L</dt><dd className={position.unrealizedPnl >= 0 ? "positive" : "negative"}>{formatSignedUsd(position.unrealizedPnl)}</dd></div>
+      <div><dt>Current R</dt><dd>{currentR == null ? "—" : `${currentR >= 0 ? "+" : ""}${currentR.toFixed(2)}R`}</dd></div>
+      <div className="managed-risk-baseline"><dt>Original risk</dt><dd>{baseline?.deployedRisk != null ? `$${baseline.deployedRisk.toFixed(2)}` : "—"}{baseline?.originalStop != null ? ` · stop ${formatPrice(baseline.originalStop)}` : ""}{baseline?.riskProvenance === "inferred" ? " · inferred" : ""}</dd></div>
+    </dl>
+
+    <section className="management-actions" aria-labelledby="management-actions-title">
+      <div className="section-label"><span id="management-actions-title">Manage exits</span><small>Submits immediately</small></div>
+      <button type="button" className="management-action stop-to-be" disabled={moveStopDisabled} title={stopReason} onClick={() => { if (stopOrder && breakEven != null) void onReplaceOrder(stopOrder, breakEven); }}><span>Stop to BE</span><small>{stopReason}</small></button>
+      <div className="move-target-action">
+        <label htmlFor="managed-target-r"><span>Target R multiple</span><div><input id="managed-target-r" aria-invalid={!rValid} type="number" min="0.01" step="0.25" inputMode="decimal" value={rInput} onChange={(event) => setRInput(event.target.value)} /><span>R</span></div></label>
+        <button type="button" className="primary-button" disabled={moveTargetDisabled} title={targetReason} onClick={() => { if (targetOrder && targetPrice != null) void onReplaceOrder(targetOrder, targetPrice); }}>Move TP</button>
+        <small>{targetReason}</small>
+      </div>
+    </section>
+
+    <section className="close-trade-action" aria-labelledby="close-trade-title">
+      <div className="section-label"><span id="close-trade-title">Position</span><small>{Math.abs(position.quantity)} open</small></div>
+      <button type="button" className="danger-button" disabled={busy || closing || !nativeTrading} title={!nativeTrading ? "Position closing is disabled in browser demo mode." : closing ? "A close order is already in progress." : undefined} onClick={() => onCloseTrade(position)}>{closing ? "Closing…" : "Close Trade"}</button>
+      <small>{nativeTrading ? "Closes the full position and handles its working exits." : "Broker actions are disabled in browser demo mode."}</small>
+    </section>
+  </div>;
 }
 
 function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, settings, contracts, tradeContract, contractStatus, contractLookupError, rollStatus, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, resetEpoch, onTradeContractChange, onUseNextContract, onSettingsChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; bars: Bar[]; timeframe: Timeframe; settings: OrderTicketSettings; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; rollStatus?: ContractRollStatus; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; resetEpoch: number; onTradeContractChange: (symbol?: string) => void; onUseNextContract: () => void; onSettingsChange: (patch: Partial<OrderTicketSettings>) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {

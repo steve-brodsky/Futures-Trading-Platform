@@ -234,6 +234,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     tabs: tabsWithTransientTimeframes,
     environment: current.environment,
     rightPanelOpen: current.rightPanelOpen,
+    rightPanelMode: current.rightPanelMode,
     bottomTab: current.bottomTab,
     bottomBrokerPanel: current.bottomBrokerPanel,
     bottomPanelOpen: current.bottomPanelOpen,

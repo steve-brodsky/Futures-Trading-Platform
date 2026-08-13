@@ -389,6 +389,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     activeWorkspace: value.activeWorkspace === "options" ? "options" : "charts",
     optionChain: normalizeOptionChainPreferences(value.optionChain ?? fallback.optionChain),
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
+    rightPanelMode: value.rightPanelMode === "trade-management" ? "trade-management" : "order-entry",
     bottomTab: (legacyBottomTab ?? fallback.bottomTab) as WorkspaceState["bottomTab"],
     bottomBrokerPanel: ["combined", "tradestation", "schwab"].includes(value.bottomBrokerPanel as string)
       ? value.bottomBrokerPanel as WorkspaceState["bottomBrokerPanel"]

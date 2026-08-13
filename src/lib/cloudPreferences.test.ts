@@ -36,6 +36,7 @@ function workspace(): WorkspaceState {
     activeWorkspace: "charts",
     optionChain: { symbol: "SPY", strikeCount: 20 },
     rightPanelOpen: true,
+    rightPanelMode: "order-entry",
     bottomTab: "orders",
     bottomBrokerPanel: "combined",
     bottomPanelOpen: true,
@@ -78,6 +79,7 @@ describe("cloud preferences", () => {
     expect(profile.categories.alerts.entryRules).toBeUndefined();
     expect(serialized).not.toContain("secret-account-id");
     expect(serialized).not.toContain("confirmOrders");
+    expect(serialized).not.toContain("rightPanelMode");
     expect(serialized).not.toContain('"environment"');
     expect(serialized).not.toContain('"x":120');
     expect(serialized).not.toContain("splitRatios");
@@ -96,6 +98,7 @@ describe("cloud preferences", () => {
 
   it("applies cloud preferences without replacing device-local safety and geometry", () => {
     const local = workspace();
+    local.rightPanelMode = "trade-management";
     const profile = cloudPreferenceProfile({
       ...local,
       environment: "sim",
@@ -132,6 +135,7 @@ describe("cloud preferences", () => {
     expect(merged.environment).toBe("live");
     expect(merged.selectedAccountId).toBe("secret-account-id");
     expect(merged.confirmOrders).toBe(false);
+    expect(merged.rightPanelMode).toBe("trade-management");
     expect(merged.windows[0]).toMatchObject({ x: 120, y: 90, width: 1400, height: 900, maximized: true });
     expect(merged.windows[0].splitRatios?.["two-columns"]).toEqual([0.42]);
   });

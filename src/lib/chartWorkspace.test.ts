@@ -19,7 +19,7 @@ const fallback: WorkspaceState = {
   gexSelections: {},
   activeWorkspace: "charts",
   optionChain: { symbol: "SPY", strikeCount: 20 },
-  watchlist: [], recentSymbols: [], rightPanelOpen: false, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
+  watchlist: [], recentSymbols: [], rightPanelOpen: false, rightPanelMode: "order-entry", bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
   settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
@@ -490,6 +490,12 @@ describe("chart workspace", () => {
   it("defaults legacy workspaces to order confirmation", () => {
     const result = normalizeChartWorkspace({ ...fallback, confirmOrders: undefined }, fallback);
     expect(result.confirmOrders).toBe(true);
+  });
+
+  it("normalizes the persisted right panel mode", () => {
+    expect(normalizeChartWorkspace({ ...fallback, rightPanelMode: undefined }, fallback).rightPanelMode).toBe("order-entry");
+    expect(normalizeChartWorkspace({ ...fallback, rightPanelMode: "trade-management" }, fallback).rightPanelMode).toBe("trade-management");
+    expect(normalizeChartWorkspace({ ...fallback, rightPanelMode: "invalid" as WorkspaceState["rightPanelMode"] }, fallback).rightPanelMode).toBe("order-entry");
   });
 
   it("defaults legacy alert settings and preserves per-timeframe choices", () => {
