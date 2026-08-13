@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Bar } from "../types";
-import { nextBarRolloverRefresh } from "./barRollover";
+import { didBarCloseOnStreamUpdate, nextBarRolloverRefresh } from "./barRollover";
 
 const bar = (time: number): Bar => ({
   time,
@@ -13,6 +13,11 @@ const bar = (time: number): Bar => ({
 });
 
 describe("bar rollover refresh", () => {
+  it("does not treat initial history or same-candle updates as a close", () => {
+    expect(didBarCloseOnStreamUpdate(undefined, 100, false)).toBe(false);
+    expect(didBarCloseOnStreamUpdate(100, 100, true)).toBe(false);
+    expect(didBarCloseOnStreamUpdate(100, 101, true)).toBe(true);
+  });
   it("refreshes shortly after an intraday candle failed to advance", () => {
     expect(nextBarRolloverRefresh({
       bar: bar(1_000),

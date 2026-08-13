@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AutoBreakEvenRule, JournalRiskBaseline, OrderUpdate, Position } from "../types";
-import { autoBreakEvenRuleKey, breakEvenPrice, currentRMultiple, evaluateAutoBreakEven, findManagedPosition, managedProtectiveOrders, normalizeAutoBreakEvenRules, originalRiskBaseline, removeClosedAutoBreakEvenRules, stopIsAtBreakEven, stopProtectsBreakEven, takeProfitAtOriginalR } from "./tradeManagement";
+import type { AutoBreakEvenRule, AutoTrailStopRule, Bar, JournalRiskBaseline, OrderUpdate, Position } from "../types";
+import { autoBreakEvenRuleKey, autoTrailStopRuleKey, breakEvenPrice, currentRMultiple, evaluateAutoBreakEven, evaluateAutoTrailStop, findManagedPosition, managedProtectiveOrders, mostProtectiveStop, normalizeAutoBreakEvenRules, normalizeAutoTrailStopRules, originalRiskBaseline, removeClosedAutoBreakEvenRules, removeClosedAutoTrailStopRules, stopIsAtBreakEven, stopProtectsBreakEven, takeProfitAtOriginalR } from "./tradeManagement";
 
 const position: Position = {
   provider: "tradestation", accountId: "account-1", id: "p1", symbol: "MESU26", side: "Long",
@@ -16,6 +16,7 @@ const target: OrderUpdate = {
 const baseline: JournalRiskBaseline = {
   tradeId: "trade-1", symbol: "MESU26", direction: "Long", originalStop: 6249.5, deployedRisk: 75, riskProvenance: "exact",
 };
+const swingBar = (time: number, low: number, high: number): Bar => ({ time, open: low, high, low, close: (low + high) / 2, volume: 1 });
 
 describe("trade management", () => {
   it("selects only the active resolved TradeStation contract in the selected account", () => {
@@ -76,6 +77,51 @@ describe("trade management", () => {
     expect(normalizeAutoBreakEvenRules([])).toEqual({});
   });
 
+  it("normalizes persistent Trail Stop rules and rejects malformed identities", () => {
+    const key = autoTrailStopRuleKey("sim", "account-1", "p1");
+    const rule: AutoTrailStopRule = {
+      environment: "sim", accountId: "account-1", positionId: "p1", symbol: "mesu26",
+      status: "armed", clientMutationId: "trail-1", lastAppliedPrice: 6254,
+    };
+    expect(normalizeAutoTrailStopRules({ [key]: rule })).toEqual({ [key]: { ...rule, symbol: "MESU26" } });
+    expect(normalizeAutoTrailStopRules({ wrong: rule })).toEqual({});
+    expect(normalizeAutoTrailStopRules({ [key]: { ...rule, lastAppliedPrice: -1 } })).toEqual({});
+  });
+
+  it("trails beyond the latest long swing even after that swing rises above entry", () => {
+    const bars = [
+      swingBar(1, 106, 109), swingBar(2, 105, 108), swingBar(3, 107, 110), swingBar(4, 108, 111),
+    ];
+    const result = evaluateAutoTrailStop({
+      position: { ...position, averagePrice: 100, last: 110 }, accountId: "account-1",
+      orders: [{ ...stop, stopPrice: 99 }], bars, minMove: .25, pivotBars: 1, offsetTicks: 1,
+      marketPrice: 110, brokerageReady: true,
+    });
+    expect(result.state).toBe("trigger");
+    expect(result.swingPrice).toBe(105);
+    expect(result.candidatePrice).toBe(104.75);
+  });
+
+  it("trails a short stop downward and never weakens or crosses the market", () => {
+    const shortPosition = { ...position, side: "Short" as const, averagePrice: 100, last: 90 };
+    const shortStop = { ...stop, side: "Buy" as const, stopPrice: 101 };
+    const bars = [
+      swingBar(1, 91, 94), swingBar(2, 92, 95), swingBar(3, 90, 93), swingBar(4, 89, 92),
+    ];
+    const trigger = evaluateAutoTrailStop({ position: shortPosition, accountId: "account-1", orders: [shortStop], bars, minMove: .25, pivotBars: 1, offsetTicks: 1, marketPrice: 90, brokerageReady: true });
+    expect(trigger).toMatchObject({ state: "trigger", swingPrice: 95, candidatePrice: 95.25 });
+    expect(evaluateAutoTrailStop({ position: shortPosition, accountId: "account-1", orders: [{ ...shortStop, stopPrice: 94 }], bars, minMove: .25, pivotBars: 1, offsetTicks: 1, marketPrice: 90, brokerageReady: true }).state).toBe("waiting");
+    expect(evaluateAutoTrailStop({ position: shortPosition, accountId: "account-1", orders: [shortStop], bars, minMove: .25, pivotBars: 1, offsetTicks: 1, marketPrice: 96, brokerageReady: true }).reason).toMatch(/protective side/i);
+  });
+
+  it("pauses Trail Stop for ambiguous brokerage state and coalesces to the strongest stop", () => {
+    const bars = [swingBar(1, 106, 109), swingBar(2, 105, 108), swingBar(3, 107, 110), swingBar(4, 108, 111)];
+    expect(evaluateAutoTrailStop({ position, accountId: "account-1", orders: [], bars, minMove: .25, pivotBars: 1, offsetTicks: 1, brokerageReady: true }).reason).toMatch(/no working/i);
+    expect(evaluateAutoTrailStop({ position, accountId: "account-1", orders: [stop, { ...stop, id: "stop-2" }], bars, minMove: .25, pivotBars: 1, offsetTicks: 1, brokerageReady: true }).reason).toMatch(/multiple/i);
+    expect(mostProtectiveStop("Long", 100, 102)).toBe(102);
+    expect(mostProtectiveStop("Short", 100, 98)).toBe(98);
+  });
+
   it("never weakens a stop that already protects break-even", () => {
     expect(stopProtectsBreakEven(position, { ...stop, stopPrice: 6253.25 }, 6253.25, .25)).toBe(true);
     expect(stopProtectsBreakEven(position, { ...stop, stopPrice: 6254 }, 6253.25, .25)).toBe(true);
@@ -111,5 +157,16 @@ describe("trade management", () => {
     };
     expect(removeClosedAutoBreakEvenRules(rules, "sim", "account-1", [position])).toBe(rules);
     expect(removeClosedAutoBreakEvenRules(rules, "sim", "account-1", [])).toEqual({ [otherKey]: rules[otherKey] });
+  });
+
+  it("removes Trail Stop rules only for closed positions in the current account and environment", () => {
+    const key = autoTrailStopRuleKey("sim", "account-1", "p1");
+    const otherKey = autoTrailStopRuleKey("live", "account-1", "p2");
+    const rules: Record<string, AutoTrailStopRule> = {
+      [key]: { environment: "sim", accountId: "account-1", positionId: "p1", symbol: "MESU26", status: "armed", clientMutationId: "t1" },
+      [otherKey]: { environment: "live", accountId: "account-1", positionId: "p2", symbol: "MNQU26", status: "armed", clientMutationId: "t2" },
+    };
+    expect(removeClosedAutoTrailStopRules(rules, "sim", "account-1", [position])).toBe(rules);
+    expect(removeClosedAutoTrailStopRules(rules, "sim", "account-1", [])).toEqual({ [otherKey]: rules[otherKey] });
   });
 });

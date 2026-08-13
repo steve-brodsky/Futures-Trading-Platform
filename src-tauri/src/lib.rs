@@ -785,7 +785,7 @@ async fn start_bar_stream(
                 .ok_or_else(|| AppError::Validation("Unsupported Schwab timeframe".into()))?;
         }
     }
-    if !matches!(consumer.as_str(), "chart" | "ema-alert" | "vwap" | "truth-social-alert") {
+    if !matches!(consumer.as_str(), "chart" | "ema-alert" | "vwap" | "truth-social-alert" | "swing-trail") {
         return Err(AppError::Validation("Invalid bar stream consumer".into()));
     }
     let environment = state.api.environment().await;

@@ -396,6 +396,18 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .auto-break-even-control.attention .auto-break-even-status > span { background: var(--red); box-shadow: 0 0 0 3px rgba(239,70,111,.1); }
 .auto-break-even-control.attention .auto-break-even-status strong { color: #ef7892; }
 @keyframes auto-break-even-pulse { 50% { opacity: .4; box-shadow: 0 0 0 5px rgba(55,213,232,.04); } }
+.auto-trail-stop-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.auto-trail-stop-heading > span { padding-bottom: 7px; color: #69788b; font: 550 7px DM Mono,monospace; white-space: nowrap; }
+.auto-trail-stop-fields { display: grid; grid-template-columns: .9fr 1fr 1fr; gap: 6px; }
+.auto-trail-stop-fields > label { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.auto-trail-stop-fields label > span { overflow: hidden; color: #7f8c9d; font-size: 7px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.auto-trail-stop-fields select,.auto-trail-stop-fields input { width: 100%; height: 29px; border: 1px solid #2a3442; border-radius: 4px; color: #dce2ea; background: #0d1218; font: 600 9px DM Mono,monospace; }
+.auto-trail-stop-fields select { padding: 0 5px; }
+.auto-trail-stop-fields input { padding: 0 27px 0 7px; }
+.auto-trail-stop-fields select:focus-visible,.auto-trail-stop-fields input:focus-visible { outline: 2px solid var(--cyan); outline-offset: 1px; }
+.auto-trail-stop-fields select:disabled,.auto-trail-stop-fields input:disabled { opacity: .55; }
+.auto-trail-stop-fields label > div { position: relative; }
+.auto-trail-stop-fields label > div > span { position: absolute; top: 50%; right: 6px; color: #67768a; font: 600 6px DM Mono,monospace; transform: translateY(-50%); pointer-events: none; }
 .move-target-action { display: grid; grid-template-columns: minmax(0,1fr) 92px; gap: 7px; margin-top: 9px; }
 .move-target-action label { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .move-target-action label > span { color: #8592a3; font-size: 8px; font-weight: 600; }

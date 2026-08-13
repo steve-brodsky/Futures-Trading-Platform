@@ -1,0 +1,269 @@
+- main [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e10]: NORTHSTAR
+      - generic [ref=e11]: TRADER
+    - navigation "Workspace" [ref=e12]:
+      - button "Charts" [pressed] [ref=e13] [cursor=pointer]
+      - button "Options" [ref=e17] [cursor=pointer]
+    - navigation "Watchlist" [ref=e20]:
+      - generic [ref=e21]:
+        - button "MESU26, tradestation, 6,260.50, +0.07%" [ref=e22] [cursor=pointer]:
+          - strong [ref=e23]: MESU26
+          - generic [ref=e24]: 6,260.50
+          - generic [ref=e25]: +0.07%
+        - button "MNQU26, tradestation, 23,048.50, -0.01%" [ref=e26] [cursor=pointer]:
+          - strong [ref=e27]: MNQU26
+          - generic [ref=e28]: 23,048.50
+          - generic [ref=e29]: "-0.01%"
+        - button "MCLU26, tradestation, 68.42, +6.54%" [ref=e30] [cursor=pointer]:
+          - strong [ref=e31]: MCLU26
+          - generic [ref=e32]: "68.42"
+          - generic [ref=e33]: +6.54%
+        - button "MGCQ26, tradestation, 3,478.20, +0.12%" [ref=e34] [cursor=pointer]:
+          - strong [ref=e35]: MGCQ26
+          - generic [ref=e36]: 3,478.20
+          - generic [ref=e37]: +0.12%
+        - button "MYMU26, tradestation, 44,982.00, +0.01%" [ref=e38] [cursor=pointer]:
+          - strong [ref=e39]: MYMU26
+          - generic [ref=e40]: 44,982.00
+          - generic [ref=e41]: +0.01%
+    - generic "New York market time 13:16:03 EDT" [ref=e43]:
+      - generic [ref=e44]: NY
+      - time [ref=e45]: 13:16:03 EDT
+    - button "SIM" [ref=e46] [cursor=pointer]
+    - button "TRADESTATION DEMO" [ref=e50] [cursor=pointer]
+  - tablist "Chart tabs" [ref=e56]:
+    - tab [selected] [ref=e58]:
+      - button "@MES 1m chart" [ref=e59] [cursor=pointer]:
+        - strong [ref=e60]: "@MES"
+        - generic [ref=e61]: ·
+        - generic [ref=e62]: 1m
+        - generic "Shown in split layout" [ref=e63]
+      - button "Close @MES 1m chart" [disabled] [ref=e64]
+    - button "Add chart tab" [ref=e68] [cursor=pointer]
+  - navigation "Chart toolbar" [ref=e70]:
+    - button "@MES CME" [ref=e71] [cursor=pointer]:
+      - strong [ref=e75]: "@MES"
+      - generic [ref=e76]: CME
+    - generic [ref=e81]:
+      - button "1m" [ref=e82] [cursor=pointer]
+      - button "5m" [ref=e83] [cursor=pointer]
+      - button "15m" [ref=e84] [cursor=pointer]
+      - button "30m" [ref=e85] [cursor=pointer]
+      - button "1h" [ref=e86] [cursor=pointer]
+      - button "4h" [ref=e87] [cursor=pointer]
+      - button "D" [ref=e88] [cursor=pointer]
+      - button "W" [ref=e89] [cursor=pointer]
+      - button "M" [ref=e90] [cursor=pointer]
+      - button "Add custom timeframe" [ref=e91] [cursor=pointer]
+    - button "Chart layout" [ref=e95] [cursor=pointer]
+    - button "Sync crosshairs" [ref=e98] [cursor=pointer]
+    - button "Candles" [ref=e102] [cursor=pointer]
+    - button "Indicators" [ref=e109] [cursor=pointer]
+    - button "Alert" [ref=e112] [cursor=pointer]
+    - button "Drawing Alerts" [ref=e117] [cursor=pointer]
+    - button "Chart settings" [ref=e124] [cursor=pointer]
+    - button "Trading today" [pressed] [ref=e132] [cursor=pointer]
+    - button "Trade journal" [ref=e135] [cursor=pointer]
+    - button "Entry rules" [ref=e138] [cursor=pointer]
+    - button "Settings" [ref=e142] [cursor=pointer]
+    - button "Enter fullscreen" [ref=e146] [cursor=pointer]
+  - generic [ref=e152]:
+    - complementary "Drawing tools" [ref=e153]:
+      - button "Cursor" [pressed] [ref=e154] [cursor=pointer]
+      - 'button "Magnet: snap crosshair to candle high or low" [ref=e157] [cursor=pointer]'
+      - button "Horizontal drawing tools" [ref=e163] [cursor=pointer]
+      - button "Long and short position tools" [ref=e166] [cursor=pointer]
+    - region "@MES chart" [ref=e172]:
+      - generic:
+        - generic: CME
+        - strong: Micro E-mini S&P 500 Continuous
+        - generic: ·
+        - generic: "@MES"
+      - table [ref=e175]:
+        - row [ref=e176]:
+          - cell
+          - cell [ref=e177]:
+            - link "Charting by TradingView" [ref=e181] [cursor=pointer]:
+              - /url: https://www.tradingview.com/?utm_medium=lwc-link&utm_campaign=lwc-chart&utm_source=127.0.0.1/
+          - cell [ref=e186]
+        - row [ref=e190]:
+          - cell
+          - cell [ref=e191]
+          - cell [ref=e195]
+      - generic: "@MES"
+      - combobox "Chart timezone" [ref=e198] [cursor=pointer]:
+        - option "EXCH · CDT" [selected]
+        - option "Computer local"
+        - option "UTC"
+        - option "New York"
+        - option "Chicago"
+        - option "Denver"
+        - option "Los Angeles"
+        - option "London"
+        - option "Tokyo"
+    - complementary [ref=e199]:
+      - generic [ref=e200]:
+        - strong [ref=e201]: Order Panel
+        - button "Open order panel" [ref=e202] [cursor=pointer]
+    - generic [ref=e206]:
+      - strong [ref=e207]: Brokerage
+      - generic [ref=e208]: Two-broker overview
+      - button "Open bottom drawer" [ref=e210] [cursor=pointer]
+  - dialog [ref=e213]:
+    - generic [ref=e214]:
+      - generic [ref=e215]: Trading Today
+      - button "Close Trading Today" [active] [ref=e219] [cursor=pointer]
+    - generic [ref=e223]:
+      - generic [ref=e224]:
+        - generic [ref=e225]: Thursday
+        - heading "August 13, 2026" [level=1] [ref=e226]
+        - paragraph [ref=e227]: New York time · U.S. economic calendar
+      - region [ref=e228]:
+        - generic [ref=e229]:
+          - generic [ref=e230]: Upcoming market schedule
+          - generic [ref=e231]: Next 4 dates
+        - heading "Upcoming market schedule" [level=2] [ref=e232]
+        - article [ref=e233]:
+          - time [ref=e234]:
+            - strong [ref=e235]: "07"
+            - generic [ref=e236]:
+              - text: SEP
+              - generic [ref=e237]: Mon
+          - generic [ref=e238]:
+            - strong [ref=e239]: Labor Day
+            - generic [ref=e240]: NYSE · CME
+          - generic [ref=e241]:
+            - button "NYSE Closed" [ref=e242] [cursor=pointer]:
+              - generic [ref=e243]: NYSE
+              - generic [ref=e244]: Closed
+            - button "CME Modified" [ref=e245] [cursor=pointer]:
+              - generic [ref=e246]: CME
+              - generic [ref=e247]: Modified
+        - article [ref=e248]:
+          - time [ref=e249]:
+            - strong [ref=e250]: "26"
+            - generic [ref=e251]:
+              - text: NOV
+              - generic [ref=e252]: Thu
+          - generic [ref=e253]:
+            - strong [ref=e254]: Thanksgiving Day
+            - generic [ref=e255]: NYSE · CME
+          - generic [ref=e256]:
+            - button "NYSE Closed" [ref=e257] [cursor=pointer]:
+              - generic [ref=e258]: NYSE
+              - generic [ref=e259]: Closed
+            - button "CME Modified" [ref=e260] [cursor=pointer]:
+              - generic [ref=e261]: CME
+              - generic [ref=e262]: Modified
+        - article [ref=e263]:
+          - time [ref=e264]:
+            - strong [ref=e265]: "27"
+            - generic [ref=e266]:
+              - text: NOV
+              - generic [ref=e267]: Fri
+          - generic [ref=e268]:
+            - strong [ref=e269]: Day after Thanksgiving
+            - generic [ref=e270]: NYSE · CME
+          - generic [ref=e271]:
+            - button "NYSE Early close" [ref=e272] [cursor=pointer]:
+              - generic [ref=e273]: NYSE
+              - generic [ref=e274]: Early close
+            - button "CME Modified" [ref=e275] [cursor=pointer]:
+              - generic [ref=e276]: CME
+              - generic [ref=e277]: Modified
+        - article [ref=e278]:
+          - time [ref=e279]:
+            - strong [ref=e280]: "24"
+            - generic [ref=e281]:
+              - text: DEC
+              - generic [ref=e282]: Thu
+          - generic [ref=e283]:
+            - strong [ref=e284]: Christmas Eve
+            - generic [ref=e285]: NYSE · CME
+          - generic [ref=e286]:
+            - button "NYSE Early close" [ref=e287] [cursor=pointer]:
+              - generic [ref=e288]: NYSE
+              - generic [ref=e289]: Early close
+            - button "CME Modified" [ref=e290] [cursor=pointer]:
+              - generic [ref=e291]: CME
+              - generic [ref=e292]: Modified
+    - region [ref=e293]:
+      - generic [ref=e294]:
+        - generic [ref=e295]:
+          - text: United States
+          - heading "Economic events" [level=2] [ref=e296]
+        - generic [ref=e297]:
+          - generic [ref=e298]:
+            - generic [ref=e299]: Event times
+            - combobox "Economic event timezone" [ref=e300] [cursor=pointer]:
+              - option "Exchange time"
+              - option "Computer local"
+              - option "UTC"
+              - option "EDT" [selected]
+              - option "Chicago"
+              - option "Denver"
+              - option "Los Angeles"
+              - option "London"
+              - option "Tokyo"
+          - generic [ref=e301]: Demo data
+      - table [ref=e304]:
+        - rowgroup [ref=e305]:
+          - row [ref=e306]:
+            - columnheader "Time" [ref=e307]
+            - columnheader "Event" [ref=e308]
+            - columnheader "Actual" [ref=e309]
+            - columnheader "Consensus" [ref=e310]
+            - columnheader "Previous" [ref=e311]
+            - columnheader "Forecast" [ref=e312]
+        - rowgroup [ref=e313]:
+          - row [ref=e314]:
+            - cell "8:00 AM Medium impact" [ref=e315]:
+              - time [ref=e316]: 8:00 AM
+              - generic "Medium impact" [ref=e317]
+            - cell "Building Permits Final JUN" [ref=e318]:
+              - strong [ref=e319]: Building Permits Final
+              - generic [ref=e320]: JUN
+            - cell "1.374M" [ref=e321]
+            - cell "1.367M" [ref=e322]
+            - cell "1.41M" [ref=e323]
+            - cell "1.367M" [ref=e324]
+          - row [ref=e325]:
+            - cell "9:45 AM High impact" [ref=e326]:
+              - time [ref=e327]: 9:45 AM
+              - generic "High impact" [ref=e328]
+            - cell "S&P Global Manufacturing PMI Flash JUL" [ref=e329]:
+              - strong [ref=e330]: S&P Global Manufacturing PMI Flash
+              - generic [ref=e331]: JUL
+            - cell "53.8" [ref=e332]
+            - cell "54.3" [ref=e333]
+            - cell "53.9" [ref=e334]
+            - cell "54.2" [ref=e335]
+          - row [ref=e336]:
+            - cell "10:00 AM High impact" [ref=e337]:
+              - time [ref=e338]: 10:00 AM
+              - generic "High impact" [ref=e339]
+            - cell "New Home Sales JUN" [ref=e340]:
+              - strong [ref=e341]: New Home Sales
+              - generic [ref=e342]: JUN
+            - cell "0.628M" [ref=e343]
+            - cell "0.61M" [ref=e344]
+            - cell "0.618M" [ref=e345]
+            - cell "0.6M" [ref=e346]
+          - row [ref=e347]:
+            - cell "1:00 PM Low impact" [ref=e348]:
+              - time [ref=e349]: 1:00 PM
+              - generic "Low impact" [ref=e350]
+            - cell "Baker Hughes Total Rigs Count JUL/24" [ref=e351]:
+              - strong [ref=e352]: Baker Hughes Total Rigs Count
+              - generic [ref=e353]: JUL/24
+            - cell "587" [ref=e354]
+            - cell "—" [ref=e355]
+            - cell "588" [ref=e356]
+            - cell "—" [ref=e357]
+    - generic [ref=e358]:
+      - generic [ref=e359]:
+        - 'button "Data: Trading Economics" [ref=e360] [cursor=pointer]'
+        - generic [ref=e365]: Updated 1:16 PM ET
+      - button "Refresh" [ref=e366] [cursor=pointer]

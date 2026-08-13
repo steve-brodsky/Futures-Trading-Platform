@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Bar } from "../types";
-import { calculateSwingStop, offsetBeyondSwing } from "./swingStop";
+import { calculateSwingStop, latestConfirmedSwing, offsetBeyondSwing } from "./swingStop";
 
 const bar = (low: number, high: number): Bar => ({ time: 0, open: low, high, low, close: high, volume: 1 });
 const calculate = (bars: Bar[], patch: Partial<Parameters<typeof calculateSwingStop>[0]> = {}) => calculateSwingStop({
@@ -30,6 +30,24 @@ describe("swing stop", () => {
     expect(calculate([
       bar(98, 101), bar(97, 102), bar(96, 103), bar(90, 104), bar(95, 105), bar(96, 106), bar(97, 107), bar(99, 108),
     ], { pivotBars: 3 })).toBe(89.75);
+  });
+
+  it("supports strict pivots from one through ten candles per side", () => {
+    for (const pivotBars of [1, 2, 3, 10]) {
+      const before = Array.from({ length: pivotBars }, (_, index) => ({ ...bar(90 + index, 110 - index), time: index }));
+      const pivot = { ...bar(80, 120), time: pivotBars };
+      const after = Array.from({ length: pivotBars }, (_, index) => ({ ...bar(91 + index, 109 - index), time: pivotBars + index + 1 }));
+      const current = { ...bar(100, 105), time: pivotBars * 2 + 1 };
+      expect(latestConfirmedSwing([...before, pivot, ...after, current], "Buy", pivotBars)).toEqual({ time: pivotBars, price: 80 });
+      expect(latestConfirmedSwing([...before, pivot, ...after, current], "Sell", pivotBars)).toEqual({ time: pivotBars, price: 120 });
+    }
+  });
+
+  it("rejects invalid pivot strengths and equal-price plateaus", () => {
+    const bars = [bar(91, 101), bar(90, 102), bar(90, 103), bar(92, 100)];
+    expect(latestConfirmedSwing(bars, "Buy", 1)).toBeNull();
+    expect(latestConfirmedSwing(bars, "Buy", 0)).toBeNull();
+    expect(latestConfirmedSwing(bars, "Buy", 11)).toBeNull();
   });
 
   it("excludes the unfinished final candle", () => {

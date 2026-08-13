@@ -24,7 +24,7 @@ import { mutationPresentation } from "./lib/mutationResults";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
-import { nextBarRolloverRefresh, type BarRolloverRefreshState } from "./lib/barRollover";
+import { didBarCloseOnStreamUpdate, nextBarRolloverRefresh, type BarRolloverRefreshState } from "./lib/barRollover";
 import { demoOrders, demoPositions, demoSchwabAccounts, demoSchwabBalance, demoSchwabBodBalance, demoSchwabOrders, demoSchwabPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
 import { calculateContractsForRisk, calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
@@ -40,7 +40,7 @@ import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy a
 import { calculateSwingStop } from "./lib/swingStop";
 import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, shouldRetryEntryScreenshots, ENTRY_SCREENSHOT_QUEUE_LIMIT } from "./lib/entryScreenshot";
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, tradeLinePriceChanged, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
-import { autoBreakEvenRuleKey, breakEvenPrice, currentRMultiple, evaluateAutoBreakEven, findManagedPosition, managedProtectiveOrders, originalRiskBaseline, removeClosedAutoBreakEvenRules, stopProtectsBreakEven, takeProfitAtOriginalR } from "./lib/tradeManagement";
+import { autoBreakEvenRuleKey, autoTrailStopRuleKey, breakEvenPrice, currentRMultiple, evaluateAutoBreakEven, evaluateAutoTrailStop, findManagedPosition, isMoreProtectiveStop, managedProtectiveOrders, originalRiskBaseline, removeClosedAutoBreakEvenRules, removeClosedAutoTrailStopRules, stopProtectsBreakEven, takeProfitAtOriginalR } from "./lib/tradeManagement";
 import { isTargetOutside } from "./lib/menuFocus";
 import { autocompleteKeyAction, useSymbolSuggestions } from "./lib/symbolSearch";
 import { defaultIndicators } from "./lib/workspace";
@@ -75,7 +75,7 @@ import {
   type RapidMoveTrackerState,
 } from "./lib/truthSocialAlerts";
 import { applySchwabOptionQuote, combinedCurrencyTotal, heldOptionsForUnderlying, positionPnlTotal, readableBrokerOrderSymbol } from "./lib/schwabBrokerage";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, AutoBreakEvenRule, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, FailedBreakoutIndicatorConfig, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, JournalRiskBaseline, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, AutoBreakEvenRule, AutoTrailStopRule, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, FailedBreakoutIndicatorConfig, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, JournalRiskBaseline, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TrailStopSettings, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 type IndicatorPatch<T extends IndicatorConfig = IndicatorConfig> = T extends IndicatorConfig
@@ -113,8 +113,8 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
-  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, rightPanelMode: "order-entry", autoBreakEvenRules: {}, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
+  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, rightPanelMode: "order-entry", autoBreakEvenRules: {}, autoTrailStopRules: {}, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, trailStop: { timeframe: "1m", pivotBars: 2, offsetTicks: 1 }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -165,6 +165,21 @@ interface BarSubscription {
   timeframe: Timeframe;
   epoch: string;
   generation: number;
+}
+
+interface ManagedStopRequest {
+  source: "break-even" | "trail";
+  ruleKey: string;
+  ruleToken: string;
+  accountId: string;
+  positionId: string;
+  symbol: string;
+  orderId: string;
+  price: number;
+}
+
+function trailMarketKey(symbol: string, timeframe: Timeframe): string {
+  return `${symbol.trim().toUpperCase()}\u0000${timeframe}`;
 }
 
 type ReviewState =
@@ -670,6 +685,21 @@ function TradingApp() {
   const autoBreakEvenInFlightRef = useRef(new Set<string>());
   const autoBreakEvenPendingPersistenceRef = useRef(new Map<string, string>());
   const [autoBreakEvenPersistenceEpoch, setAutoBreakEvenPersistenceEpoch] = useState(0);
+  const autoTrailStopPendingPersistenceRef = useRef(new Map<string, string>());
+  const [autoTrailStopPersistenceEpoch, setAutoTrailStopPersistenceEpoch] = useState(0);
+  const autoTrailSubscriptionsRef = useRef(new Map<string, BarSubscription>());
+  const autoTrailBarsRef = useRef(new Map<string, Bar[]>());
+  const autoTrailLatestBarTimeRef = useRef(new Map<string, number>());
+  const autoTrailStreamSeededRef = useRef(new Set<string>());
+  const autoTrailClosedMarketsRef = useRef(new Set<string>());
+  const autoTrailDesiredMarketsRef = useRef(new Set<string>());
+  const [autoTrailBarsEpoch, setAutoTrailBarsEpoch] = useState(0);
+  const managedStopPendingRef = useRef(new Map<string, ManagedStopRequest>());
+  const managedStopInFlightRef = useRef(new Set<string>());
+  const managedStopPricesRef = useRef(new Map<string, number>());
+  const positionsRef = useRef(positions);
+  const ordersRef = useRef(orders);
+  const tradeDetailsRef = useRef(tradeDetails);
   const [currentTime, setCurrentTime] = useState(() => Date.now());
   const subscriptionsRef = useRef(new Map<string, BarSubscription>());
   const barRolloverRefreshRef = useRef(new Map<string, BarRolloverRefreshState>());
@@ -957,6 +987,9 @@ function TradingApp() {
   vwapDataEpochRef.current = `${environment}:${authEpoch}`;
   entryScreenshotCandidatesRef.current = entryScreenshotCandidates;
   environmentRef.current = environment;
+  positionsRef.current = positions;
+  ordersRef.current = orders;
+  tradeDetailsRef.current = tradeDetails;
 
   function acceptsEnvironmentGeneration(generation: number): boolean {
     if (generation < environmentGenerationRef.current) return false;
@@ -968,6 +1001,10 @@ function TradingApp() {
       ? { provider: "tradestation", symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
       : quoteFor(activeTradeSymbol, 0, "tradestation"))
     : { provider: "tradestation", symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
+  const trailStopTimeframes = orderedToolbarTimeframes(workspace.customMinuteTimeframes);
+  const activeTrailBars = autoTrailBarsEpoch >= 0 && activeTradeSymbol
+    ? autoTrailBarsRef.current.get(trailMarketKey(activeTradeSymbol, workspace.settings.trailStop.timeframe)) ?? []
+    : [];
   const activeOrderMinMove = activeTradeMeta?.minMove ?? activeTab.symbol.minMove;
   const cloudPreferenceKey = useMemo(
     () => JSON.stringify(cloudPreferenceProfile(workspaceForPersistence(workspace, sessionCustomMinuteTimeframes, persistentTimeframesRef.current))),
@@ -1100,6 +1137,26 @@ function TradingApp() {
         level: "warning" as const,
       }, ...current].slice(0, 250));
     });
+  }
+
+  function handleAutoTrailBars(payload: BarSnapshotEvent | BarUpdateEvent) {
+    if (currentWindowId !== MAIN_WINDOW_ID || payload.provider !== "tradestation" || payload.environment !== environmentRef.current) return;
+    const subscription = [...autoTrailSubscriptionsRef.current.values()].find((candidate) => candidate.subscriptionId === payload.subscriptionId);
+    if (!subscription || subscription.generation !== payload.generation || subscription.symbol !== payload.symbol || subscription.timeframe !== payload.timeframe) return;
+    const key = trailMarketKey(payload.symbol, payload.timeframe);
+    if (!autoTrailDesiredMarketsRef.current.has(key)) return;
+    const incoming = "bars" in payload ? payload.bars : [payload.bar];
+    const nextBars = mergeBars(autoTrailBarsRef.current.get(key) ?? [], incoming);
+    autoTrailBarsRef.current.set(key, nextBars);
+    const latestTime = nextBars.at(-1)?.time;
+    const previousTime = autoTrailLatestBarTimeRef.current.get(key);
+    if (latestTime != null) {
+      autoTrailLatestBarTimeRef.current.set(key, latestTime);
+      const streamSeeded = autoTrailStreamSeededRef.current.has(key);
+      if (!streamSeeded) autoTrailStreamSeededRef.current.add(key);
+      else if (didBarCloseOnStreamUpdate(previousTime, latestTime, streamSeeded)) autoTrailClosedMarketsRef.current.add(key);
+    }
+    setAutoTrailBarsEpoch((current) => current + 1);
   }
 
   function stopTruthSocialCheck() {
@@ -1297,6 +1354,7 @@ function TradingApp() {
       listen<string>("schwab-auth-error", ({ payload }) => showToast(payload)).then((unlisten) => cleanups.push(unlisten));
       listen<BarSnapshotEvent>("bar-snapshot", ({ payload }) => {
         handleTruthSocialBars(payload);
+        handleAutoTrailBars(payload);
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
         if (acceptsWindowBarEvent(tab, payload)) {
           setTabMarkets((current) => {
@@ -1314,6 +1372,7 @@ function TradingApp() {
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BarUpdateEvent>("bar-update", ({ payload }) => {
         handleTruthSocialBars(payload);
+        handleAutoTrailBars(payload);
         const tab = workspaceRef.current.tabs.find((item) => item.id === payload.subscriptionId);
         if (acceptsWindowBarEvent(tab, payload)) {
           setTabMarkets((current) => {
@@ -1762,14 +1821,132 @@ function TradingApp() {
     return () => { active = false; };
   }, [selectedAccount?.id, environment, journalRiskPositionKey, journalRiskRevision]);
 
+  const autoTrailStreamKey = Object.values(workspace.autoTrailStopRules)
+    .filter((rule) => rule.environment === environment && rule.accountId === selectedAccount?.id && rule.status !== "attention")
+    .map((rule) => rule.symbol)
+    .sort()
+    .join("|");
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    Object.entries(workspace.autoTrailStopRules).forEach(([ruleKey, rule]) => {
+      if (rule.status !== "triggering" || managedStopInFlightRef.current.has(`${rule.accountId}:${rule.positionId}`)) return;
+      updateAutoTrailStopRule(ruleKey, rule.clientMutationId, {
+        status: "attention",
+        message: "A previous Trail Stop replacement did not finish. Verify the working stop before rearming.",
+      });
+    });
+  }, [workspaceLoaded, workspace.autoTrailStopRules]);
+
+  useEffect(() => {
+    if (!workspaceLoaded || currentWindowId !== MAIN_WINDOW_ID) return;
+    const timeframe = workspace.settings.trailStop.timeframe;
+    const symbols = [...new Set(Object.values(workspace.autoTrailStopRules)
+      .filter((rule) => rule.environment === environment && rule.accountId === selectedAccount?.id && rule.status !== "attention")
+      .map((rule) => rule.symbol.trim().toUpperCase()))];
+    const desired = new Set(symbols.map((symbol) => trailMarketKey(symbol, timeframe)));
+    autoTrailDesiredMarketsRef.current = desired;
+
+    autoTrailSubscriptionsRef.current.forEach((subscription, key) => {
+      if (desired.has(key)) return;
+      if (api.isNative) void api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration());
+      autoTrailSubscriptionsRef.current.delete(key);
+      autoTrailBarsRef.current.delete(key);
+      autoTrailLatestBarTimeRef.current.delete(key);
+      autoTrailStreamSeededRef.current.delete(key);
+      autoTrailClosedMarketsRef.current.delete(key);
+    });
+
+    if (!api.isNative || !authenticated || !selectedAccount) return;
+    symbols.forEach((symbol) => {
+      const key = trailMarketKey(symbol, timeframe);
+      if (autoTrailSubscriptionsRef.current.has(key)) return;
+      const subscriptionId = `swing-trail:${encodeURIComponent(symbol)}:${timeframe}`;
+      const generation = nextBarSubscriptionGeneration();
+      const subscription: BarSubscription = {
+        subscriptionId,
+        provider: "tradestation",
+        symbol,
+        timeframe,
+        epoch: `${authEpoch}:${environment}:${authenticated}`,
+        generation,
+      };
+      autoTrailSubscriptionsRef.current.set(key, subscription);
+      autoTrailBarsRef.current.delete(key);
+      autoTrailLatestBarTimeRef.current.delete(key);
+      autoTrailStreamSeededRef.current.delete(key);
+      autoTrailClosedMarketsRef.current.delete(key);
+      api.cachedBars("tradestation", symbol, timeframe).then((cached) => {
+        if (autoTrailSubscriptionsRef.current.get(key)?.generation !== generation) return;
+        const bars = mergeBars(autoTrailBarsRef.current.get(key) ?? [], cached);
+        autoTrailBarsRef.current.set(key, bars);
+        if (!autoTrailLatestBarTimeRef.current.has(key) && bars.length) autoTrailLatestBarTimeRef.current.set(key, bars.at(-1)!.time);
+        setAutoTrailBarsEpoch((current) => current + 1);
+      }).catch(() => undefined);
+      api.startBarStream(subscriptionId, "tradestation", symbol, timeframe, "swing-trail", generation).catch((error) => {
+        if (autoTrailSubscriptionsRef.current.get(key)?.generation !== generation) return;
+        autoTrailSubscriptionsRef.current.delete(key);
+        Object.entries(workspaceRef.current.autoTrailStopRules).forEach(([ruleKey, rule]) => {
+          if (rule.environment === environmentRef.current && rule.accountId === selectedAccountIdRef.current && rule.symbol === symbol) {
+            updateAutoTrailStopRule(ruleKey, rule.clientMutationId, { status: "attention", message: `Trail Stop data is unavailable: ${String(error)}` });
+          }
+        });
+      });
+    });
+  }, [workspaceLoaded, autoTrailStreamKey, workspace.settings.trailStop.timeframe, environment, selectedAccount?.id, authenticated, authEpoch, autoTrailStopPersistenceEpoch]);
+
+  useEffect(() => {
+    if (currentWindowId !== MAIN_WINDOW_ID || !workspaceLoaded || !selectedAccount || !autoTrailClosedMarketsRef.current.size) return;
+    const closedMarkets = new Set(autoTrailClosedMarketsRef.current);
+    autoTrailClosedMarketsRef.current.clear();
+    const snapshotScope = positionSnapshotScope(environment, selectedAccount.id);
+    const brokerageReady = positionsReadyScope === snapshotScope && ordersReadyScope === snapshotScope
+      && !brokerageLoading && !brokerageError && !environmentTransitioning;
+    Object.entries(workspace.autoTrailStopRules).forEach(([ruleKey, rule]) => {
+      if (rule.environment !== environment || rule.accountId !== selectedAccount.id || rule.status !== "armed") return;
+      const marketKey = trailMarketKey(rule.symbol, workspace.settings.trailStop.timeframe);
+      if (!closedMarkets.has(marketKey)) return;
+      const position = positions.find((candidate) => candidate.id === rule.positionId && Math.abs(candidate.quantity) > 0);
+      const meta = position
+        ? tradeDetails[position.symbol] ?? Object.values(tradeDetails).find((candidate) => candidate.symbol.toUpperCase() === position.symbol.toUpperCase())
+        : undefined;
+      const quote = quotesRef.current[`tradestation:${rule.symbol}`];
+      const marketPrice = position?.side === "Long" ? quote?.bid || quote?.last || position.last : quote?.ask || quote?.last || position?.last;
+      const evaluation = evaluateAutoTrailStop({
+        position,
+        accountId: selectedAccount.id,
+        orders,
+        bars: autoTrailBarsRef.current.get(marketKey) ?? [],
+        minMove: meta?.minMove,
+        pivotBars: workspace.settings.trailStop.pivotBars,
+        offsetTicks: workspace.settings.trailStop.offsetTicks,
+        marketPrice,
+        brokerageReady,
+      });
+      if (evaluation.state === "trigger" && evaluation.stop && evaluation.candidatePrice != null) {
+        queueManagedStopReplacement({
+          source: "trail",
+          ruleKey,
+          ruleToken: rule.clientMutationId,
+          accountId: rule.accountId,
+          positionId: rule.positionId,
+          symbol: rule.symbol,
+          orderId: evaluation.stop.id,
+          price: evaluation.candidatePrice,
+        });
+      }
+    });
+  }, [autoTrailBarsEpoch, workspaceLoaded, workspace.autoTrailStopRules, workspace.settings.trailStop, environment, selectedAccount?.id, positionsReadyScope, ordersReadyScope, positions, orders, tradeDetails, brokerageLoading, brokerageError, environmentTransitioning]);
+
   useEffect(() => {
     if (currentWindowId !== MAIN_WINDOW_ID || !workspaceLoaded || !api.isNative || !authenticated || !selectedAccount) return;
     const snapshotScope = positionSnapshotScope(environment, selectedAccount.id);
     if (positionsReadyScope !== snapshotScope) return;
 
     const cleanedRules = removeClosedAutoBreakEvenRules(workspace.autoBreakEvenRules, environment, selectedAccount.id, positions);
-    if (cleanedRules !== workspace.autoBreakEvenRules) {
-      updateWorkspace({ autoBreakEvenRules: cleanedRules });
+    const cleanedTrailRules = removeClosedAutoTrailStopRules(workspace.autoTrailStopRules, environment, selectedAccount.id, positions);
+    if (cleanedRules !== workspace.autoBreakEvenRules || cleanedTrailRules !== workspace.autoTrailStopRules) {
+      updateWorkspace({ autoBreakEvenRules: cleanedRules, autoTrailStopRules: cleanedTrailRules });
       return;
     }
 
@@ -1807,6 +1984,7 @@ function TradingApp() {
   }, [
     workspaceLoaded,
     workspace.autoBreakEvenRules,
+    workspace.autoTrailStopRules,
     environment,
     selectedAccount?.id,
     authenticated,
@@ -2436,6 +2614,7 @@ function TradingApp() {
       subscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration()));
       alertSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration()));
       vwapSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration()));
+      autoTrailSubscriptionsRef.current.forEach((subscription) => api.stopBarStream(subscription.subscriptionId, nextBarSubscriptionGeneration()));
     }
   }, []);
 
@@ -3311,7 +3490,12 @@ function TradingApp() {
     const timeframe = minuteTimeframe(minutes);
     replaceSessionCustomTimeframes((current) => current.filter((item) => item !== minutes));
     workspaceRef.current.tabs.forEach((tab) => { if (tab.timeframe === timeframe) persistentTimeframesRef.current.set(tab.id, "1m"); });
-    commitWorkspace((current) => removeCustomMinuteTimeframeFromWorkspace(current, minutes));
+    commitWorkspace((current) => {
+      const next = removeCustomMinuteTimeframeFromWorkspace(current, minutes);
+      return next.settings.trailStop.timeframe === timeframe
+        ? { ...next, settings: { ...next.settings, trailStop: { ...next.settings.trailStop, timeframe: "1m" } } }
+        : next;
+    });
   }
 
   function commitWorkspace(update: (current: WorkspaceState) => WorkspaceState) {
@@ -4306,51 +4490,217 @@ function TradingApp() {
     removeAutoBreakEvenRule(ruleKey, existing.clientMutationId);
   }
 
-  async function executeAutoBreakEven(ruleKey: string, rule: AutoBreakEvenRule, stopOrder: OrderUpdate, newPrice: number) {
-    if (!selectedAccount || selectedAccount.id !== rule.accountId || autoBreakEvenInFlightRef.current.has(ruleKey)) return;
-    autoBreakEvenInFlightRef.current.add(ruleKey);
-    const original = stopOrder.price ?? stopOrder.stopPrice;
-    updateAutoBreakEvenRule(ruleKey, rule.clientMutationId, { status: "triggering", message: undefined });
-    setReplacingOrderIds((current) => new Set(current).add(stopOrder.id));
-    setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, newPrice) : item));
+  function updateAutoTrailStopRule(ruleKey: string, clientMutationId: string, patch: Partial<AutoTrailStopRule>) {
+    commitWorkspace((current) => {
+      const existing = current.autoTrailStopRules[ruleKey];
+      if (!existing || existing.clientMutationId !== clientMutationId) return current;
+      return { ...current, autoTrailStopRules: { ...current.autoTrailStopRules, [ruleKey]: { ...existing, ...patch } } };
+    });
+  }
+
+  function removeAutoTrailStopRule(ruleKey: string, clientMutationId?: string) {
+    commitWorkspace((current) => {
+      const existing = current.autoTrailStopRules[ruleKey];
+      if (!existing || (clientMutationId && existing.clientMutationId !== clientMutationId)) return current;
+      const nextRules = { ...current.autoTrailStopRules };
+      delete nextRules[ruleKey];
+      return { ...current, autoTrailStopRules: nextRules };
+    });
+  }
+
+  function persistAutoTrailStopRule(rule: AutoTrailStopRule) {
+    const ruleKey = autoTrailStopRuleKey(rule.environment, rule.accountId, rule.positionId);
+    const rules = { ...workspaceRef.current.autoTrailStopRules, [ruleKey]: rule };
+    const token = crypto.randomUUID();
+    autoTrailStopPendingPersistenceRef.current.set(ruleKey, token);
+    updateWorkspace({ autoTrailStopRules: rules });
+    const snapshot = {
+      ...workspaceRef.current,
+      autoTrailStopRules: rules,
+      revision: Math.max(workspaceRef.current.revision + 1, Date.now()),
+    };
+    void api.saveWorkspace(workspaceForPersistence(snapshot, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current))
+      .then(() => api.saveWorkspace(workspaceForPersistence(workspaceRef.current, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current)))
+      .then(() => {
+        if (autoTrailStopPendingPersistenceRef.current.get(ruleKey) !== token) return;
+        autoTrailStopPendingPersistenceRef.current.delete(ruleKey);
+        setAutoTrailStopPersistenceEpoch((current) => current + 1);
+      })
+      .catch((error) => {
+        if (autoTrailStopPendingPersistenceRef.current.get(ruleKey) !== token) return;
+        autoTrailStopPendingPersistenceRef.current.delete(ruleKey);
+        updateAutoTrailStopRule(ruleKey, rule.clientMutationId, {
+          status: "attention",
+          message: `The Trail Stop rule could not be saved: ${String(error)}`,
+        });
+        showToast("Trail Stop needs attention because its rule could not be saved.");
+      });
+  }
+
+  function armAutoTrailStop(position: Position) {
+    if (!api.isNative || !selectedAccount) return;
+    persistAutoTrailStopRule({
+      environment,
+      accountId: selectedAccount.id,
+      positionId: position.id,
+      symbol: position.symbol,
+      status: "armed",
+      clientMutationId: crypto.randomUUID(),
+    });
+  }
+
+  function disableAutoTrailStop(position: Position) {
+    if (!selectedAccount) return;
+    const ruleKey = autoTrailStopRuleKey(environment, selectedAccount.id, position.id);
+    const existing = workspaceRef.current.autoTrailStopRules[ruleKey];
+    if (!existing || existing.status === "triggering" || managedStopInFlightRef.current.has(`${existing.accountId}:${existing.positionId}`)) return;
+    autoTrailStopPendingPersistenceRef.current.delete(ruleKey);
+    removeAutoTrailStopRule(ruleKey, existing.clientMutationId);
+  }
+
+  function updateTrailStopSettings(patch: Partial<TrailStopSettings>) {
+    commitWorkspace((current) => ({
+      ...current,
+      settings: { ...current.settings, trailStop: { ...current.settings.trailStop, ...patch } },
+    }));
+  }
+
+  function queueManagedStopReplacement(request: ManagedStopRequest) {
+    const position = positionsRef.current.find((candidate) => candidate.id === request.positionId && Math.abs(candidate.quantity) > 0);
+    if (!position) return;
+    const queueKey = `${request.accountId}:${request.positionId}`;
+    const existing = managedStopPendingRef.current.get(queueKey);
+    const stronger = !existing || isMoreProtectiveStop(position.side, request.price, existing.price);
+    if (stronger) managedStopPendingRef.current.set(queueKey, request);
+    void drainManagedStopReplacements(queueKey);
+  }
+
+  async function drainManagedStopReplacements(queueKey: string) {
+    if (managedStopInFlightRef.current.has(queueKey)) return;
+    managedStopInFlightRef.current.add(queueKey);
+    const touchedOrderIds = new Set<string>();
     try {
-      const result = await api.replaceOrder(rule.accountId, stopOrder.id, newPrice, rule.clientMutationId);
-      reportMutation(result, "Automatic break-even");
-      if (result.brokerOutcome !== "confirmed") {
-        setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, original) : item));
-        const message = result.brokerOutcome === "rejected"
-          ? result.rejectionReason ?? "TradeStation rejected the stop replacement."
-          : "The broker outcome is unknown. Review the working stop before taking further action.";
-        updateAutoBreakEvenRule(ruleKey, rule.clientMutationId, { status: "attention", message });
-        setNotifications((current) => [{
-          id: crypto.randomUUID(), time: new Date().toISOString(), symbol: rule.symbol,
-          title: "Auto Stop to BE needs attention", text: message, level: "error" as const,
-        }, ...current].slice(0, 250));
-        return;
+      while (managedStopPendingRef.current.has(queueKey)) {
+        const request = managedStopPendingRef.current.get(queueKey)!;
+        managedStopPendingRef.current.delete(queueKey);
+        const position = positionsRef.current.find((candidate) => candidate.id === request.positionId && Math.abs(candidate.quantity) > 0);
+        if (!position || selectedAccountIdRef.current !== request.accountId) continue;
+        const validRule = request.source === "break-even"
+          ? workspaceRef.current.autoBreakEvenRules[request.ruleKey]?.clientMutationId === request.ruleToken
+          : workspaceRef.current.autoTrailStopRules[request.ruleKey]?.clientMutationId === request.ruleToken;
+        if (!validRule) continue;
+        const protective = managedProtectiveOrders(position, request.accountId, ordersRef.current);
+        const stopOrder = protective.stops.length === 1 ? protective.stops[0] : undefined;
+        if (!stopOrder || stopOrder.id !== request.orderId) continue;
+        touchedOrderIds.add(stopOrder.id);
+        const currentPrice = managedStopPricesRef.current.get(stopOrder.id) ?? stopOrder.stopPrice ?? stopOrder.price;
+        const meta = tradeDetailsRef.current[position.symbol]
+          ?? Object.values(tradeDetailsRef.current).find((candidate) => candidate.symbol.toUpperCase() === position.symbol.toUpperCase());
+        const minMove = meta?.minMove ?? 0;
+        const tolerance = minMove > 0 ? minMove / 2 : 0;
+        const improves = currentPrice != null && isMoreProtectiveStop(position.side, request.price, currentPrice, tolerance);
+        if (!improves) {
+          if (request.source === "break-even") {
+            const breakEven = breakEvenPrice(position, minMove);
+            if (stopProtectsBreakEven(position, stopOrder, breakEven, minMove)) removeAutoBreakEvenRule(request.ruleKey, request.ruleToken);
+          }
+          continue;
+        }
+
+        if (request.source === "break-even") {
+          autoBreakEvenInFlightRef.current.add(request.ruleKey);
+          updateAutoBreakEvenRule(request.ruleKey, request.ruleToken, { status: "triggering", message: undefined });
+        } else {
+          updateAutoTrailStopRule(request.ruleKey, request.ruleToken, { status: "triggering", message: undefined });
+        }
+        setReplacingOrderIds((current) => new Set(current).add(stopOrder.id));
+        managedStopPricesRef.current.set(stopOrder.id, request.price);
+        setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, request.price) : item));
+        const original = currentPrice;
+        let confirmed = false;
+        try {
+          const result = await api.replaceOrder(request.accountId, stopOrder.id, request.price, crypto.randomUUID());
+          reportMutation(result, request.source === "break-even" ? "Automatic break-even" : "Swing Trail Stop");
+          if (result.brokerOutcome !== "confirmed") {
+            const message = result.brokerOutcome === "rejected"
+              ? result.rejectionReason ?? "TradeStation rejected the stop replacement."
+              : "The broker outcome is unknown. Review the working stop before taking further action.";
+            setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, original) : item));
+            managedStopPricesRef.current.set(stopOrder.id, original);
+            if (request.source === "break-even") updateAutoBreakEvenRule(request.ruleKey, request.ruleToken, { status: "attention", message });
+            else updateAutoTrailStopRule(request.ruleKey, request.ruleToken, { status: "attention", message });
+            managedStopPendingRef.current.delete(queueKey);
+            setNotifications((current) => [{
+              id: crypto.randomUUID(), time: new Date().toISOString(), symbol: request.symbol,
+              title: request.source === "break-even" ? "Auto Stop to BE needs attention" : "Trail Stop needs attention",
+              text: message, level: "error" as const,
+            }, ...current].slice(0, 250));
+            continue;
+          }
+          confirmed = true;
+          if (result.brokerOrder) {
+            const confirmedPrice = result.brokerOrder.stopPrice ?? result.brokerOrder.price ?? request.price;
+            managedStopPricesRef.current.set(stopOrder.id, confirmedPrice);
+            setOrders((current) => current.map((item) => item.id === stopOrder.id ? { ...item, ...result.brokerOrder! } : item));
+          }
+          if (request.source === "break-even") removeAutoBreakEvenRule(request.ruleKey, request.ruleToken);
+          else updateAutoTrailStopRule(request.ruleKey, request.ruleToken, { status: "armed", lastAppliedPrice: request.price, message: undefined });
+
+          const breakEvenKey = autoBreakEvenRuleKey(environmentRef.current, request.accountId, request.positionId);
+          const breakEvenRule = workspaceRef.current.autoBreakEvenRules[breakEvenKey];
+          const resultingStop = withOrderPrice(stopOrder, request.price);
+          if (breakEvenRule && stopProtectsBreakEven(position, resultingStop, breakEvenPrice(position, minMove), minMove)) {
+            removeAutoBreakEvenRule(breakEvenKey, breakEvenRule.clientMutationId);
+          }
+          brokerageRefreshRef.current(true);
+          const title = request.source === "break-even" ? "Automatic break-even complete" : "Trail Stop adjusted";
+          setNotifications((current) => [{
+            id: crypto.randomUUID(), time: new Date().toISOString(), symbol: request.symbol,
+            title, text: `Protective stop moved to ${formatPrice(request.price)}.`, level: "success" as const,
+          }, ...current].slice(0, 250));
+          showToast(request.source === "break-even"
+            ? `${request.symbol} stop moved to break-even automatically.`
+            : `${request.symbol} Trail Stop moved to ${formatPrice(request.price)}.`);
+        } catch (error) {
+          const message = `The automatic stop replacement failed: ${String(error)}`;
+          setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, original) : item));
+          managedStopPricesRef.current.set(stopOrder.id, original);
+          if (request.source === "break-even") updateAutoBreakEvenRule(request.ruleKey, request.ruleToken, { status: "attention", message });
+          else updateAutoTrailStopRule(request.ruleKey, request.ruleToken, { status: "attention", message });
+          managedStopPendingRef.current.delete(queueKey);
+          setNotifications((current) => [{
+            id: crypto.randomUUID(), time: new Date().toISOString(), symbol: request.symbol,
+            title: request.source === "break-even" ? "Auto Stop to BE needs attention" : "Trail Stop needs attention",
+            text: message, level: "error" as const,
+          }, ...current].slice(0, 250));
+          showToast(`${request.source === "break-even" ? "Auto Stop to BE" : "Trail Stop"} needs attention. Review the working stop.`);
+        } finally {
+          autoBreakEvenInFlightRef.current.delete(request.ruleKey);
+          setReplacingOrderIds((current) => { const next = new Set(current); next.delete(stopOrder.id); return next; });
+          if (!confirmed && request.source === "trail") {
+            // Attention state is intentionally retained until the user disables and rearms.
+          }
+        }
       }
-      if (result.brokerOrder) {
-        setOrders((current) => current.map((item) => item.id === stopOrder.id ? { ...item, ...result.brokerOrder! } : item));
-      }
-      removeAutoBreakEvenRule(ruleKey, rule.clientMutationId);
-      brokerageRefreshRef.current(true);
-      setNotifications((current) => [{
-        id: crypto.randomUUID(), time: new Date().toISOString(), symbol: rule.symbol,
-        title: "Automatic break-even complete", text: `Protective stop moved to ${formatPrice(newPrice)}.`, level: "success" as const,
-      }, ...current].slice(0, 250));
-      showToast(`${rule.symbol} stop moved to break-even automatically.`);
-    } catch (error) {
-      setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, original) : item));
-      const message = `The automatic stop replacement failed: ${String(error)}`;
-      updateAutoBreakEvenRule(ruleKey, rule.clientMutationId, { status: "attention", message });
-      setNotifications((current) => [{
-        id: crypto.randomUUID(), time: new Date().toISOString(), symbol: rule.symbol,
-        title: "Auto Stop to BE needs attention", text: message, level: "error" as const,
-      }, ...current].slice(0, 250));
-      showToast("Auto Stop to BE needs attention. Review the working stop.");
     } finally {
-      autoBreakEvenInFlightRef.current.delete(ruleKey);
-      setReplacingOrderIds((current) => { const next = new Set(current); next.delete(stopOrder.id); return next; });
+      touchedOrderIds.forEach((orderId) => managedStopPricesRef.current.delete(orderId));
+      managedStopInFlightRef.current.delete(queueKey);
+      if (managedStopPendingRef.current.has(queueKey)) void drainManagedStopReplacements(queueKey);
     }
+  }
+
+  async function executeAutoBreakEven(ruleKey: string, rule: AutoBreakEvenRule, stopOrder: OrderUpdate, newPrice: number) {
+    if (!selectedAccount || selectedAccount.id !== rule.accountId) return;
+    queueManagedStopReplacement({
+      source: "break-even",
+      ruleKey,
+      ruleToken: rule.clientMutationId,
+      accountId: rule.accountId,
+      positionId: rule.positionId,
+      symbol: rule.symbol,
+      orderId: stopOrder.id,
+      price: newPrice,
+    });
   }
 
   async function replaceChartOrder(order: OrderUpdate, newPrice: number) {
@@ -4791,7 +5141,7 @@ function TradingApp() {
               <span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p>
             </div>
             : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} rollStatus={activeRollStatus} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onUseNextContract={useNextActiveContract} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}</div>
-            : <div id="trade-management-mode-panel" role="tabpanel" aria-labelledby="trade-management-mode-tab"><TradeManagementPanel provider={activeTab.symbol.provider} tradeSymbol={activeTradeSymbol} minMove={activeTradeMeta?.minMove ?? activeTab.symbol.minMove} quote={activeTradeQuote} account={selectedAccount} environment={environment} positions={positions} orders={orders} riskBaselines={activeJournalRiskBaselines} autoBreakEvenRules={workspace.autoBreakEvenRules} brokerageReady={!api.isNative || Boolean(selectedAccount && authenticated && positionsReadyScope === positionSnapshotScope(environment, selectedAccount.id) && ordersReadyScope === positionSnapshotScope(environment, selectedAccount.id) && !brokerageLoading && !brokerageError && !environmentTransitioning)} nativeTrading={api.isNative} busy={busy || environmentTransitioning} replacingOrderIds={replacingOrderIds} closingPositionIds={closingPositionIds} onReplaceOrder={replaceChartOrder} onCloseTrade={requestClosePosition} onArmAutoBreakEven={armAutoBreakEven} onUpdateAutoBreakEven={updateAutoBreakEvenThreshold} onDisableAutoBreakEven={disableAutoBreakEven} /></div>}
+            : <div id="trade-management-mode-panel" role="tabpanel" aria-labelledby="trade-management-mode-tab"><TradeManagementPanel provider={activeTab.symbol.provider} tradeSymbol={activeTradeSymbol} minMove={activeTradeMeta?.minMove ?? activeTab.symbol.minMove} quote={activeTradeQuote} account={selectedAccount} environment={environment} positions={positions} orders={orders} riskBaselines={activeJournalRiskBaselines} autoBreakEvenRules={workspace.autoBreakEvenRules} autoTrailStopRules={workspace.autoTrailStopRules} trailStopSettings={workspace.settings.trailStop} trailStopTimeframes={trailStopTimeframes} trailBars={activeTrailBars} brokerageReady={!api.isNative || Boolean(selectedAccount && authenticated && positionsReadyScope === positionSnapshotScope(environment, selectedAccount.id) && ordersReadyScope === positionSnapshotScope(environment, selectedAccount.id) && !brokerageLoading && !brokerageError && !environmentTransitioning)} nativeTrading={api.isNative} busy={busy || environmentTransitioning} replacingOrderIds={replacingOrderIds} closingPositionIds={closingPositionIds} onReplaceOrder={replaceChartOrder} onCloseTrade={requestClosePosition} onArmAutoBreakEven={armAutoBreakEven} onUpdateAutoBreakEven={updateAutoBreakEvenThreshold} onDisableAutoBreakEven={disableAutoBreakEven} onArmAutoTrailStop={armAutoTrailStop} onDisableAutoTrailStop={disableAutoTrailStop} onTrailStopSettingsChange={updateTrailStopSettings} /></div>}
         </div>}
       </aside>}
 
@@ -5427,7 +5777,7 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   </section>;
 }
 
-function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, environment, positions, orders, riskBaselines, autoBreakEvenRules, brokerageReady, nativeTrading, busy, replacingOrderIds, closingPositionIds, onReplaceOrder, onCloseTrade, onArmAutoBreakEven, onUpdateAutoBreakEven, onDisableAutoBreakEven }: {
+function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, environment, positions, orders, riskBaselines, autoBreakEvenRules, autoTrailStopRules, trailStopSettings, trailStopTimeframes, trailBars, brokerageReady, nativeTrading, busy, replacingOrderIds, closingPositionIds, onReplaceOrder, onCloseTrade, onArmAutoBreakEven, onUpdateAutoBreakEven, onDisableAutoBreakEven, onArmAutoTrailStop, onDisableAutoTrailStop, onTrailStopSettingsChange }: {
   provider: MarketDataProvider;
   tradeSymbol?: string;
   minMove: number;
@@ -5438,6 +5788,10 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
   orders: OrderUpdate[];
   riskBaselines: JournalRiskBaseline[];
   autoBreakEvenRules: Record<string, AutoBreakEvenRule>;
+  autoTrailStopRules: Record<string, AutoTrailStopRule>;
+  trailStopSettings: TrailStopSettings;
+  trailStopTimeframes: Timeframe[];
+  trailBars: Bar[];
   brokerageReady: boolean;
   nativeTrading: boolean;
   busy: boolean;
@@ -5448,6 +5802,9 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
   onArmAutoBreakEven: (position: Position, thresholdR: number) => void;
   onUpdateAutoBreakEven: (position: Position, thresholdR: number) => void;
   onDisableAutoBreakEven: (position: Position) => void;
+  onArmAutoTrailStop: (position: Position) => void;
+  onDisableAutoTrailStop: (position: Position) => void;
+  onTrailStopSettingsChange: (patch: Partial<TrailStopSettings>) => void;
 }) {
   const position = provider === "tradestation" ? findManagedPosition(tradeSymbol, account?.id, positions) : undefined;
   const protective = managedProtectiveOrders(position, account?.id, orders);
@@ -5472,6 +5829,8 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
   const currentR = currentRMultiple(position, baseline);
   const autoRuleKey = position && account ? autoBreakEvenRuleKey(environment, account.id, position.id) : undefined;
   const autoRule = autoRuleKey ? autoBreakEvenRules[autoRuleKey] : undefined;
+  const trailRuleKey = position && account ? autoTrailStopRuleKey(environment, account.id, position.id) : undefined;
+  const trailRule = trailRuleKey ? autoTrailStopRules[trailRuleKey] : undefined;
   const autoEvaluation = evaluateAutoBreakEven({
     position,
     accountId: account?.id,
@@ -5479,6 +5838,18 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
     baseline,
     minMove,
     thresholdR: autoRule?.thresholdR ?? autoRMultiple,
+    brokerageReady,
+  });
+  const trailMarketPrice = position?.side === "Long" ? quote.bid || quote.last || position.last : quote.ask || quote.last || position?.last;
+  const trailEvaluation = evaluateAutoTrailStop({
+    position,
+    accountId: account?.id,
+    orders,
+    bars: trailBars,
+    minMove,
+    pivotBars: trailStopSettings.pivotBars,
+    offsetTicks: trailStopSettings.offsetTicks,
+    marketPrice: trailMarketPrice,
     brokerageReady,
   });
 
@@ -5519,6 +5890,14 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
             : { kind: "armed", label: `Armed · waiting for +${autoRule.thresholdR.toFixed(2)}R`, detail: autoEvaluation.reason };
   const autoToggleDisabled = busy || !nativeTrading || (!autoRule && !autoRValid) || autoRule?.status === "triggering";
   const autoInputDisabled = busy || !nativeTrading || autoRule?.status === "triggering" || autoRule?.status === "attention";
+  const anyTrailTriggering = Object.values(autoTrailStopRules).some((rule) => rule.status === "triggering");
+  const trailStatus = !trailRule ? { kind: "off", label: "Off", detail: `Uses ${trailStopSettings.timeframe} candles when armed.` }
+    : trailRule.status === "attention" ? { kind: "attention", label: "Needs attention", detail: trailRule.message ?? "Review the working stop before rearming." }
+      : trailRule.status === "triggering" ? { kind: "triggering", label: "Triggering", detail: "Moving the stop beyond the latest confirmed swing." }
+        : trailEvaluation.state === "paused" ? { kind: "paused", label: "Paused", detail: trailEvaluation.reason }
+          : { kind: "armed", label: `Armed · ${trailStopSettings.timeframe} close`, detail: trailRule.lastAppliedPrice != null ? `Last moved to ${formatPrice(trailRule.lastAppliedPrice)}. ${trailEvaluation.reason}` : trailEvaluation.reason };
+  const trailToggleDisabled = busy || !nativeTrading || trailRule?.status === "triggering";
+  const trailSettingsDisabled = !nativeTrading || anyTrailTriggering;
   const commitAutoThreshold = () => {
     if (!position || !autoRule || autoRule.status !== "armed" || !autoRValid) return;
     onUpdateAutoBreakEven(position, autoRMultiple);
@@ -5550,6 +5929,18 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
           <label className="auto-break-even-threshold"><span>Trigger at</span><div><input aria-label="Automatic break-even R threshold" aria-invalid={!autoRValid} type="number" min="0.01" step="0.25" inputMode="decimal" value={autoRInput} disabled={autoInputDisabled} onChange={(event) => { const value = event.target.value; setAutoRInput(value); const threshold = Number(value); if (position && autoRule?.status === "armed" && value.trim() && Number.isFinite(threshold) && threshold > 0) onUpdateAutoBreakEven(position, threshold); }} onBlur={commitAutoThreshold} onKeyDown={(event) => { if (event.key === "Enter") { event.currentTarget.blur(); } }} /><span>R</span></div></label>
         </div>
         <div className="auto-break-even-status" role="status" aria-live="polite"><span aria-hidden="true" /><div><strong>{autoStatus.label}</strong><small>{!nativeTrading ? "Automation is disabled in browser demo mode." : autoStatus.detail}</small></div></div>
+      </div>
+      <div className={`auto-break-even-control auto-trail-stop-control ${trailStatus.kind}`}>
+        <div className="auto-trail-stop-heading">
+          <label className="auto-break-even-switch"><input type="checkbox" role="switch" checked={Boolean(trailRule)} disabled={trailToggleDisabled} onChange={(event) => { if (!position) return; if (event.target.checked) onArmAutoTrailStop(position); else onDisableAutoTrailStop(position); }} /><span aria-hidden="true" /><strong>Trail Stop</strong></label>
+          <span>At candle close</span>
+        </div>
+        <div className="auto-trail-stop-fields">
+          <label><span>Timeframe</span><select aria-label="Trail Stop timeframe" value={trailStopSettings.timeframe} disabled={trailSettingsDisabled} onChange={(event) => onTrailStopSettingsChange({ timeframe: event.target.value as Timeframe })}>{trailStopTimeframes.map((timeframe) => <option key={timeframe} value={timeframe}>{timeframe}</option>)}</select></label>
+          <label><span>Pivot / side</span><select aria-label="Trail Stop pivot candles per side" value={trailStopSettings.pivotBars} disabled={trailSettingsDisabled} onChange={(event) => onTrailStopSettingsChange({ pivotBars: Number(event.target.value) })}>{Array.from({ length: 10 }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+          <label><span>Offset</span><div><input aria-label="Trail Stop offset ticks" type="number" min="1" max="100" step="1" inputMode="numeric" value={trailStopSettings.offsetTicks} disabled={trailSettingsDisabled} onChange={(event) => onTrailStopSettingsChange({ offsetTicks: Math.max(1, Math.min(100, Math.round(Number(event.target.value) || 1))) })} /><span>ticks</span></div></label>
+        </div>
+        <div className="auto-break-even-status" role="status" aria-live="polite"><span aria-hidden="true" /><div><strong>{trailStatus.label}</strong><small>{!nativeTrading ? "Automation is disabled in browser demo mode." : trailStatus.detail}</small></div></div>
       </div>
       <div className="move-target-action">
         <label htmlFor="managed-target-r"><span>Target R multiple</span><div><input id="managed-target-r" aria-invalid={!rValid} type="number" min="0.01" step="0.25" inputMode="decimal" value={rInput} onChange={(event) => setRInput(event.target.value)} /><span>R</span></div></label>

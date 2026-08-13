@@ -14,7 +14,7 @@ import { normalizeChartSessionSettings } from "./chartSessions";
 import { normalizeChartEconomicEventSettings } from "./economicEvents";
 import { normalizeContractRollAlertSettings } from "./contractRoll";
 import { normalizeCustomMinuteTimeframes, normalizeTimeframe } from "./timeframes";
-import { normalizeAutoBreakEvenRules } from "./tradeManagement";
+import { normalizeAutoBreakEvenRules, normalizeAutoTrailStopRules } from "./tradeManagement";
 
 export const MAX_CHART_TABS = 12;
 export const MAIN_WINDOW_ID = "main";
@@ -392,6 +392,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
     rightPanelMode: value.rightPanelMode === "trade-management" ? "trade-management" : "order-entry",
     autoBreakEvenRules: normalizeAutoBreakEvenRules(value.autoBreakEvenRules),
+    autoTrailStopRules: normalizeAutoTrailStopRules(value.autoTrailStopRules),
     bottomTab: (legacyBottomTab ?? fallback.bottomTab) as WorkspaceState["bottomTab"],
     bottomBrokerPanel: ["combined", "tradestation", "schwab"].includes(value.bottomBrokerPanel as string)
       ? value.bottomBrokerPanel as WorkspaceState["bottomBrokerPanel"]
@@ -443,6 +444,15 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
         riskAmount: typeof savedOrderTicket?.riskAmount === "number" && Number.isFinite(savedOrderTicket.riskAmount) && savedOrderTicket.riskAmount > 0
           ? savedOrderTicket.riskAmount
           : undefined,
+      },
+      trailStop: {
+        timeframe: normalizeTimeframe(value.settings?.trailStop?.timeframe, customMinuteTimeframes, fallback.settings.trailStop.timeframe),
+        pivotBars: typeof value.settings?.trailStop?.pivotBars === "number" && Number.isFinite(value.settings.trailStop.pivotBars)
+          ? Math.max(1, Math.min(10, Math.round(value.settings.trailStop.pivotBars)))
+          : fallback.settings.trailStop.pivotBars,
+        offsetTicks: typeof value.settings?.trailStop?.offsetTicks === "number" && Number.isFinite(value.settings.trailStop.offsetTicks)
+          ? Math.max(1, Math.min(100, Math.round(value.settings.trailStop.offsetTicks)))
+          : fallback.settings.trailStop.offsetTicks,
       },
       contractRollAlerts: normalizeContractRollAlertSettings(savedContractRollAlerts ?? fallback.settings.contractRollAlerts),
       truthSocialAlerts: {
@@ -590,6 +600,9 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && current.settings.orderTicket.sizingMode === incoming.settings.orderTicket.sizingMode
     && current.settings.orderTicket.riskSizingPolicy === incoming.settings.orderTicket.riskSizingPolicy
     && current.settings.orderTicket.riskAmount === incoming.settings.orderTicket.riskAmount
+    && current.settings.trailStop.timeframe === incoming.settings.trailStop.timeframe
+    && current.settings.trailStop.pivotBars === incoming.settings.trailStop.pivotBars
+    && current.settings.trailStop.offsetTicks === incoming.settings.trailStop.offsetTicks
     && current.settings.journal.commissionPerContractSide === incoming.settings.journal.commissionPerContractSide
     ? current.settings
     : incoming.settings;

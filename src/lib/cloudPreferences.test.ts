@@ -38,6 +38,7 @@ function workspace(): WorkspaceState {
     rightPanelOpen: true,
     rightPanelMode: "order-entry",
     autoBreakEvenRules: {},
+    autoTrailStopRules: {},
     bottomTab: "orders",
     bottomBrokerPanel: "combined",
     bottomPanelOpen: true,
@@ -53,6 +54,7 @@ function workspace(): WorkspaceState {
       chartSessions: DEFAULT_CHART_SESSION_SETTINGS,
       chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS,
       orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", timeInForce: "GTC", riskAmount: 150 },
+      trailStop: { timeframe: "5m", pivotBars: 4, offsetTicks: 2 },
       contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS,
       truthSocialAlerts: { enabled: true },
       journal: { commissionPerContractSide: 0.75, schwabOptionFeePerContractSide: 0.65 },
@@ -68,6 +70,10 @@ describe("cloud preferences", () => {
       environment: "live", accountId: "secret-account-id", positionId: "position-1", symbol: "MESU26",
       thresholdR: 1, status: "armed", clientMutationId: "local-rule-mutation",
     };
+    original.autoTrailStopRules["live:secret-account-id:position-1"] = {
+      environment: "live", accountId: "secret-account-id", positionId: "position-1", symbol: "MESU26",
+      status: "armed", clientMutationId: "local-trail-mutation",
+    };
     const profile = cloudPreferenceProfile(original);
     const serialized = JSON.stringify(profile);
     expect(serialized).toContain("MESU26");
@@ -80,12 +86,14 @@ describe("cloud preferences", () => {
     expect(profile.categories.order_entry.entryRuleAlerts).toEqual(original.entryRuleAlerts);
     expect(profile.categories.order_entry.entryRuleLock).toEqual({ enabled: false });
     expect(profile.categories.order_entry.contractRollAlerts).toEqual(original.settings.contractRollAlerts);
+    expect(profile.categories.order_entry.trailStop).toEqual(original.settings.trailStop);
     expect(profile.categories.alerts.truthSocial).toEqual({ enabled: true });
     expect(profile.categories.alerts.entryRules).toBeUndefined();
     expect(serialized).not.toContain("secret-account-id");
     expect(serialized).not.toContain("confirmOrders");
     expect(serialized).not.toContain("rightPanelMode");
     expect(serialized).not.toContain("local-rule-mutation");
+    expect(serialized).not.toContain("local-trail-mutation");
     expect(serialized).not.toContain('"environment"');
     expect(serialized).not.toContain('"x":120');
     expect(serialized).not.toContain("splitRatios");
@@ -108,6 +116,10 @@ describe("cloud preferences", () => {
     local.autoBreakEvenRules["live:secret-account-id:position-1"] = {
       environment: "live", accountId: "secret-account-id", positionId: "position-1", symbol: "MESU26",
       thresholdR: 1.25, status: "armed", clientMutationId: "local-rule-mutation",
+    };
+    local.autoTrailStopRules["live:secret-account-id:position-1"] = {
+      environment: "live", accountId: "secret-account-id", positionId: "position-1", symbol: "MESU26",
+      status: "armed", clientMutationId: "local-trail-mutation",
     };
     const profile = cloudPreferenceProfile({
       ...local,
@@ -147,6 +159,7 @@ describe("cloud preferences", () => {
     expect(merged.confirmOrders).toBe(false);
     expect(merged.rightPanelMode).toBe("trade-management");
     expect(merged.autoBreakEvenRules).toEqual(local.autoBreakEvenRules);
+    expect(merged.autoTrailStopRules).toEqual(local.autoTrailStopRules);
     expect(merged.windows[0]).toMatchObject({ x: 120, y: 90, width: 1400, height: 900, maximized: true });
     expect(merged.windows[0].splitRatios?.["two-columns"]).toEqual([0.42]);
   });

@@ -85,6 +85,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       },
       order_entry: {
         orderTicket: { ...workspace.settings.orderTicket },
+        trailStop: { ...workspace.settings.trailStop },
         contractRollAlerts: { ...workspace.settings.contractRollAlerts },
         entryRules: workspace.entryRules,
         entryRuleAlerts: workspace.entryRuleAlerts,
@@ -203,6 +204,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
         },
       },
       orderTicket: { ...current.settings.orderTicket, ...object(orderEntry?.orderTicket) },
+      trailStop: { ...current.settings.trailStop, ...object(orderEntry?.trailStop) },
       contractRollAlerts: normalizeContractRollAlertSettings(orderEntry?.contractRollAlerts ?? current.settings.contractRollAlerts),
       truthSocialAlerts: {
         enabled: typeof object(alerts?.truthSocial)?.enabled === "boolean"
@@ -236,6 +238,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     rightPanelOpen: current.rightPanelOpen,
     rightPanelMode: current.rightPanelMode,
     autoBreakEvenRules: current.autoBreakEvenRules,
+    autoTrailStopRules: current.autoTrailStopRules,
     bottomTab: current.bottomTab,
     bottomBrokerPanel: current.bottomBrokerPanel,
     bottomPanelOpen: current.bottomPanelOpen,

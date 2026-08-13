@@ -5,11 +5,38 @@ export interface SwingStopInput {
   side: "Buy" | "Sell";
   entryPrice: number;
   minMove: number;
-  pivotBars: 2 | 3;
+  pivotBars: number;
   offsetTicks: number;
 }
 
 const normalizePrice = (price: number) => Number(price.toFixed(10));
+
+export interface ConfirmedSwing {
+  time: number;
+  price: number;
+}
+
+export function latestConfirmedSwing(
+  bars: Bar[],
+  side: "Buy" | "Sell",
+  pivotBars: number,
+): ConfirmedSwing | null {
+  if (!Number.isInteger(pivotBars) || pivotBars < 1 || pivotBars > 10) return null;
+  const completed = bars.slice(0, -1);
+  if (completed.length < pivotBars * 2 + 1) return null;
+  for (let index = completed.length - pivotBars - 1; index >= pivotBars; index -= 1) {
+    const pivot = completed[index];
+    const neighbors = completed.slice(index - pivotBars, index).concat(completed.slice(index + 1, index + pivotBars + 1));
+    if (side === "Buy") {
+      if (Number.isFinite(pivot.low) && neighbors.every((bar) => Number.isFinite(bar.low) && pivot.low < bar.low)) {
+        return { time: pivot.time, price: pivot.low };
+      }
+    } else if (Number.isFinite(pivot.high) && neighbors.every((bar) => Number.isFinite(bar.high) && pivot.high > bar.high)) {
+      return { time: pivot.time, price: pivot.high };
+    }
+  }
+  return null;
+}
 
 export function offsetBeyondSwing(swingPrice: number, side: "Buy" | "Sell", minMove: number, offsetTicks: number): number | null {
   if (!Number.isFinite(swingPrice) || swingPrice <= 0 || !Number.isFinite(minMove) || minMove <= 0
@@ -25,7 +52,7 @@ export function offsetBeyondSwing(swingPrice: number, side: "Buy" | "Sell", minM
 
 export function calculateSwingStop({ bars, side, entryPrice, minMove, pivotBars, offsetTicks }: SwingStopInput): number | null {
   if (!Number.isFinite(entryPrice) || entryPrice <= 0 || !Number.isFinite(minMove) || minMove <= 0
-    || !Number.isInteger(offsetTicks) || offsetTicks < 1 || ![2, 3].includes(pivotBars)) return null;
+    || !Number.isInteger(offsetTicks) || offsetTicks < 1 || !Number.isInteger(pivotBars) || pivotBars < 1 || pivotBars > 10) return null;
 
   const completed = bars.slice(0, -1);
   if (completed.length < pivotBars * 2 + 1) return null;

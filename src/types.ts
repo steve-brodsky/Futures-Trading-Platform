@@ -15,7 +15,7 @@ export type SyntheticPriceSource = "close" | "high-low";
 export type OrderType = "Market" | "Limit" | "StopMarket" | "StopLimit";
 export type ChartTimezone = "exchange" | "local" | "UTC" | "America/New_York" | "America/Chicago" | "America/Denver" | "America/Los_Angeles" | "Europe/London" | "Asia/Tokyo";
 export type StreamConnectionState = "connecting" | "streaming" | "stale" | "reconnecting" | "disconnected" | "rate-limited";
-export type BarStreamConsumer = "chart" | "ema-alert" | "vwap" | "truth-social-alert";
+export type BarStreamConsumer = "chart" | "ema-alert" | "vwap" | "truth-social-alert" | "swing-trail";
 
 export interface Bar {
   time: number;
@@ -662,6 +662,12 @@ export interface OrderTicketSettings {
   riskAmount?: number;
 }
 
+export interface TrailStopSettings {
+  timeframe: Timeframe;
+  pivotBars: number;
+  offsetTicks: number;
+}
+
 export type ContractRollPhase = "clear" | "approaching" | "roll-due";
 
 export interface ContractRollStatus {
@@ -687,6 +693,7 @@ export interface WorkspaceSettings {
   chartSessions: ChartSessionSettings;
   chartEconomicEvents: ChartEconomicEventSettings;
   orderTicket: OrderTicketSettings;
+  trailStop: TrailStopSettings;
   contractRollAlerts: ContractRollAlertSettings;
   truthSocialAlerts: TruthSocialAlertSettings;
   journal: {
@@ -708,6 +715,19 @@ export interface AutoBreakEvenRule {
   message?: string;
 }
 
+export type AutoTrailStopRuleStatus = "armed" | "triggering" | "attention";
+
+export interface AutoTrailStopRule {
+  environment: TradingEnvironment;
+  accountId: string;
+  positionId: string;
+  symbol: string;
+  status: AutoTrailStopRuleStatus;
+  clientMutationId: string;
+  lastAppliedPrice?: number;
+  message?: string;
+}
+
 export interface WorkspaceState {
   revision: number;
   environment: TradingEnvironment;
@@ -723,6 +743,7 @@ export interface WorkspaceState {
   rightPanelOpen: boolean;
   rightPanelMode: "order-entry" | "trade-management";
   autoBreakEvenRules: Record<string, AutoBreakEvenRule>;
+  autoTrailStopRules: Record<string, AutoTrailStopRule>;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
   bottomBrokerPanel: "combined" | "tradestation" | "schwab";
   bottomPanelOpen: boolean;

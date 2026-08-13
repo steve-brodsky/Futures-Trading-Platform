@@ -19,8 +19,8 @@ const fallback: WorkspaceState = {
   gexSelections: {},
   activeWorkspace: "charts",
   optionChain: { symbol: "SPY", strikeCount: 20 },
-  watchlist: [], recentSymbols: [], rightPanelOpen: false, rightPanelMode: "order-entry", autoBreakEvenRules: {}, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
+  watchlist: [], recentSymbols: [], rightPanelOpen: false, rightPanelMode: "order-entry", autoBreakEvenRules: {}, autoTrailStopRules: {}, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, trailStop: { timeframe: "1m", pivotBars: 2, offsetTicks: 1 }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 describe("chart workspace", () => {
@@ -504,6 +504,22 @@ describe("chart workspace", () => {
     expect(normalizeChartWorkspace({ ...fallback, autoBreakEvenRules: { [key]: rule } }, fallback).autoBreakEvenRules).toEqual({ [key]: rule });
     expect(normalizeChartWorkspace({ ...fallback, autoBreakEvenRules: undefined }, fallback).autoBreakEvenRules).toEqual({});
     expect(normalizeChartWorkspace({ ...fallback, autoBreakEvenRules: { [key]: { ...rule, thresholdR: -1 } } }, fallback).autoBreakEvenRules).toEqual({});
+  });
+
+  it("normalizes Trail Stop settings, saved custom timeframes, and active rules", () => {
+    const key = "sim:account-1:position-1";
+    const rule = { environment: "sim" as const, accountId: "account-1", positionId: "position-1", symbol: "MESU26", status: "armed" as const, clientMutationId: "trail-1" };
+    const saved = normalizeChartWorkspace({
+      ...fallback,
+      customMinuteTimeframes: [7],
+      autoTrailStopRules: { [key]: rule },
+      settings: { ...fallback.settings, trailStop: { timeframe: "7m", pivotBars: 9.6, offsetTicks: 120 } },
+    }, fallback);
+    expect(saved.settings.trailStop).toEqual({ timeframe: "7m", pivotBars: 10, offsetTicks: 100 });
+    expect(saved.autoTrailStopRules).toEqual({ [key]: rule });
+    const legacy = normalizeChartWorkspace({ ...fallback, autoTrailStopRules: undefined, settings: { ...fallback.settings, trailStop: undefined } }, fallback);
+    expect(legacy.settings.trailStop).toEqual({ timeframe: "1m", pivotBars: 2, offsetTicks: 1 });
+    expect(legacy.autoTrailStopRules).toEqual({});
   });
 
   it("defaults legacy alert settings and preserves per-timeframe choices", () => {

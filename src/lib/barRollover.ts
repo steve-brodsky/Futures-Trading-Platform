@@ -16,6 +16,10 @@ interface BarRolloverRefreshInput {
 
 const retryDelaysMilliseconds = [0, 5_000, 12_000, 25_000];
 
+export function didBarCloseOnStreamUpdate(previousTime: number | undefined, latestTime: number | undefined, streamSeeded: boolean): boolean {
+  return streamSeeded && previousTime != null && latestTime != null && latestTime > previousTime;
+}
+
 /**
  * Schedule a small number of authoritative refreshes when a live intraday bar
  * remains on screen after its closing boundary.
