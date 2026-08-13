@@ -195,7 +195,7 @@ const rawApi = {
     if (isTauri) return native("place_order", { order, clientMutationId });
     throw new Error("Order placement is disabled in browser demo mode.");
   },
-  async replaceOrder(accountId: string, orderId: string, newPrice: number, clientMutationId = crypto.randomUUID()): Promise<BrokerMutationResult> {
+  async replaceOrder(accountId: string, orderId: string, newPrice: number, clientMutationId: string = crypto.randomUUID()): Promise<BrokerMutationResult> {
     if (isTauri) return native("replace_order", { accountId, orderId, newPrice, clientMutationId });
     throw new Error("Order replacement is disabled in browser demo mode.");
   },

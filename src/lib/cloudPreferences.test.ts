@@ -37,6 +37,7 @@ function workspace(): WorkspaceState {
     optionChain: { symbol: "SPY", strikeCount: 20 },
     rightPanelOpen: true,
     rightPanelMode: "order-entry",
+    autoBreakEvenRules: {},
     bottomTab: "orders",
     bottomBrokerPanel: "combined",
     bottomPanelOpen: true,
@@ -63,6 +64,10 @@ describe("cloud preferences", () => {
   it("serializes only explicitly synchronized fields", () => {
     const original = workspace();
     original.customMinuteTimeframes = [7, 45];
+    original.autoBreakEvenRules["live:secret-account-id:position-1"] = {
+      environment: "live", accountId: "secret-account-id", positionId: "position-1", symbol: "MESU26",
+      thresholdR: 1, status: "armed", clientMutationId: "local-rule-mutation",
+    };
     const profile = cloudPreferenceProfile(original);
     const serialized = JSON.stringify(profile);
     expect(serialized).toContain("MESU26");
@@ -80,6 +85,7 @@ describe("cloud preferences", () => {
     expect(serialized).not.toContain("secret-account-id");
     expect(serialized).not.toContain("confirmOrders");
     expect(serialized).not.toContain("rightPanelMode");
+    expect(serialized).not.toContain("local-rule-mutation");
     expect(serialized).not.toContain('"environment"');
     expect(serialized).not.toContain('"x":120');
     expect(serialized).not.toContain("splitRatios");
@@ -99,6 +105,10 @@ describe("cloud preferences", () => {
   it("applies cloud preferences without replacing device-local safety and geometry", () => {
     const local = workspace();
     local.rightPanelMode = "trade-management";
+    local.autoBreakEvenRules["live:secret-account-id:position-1"] = {
+      environment: "live", accountId: "secret-account-id", positionId: "position-1", symbol: "MESU26",
+      thresholdR: 1.25, status: "armed", clientMutationId: "local-rule-mutation",
+    };
     const profile = cloudPreferenceProfile({
       ...local,
       environment: "sim",
@@ -136,6 +146,7 @@ describe("cloud preferences", () => {
     expect(merged.selectedAccountId).toBe("secret-account-id");
     expect(merged.confirmOrders).toBe(false);
     expect(merged.rightPanelMode).toBe("trade-management");
+    expect(merged.autoBreakEvenRules).toEqual(local.autoBreakEvenRules);
     expect(merged.windows[0]).toMatchObject({ x: 120, y: 90, width: 1400, height: 900, maximized: true });
     expect(merged.windows[0].splitRatios?.["two-columns"]).toEqual([0.42]);
   });

@@ -40,7 +40,7 @@ import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy a
 import { calculateSwingStop } from "./lib/swingStop";
 import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, shouldRetryEntryScreenshots, ENTRY_SCREENSHOT_QUEUE_LIMIT } from "./lib/entryScreenshot";
 import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, tradeLinePriceChanged, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
-import { breakEvenPrice, currentRMultiple, findManagedPosition, managedProtectiveOrders, originalRiskBaseline, stopIsAtBreakEven, takeProfitAtOriginalR } from "./lib/tradeManagement";
+import { autoBreakEvenRuleKey, breakEvenPrice, currentRMultiple, evaluateAutoBreakEven, findManagedPosition, managedProtectiveOrders, originalRiskBaseline, removeClosedAutoBreakEvenRules, stopProtectsBreakEven, takeProfitAtOriginalR } from "./lib/tradeManagement";
 import { isTargetOutside } from "./lib/menuFocus";
 import { autocompleteKeyAction, useSymbolSuggestions } from "./lib/symbolSearch";
 import { defaultIndicators } from "./lib/workspace";
@@ -75,7 +75,7 @@ import {
   type RapidMoveTrackerState,
 } from "./lib/truthSocialAlerts";
 import { applySchwabOptionQuote, combinedCurrencyTotal, heldOptionsForUnderlying, positionPnlTotal, readableBrokerOrderSymbol } from "./lib/schwabBrokerage";
-import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, FailedBreakoutIndicatorConfig, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, JournalRiskBaseline, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
+import type { Account, AccountBalance, ActivityNotification, AlertDurationSeconds, AlertSound, AlertTimeframe, AuditHealth, AutoBreakEvenRule, Bar, BarSnapshotEvent, BarUpdateEvent, BrokerMutationIntent, BrokerMutationResult, BrokerageStreamStateEvent, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartLayout, ChartSessionSettings, ChartTabState, ChartTimezone, ChartTool, ChartWindowState, ContractRollAlertSettings, ContractRollStatus, Drawing, DrawingAlertConfig, EconomicEventImpact, EntryRuleResult, EntryRuleSide, FailedBreakoutIndicatorConfig, GexExpirationMode, HistoricalOrderPage, IndicatorConfig, JournalRiskBaseline, MarketDataProvider, OptionContract, OptionExpiration, OptionOrderDraft, OptionStreamStateEvent, OptionUpdateEvent, OrdersSnapshotEvent, OrderDraft, OrderPreview, OrderStreamUpdateEvent, OrderTicketSettings, OrderUpdate, PositionsSnapshotEvent, Position, PositionUpdateEvent, PreferenceRealtimeStateEvent, PreferenceSyncResult, Quote, QuoteUpdateEvent, RapidMarketMove, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, StreamConnectionState, StreamStateEvent, SymbolMeta, Timeframe, TimeframeAlertConfig, TradingEnvironment, TradingTodaySnapshot, TruthSocialAlertSettings, TruthSocialPost, WorkspaceState } from "./types";
 
 const PREFERENCE_FOCUS_THROTTLE_MS = 30_000;
 type IndicatorPatch<T extends IndicatorConfig = IndicatorConfig> = T extends IndicatorConfig
@@ -113,7 +113,7 @@ const defaultWorkspace: WorkspaceState = {
   windows: [{ id: MAIN_WINDOW_ID, tabIds: ["chart-1"], activeTabId: "chart-1", visibleTabIds: ["chart-1"], chartLayout: "single", detached: false }],
   drawings: {}, gexSelections: {},
   activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
-  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, rightPanelMode: "order-entry", bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
+  watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, rightPanelMode: "order-entry", autoBreakEvenRules: {}, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
   settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
@@ -543,6 +543,7 @@ function TradingApp() {
   const [journalRiskBaselineState, setJournalRiskBaselineState] = useState<{ scope: string; baselines: JournalRiskBaseline[] }>({ scope: "", baselines: [] });
   const [journalRiskRevision, setJournalRiskRevision] = useState(0);
   const [orders, setOrders] = useState<OrderUpdate[]>(api.isNative ? [] : demoOrders);
+  const [ordersReadyScope, setOrdersReadyScope] = useState<string>();
   const [balances, setBalances] = useState<AccountBalance[]>([]);
   const [bodBalances, setBodBalances] = useState<AccountBalance[]>([]);
   const [history, setHistory] = useState<HistoricalOrderPage>({ orders: [] });
@@ -666,6 +667,9 @@ function TradingApp() {
   const [closingPositionIds, setClosingPositionIds] = useState<Set<string>>(() => new Set());
   const closingPositionTimersRef = useRef(new Map<string, number>());
   const [replacingOrderIds, setReplacingOrderIds] = useState<Set<string>>(() => new Set());
+  const autoBreakEvenInFlightRef = useRef(new Set<string>());
+  const autoBreakEvenPendingPersistenceRef = useRef(new Map<string, string>());
+  const [autoBreakEvenPersistenceEpoch, setAutoBreakEvenPersistenceEpoch] = useState(0);
   const [currentTime, setCurrentTime] = useState(() => Date.now());
   const subscriptionsRef = useRef(new Map<string, BarSubscription>());
   const barRolloverRefreshRef = useRef(new Map<string, BarRolloverRefreshState>());
@@ -1431,6 +1435,7 @@ function TradingApp() {
         if (payload.accountId !== selectedAccountIdRef.current) return;
         const protectedIds = activeProtectionIds(recentOrderIdsRef.current);
         setOrders((current) => reconcileOrderSnapshot(current, payload.orders, protectedIds));
+        setOrdersReadyScope(positionSnapshotScope(environmentRef.current, payload.accountId));
         setBrokerageError(undefined);
         brokerageBalanceRefreshRef.current();
       }).then((unlisten) => cleanups.push(unlisten));
@@ -1758,6 +1763,66 @@ function TradingApp() {
   }, [selectedAccount?.id, environment, journalRiskPositionKey, journalRiskRevision]);
 
   useEffect(() => {
+    if (currentWindowId !== MAIN_WINDOW_ID || !workspaceLoaded || !api.isNative || !authenticated || !selectedAccount) return;
+    const snapshotScope = positionSnapshotScope(environment, selectedAccount.id);
+    if (positionsReadyScope !== snapshotScope) return;
+
+    const cleanedRules = removeClosedAutoBreakEvenRules(workspace.autoBreakEvenRules, environment, selectedAccount.id, positions);
+    if (cleanedRules !== workspace.autoBreakEvenRules) {
+      updateWorkspace({ autoBreakEvenRules: cleanedRules });
+      return;
+    }
+
+    const brokerageReady = ordersReadyScope === snapshotScope && !brokerageLoading && !brokerageError && !environmentTransitioning;
+    Object.entries(workspace.autoBreakEvenRules).forEach(([ruleKey, rule]) => {
+      if (rule.environment !== environment || rule.accountId !== selectedAccount.id || rule.status === "attention") return;
+      if (autoBreakEvenPendingPersistenceRef.current.has(ruleKey) || autoBreakEvenInFlightRef.current.has(ruleKey)) return;
+      const position = positions.find((candidate) => candidate.id === rule.positionId && Math.abs(candidate.quantity) > 0);
+      const baseline = originalRiskBaseline(position, activeJournalRiskBaselines);
+      const meta = position
+        ? tradeDetails[position.symbol] ?? Object.values(tradeDetails).find((candidate) => candidate.symbol.toUpperCase() === position.symbol.toUpperCase())
+        : undefined;
+      const evaluation = evaluateAutoBreakEven({
+        position,
+        accountId: selectedAccount.id,
+        orders,
+        baseline,
+        minMove: meta?.minMove,
+        thresholdR: rule.thresholdR,
+        brokerageReady,
+      });
+      if (evaluation.state === "complete") {
+        removeAutoBreakEvenRule(ruleKey, rule.clientMutationId);
+        setNotifications((current) => [{
+          id: crypto.randomUUID(), time: new Date().toISOString(), symbol: rule.symbol,
+          title: "Auto Stop to BE complete", text: evaluation.reason, level: "success" as const,
+        }, ...current].slice(0, 250));
+        return;
+      }
+      const latchedTrigger = rule.status === "triggering" && evaluation.state === "waiting";
+      if ((evaluation.state === "trigger" || latchedTrigger) && evaluation.stop && evaluation.breakEven != null) {
+        void executeAutoBreakEven(ruleKey, rule, evaluation.stop, evaluation.breakEven);
+      }
+    });
+  }, [
+    workspaceLoaded,
+    workspace.autoBreakEvenRules,
+    environment,
+    selectedAccount?.id,
+    authenticated,
+    positionsReadyScope,
+    ordersReadyScope,
+    positions,
+    orders,
+    activeJournalRiskBaselines,
+    tradeDetails,
+    brokerageLoading,
+    brokerageError,
+    environmentTransitioning,
+    autoBreakEvenPersistenceEpoch,
+  ]);
+
+  useEffect(() => {
     let active = true;
     if (!selectedAccount) {
       setRiskStatus(null);
@@ -1824,6 +1889,7 @@ function TradingApp() {
     if (currentWindowId !== MAIN_WINDOW_ID || !api.isNative) return;
     setPositions([]);
     setPositionsReadyScope(undefined);
+    setOrdersReadyScope(undefined);
     recentPositionIdsRef.current.clear();
   }, [selectedAccount?.id, environment]);
 
@@ -1865,6 +1931,7 @@ function TradingApp() {
               if (nextOrders) {
                 const protectedIds = activeProtectionIds(recentOrderIdsRef.current);
                 setOrders((current) => reconcileOrderSnapshot(current, nextOrders, protectedIds));
+                setOrdersReadyScope(positionSnapshotScope(environment, selectedAccount.id));
               }
               setBrokerageError(undefined);
             }
@@ -4162,6 +4229,130 @@ function TradingApp() {
     });
   }, [positions]);
 
+  function removeAutoBreakEvenRule(ruleKey: string, clientMutationId?: string) {
+    commitWorkspace((current) => {
+      const existing = current.autoBreakEvenRules[ruleKey];
+      if (!existing || (clientMutationId && existing.clientMutationId !== clientMutationId)) return current;
+      const nextRules = { ...current.autoBreakEvenRules };
+      delete nextRules[ruleKey];
+      return { ...current, autoBreakEvenRules: nextRules };
+    });
+  }
+
+  function updateAutoBreakEvenRule(ruleKey: string, clientMutationId: string, patch: Partial<AutoBreakEvenRule>) {
+    commitWorkspace((current) => {
+      const existing = current.autoBreakEvenRules[ruleKey];
+      if (!existing || existing.clientMutationId !== clientMutationId) return current;
+      return { ...current, autoBreakEvenRules: { ...current.autoBreakEvenRules, [ruleKey]: { ...existing, ...patch } } };
+    });
+  }
+
+  function persistAutoBreakEvenRule(rule: AutoBreakEvenRule) {
+    const ruleKey = autoBreakEvenRuleKey(rule.environment, rule.accountId, rule.positionId);
+    const rules = { ...workspaceRef.current.autoBreakEvenRules, [ruleKey]: rule };
+    const token = crypto.randomUUID();
+    autoBreakEvenPendingPersistenceRef.current.set(ruleKey, token);
+    updateWorkspace({ autoBreakEvenRules: rules });
+    const snapshot = {
+      ...workspaceRef.current,
+      autoBreakEvenRules: rules,
+      revision: Math.max(workspaceRef.current.revision + 1, Date.now()),
+    };
+    void api.saveWorkspace(workspaceForPersistence(snapshot, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current))
+      .then(() => api.saveWorkspace(workspaceForPersistence(workspaceRef.current, sessionCustomMinuteTimeframesRef.current, persistentTimeframesRef.current)))
+      .then(() => {
+        if (autoBreakEvenPendingPersistenceRef.current.get(ruleKey) !== token) return;
+        autoBreakEvenPendingPersistenceRef.current.delete(ruleKey);
+        setAutoBreakEvenPersistenceEpoch((current) => current + 1);
+      })
+      .catch((error) => {
+        if (autoBreakEvenPendingPersistenceRef.current.get(ruleKey) !== token) return;
+        autoBreakEvenPendingPersistenceRef.current.delete(ruleKey);
+        updateAutoBreakEvenRule(ruleKey, rule.clientMutationId, {
+          status: "attention",
+          message: `The automation rule could not be saved: ${String(error)}`,
+        });
+        showToast("Auto Stop to BE needs attention because its rule could not be saved.");
+      });
+  }
+
+  function armAutoBreakEven(position: Position, thresholdR: number) {
+    if (!api.isNative || !selectedAccount || !Number.isFinite(thresholdR) || thresholdR <= 0) return;
+    persistAutoBreakEvenRule({
+      environment,
+      accountId: selectedAccount.id,
+      positionId: position.id,
+      symbol: position.symbol,
+      thresholdR,
+      status: "armed",
+      clientMutationId: crypto.randomUUID(),
+    });
+  }
+
+  function updateAutoBreakEvenThreshold(position: Position, thresholdR: number) {
+    if (!selectedAccount || !Number.isFinite(thresholdR) || thresholdR <= 0) return;
+    const ruleKey = autoBreakEvenRuleKey(environment, selectedAccount.id, position.id);
+    const existing = workspaceRef.current.autoBreakEvenRules[ruleKey];
+    if (!existing || existing.status !== "armed" || existing.thresholdR === thresholdR) return;
+    updateAutoBreakEvenRule(ruleKey, existing.clientMutationId, { thresholdR, message: undefined });
+  }
+
+  function disableAutoBreakEven(position: Position) {
+    if (!selectedAccount) return;
+    const ruleKey = autoBreakEvenRuleKey(environment, selectedAccount.id, position.id);
+    const existing = workspaceRef.current.autoBreakEvenRules[ruleKey];
+    if (!existing || existing.status === "triggering" || autoBreakEvenInFlightRef.current.has(ruleKey)) return;
+    autoBreakEvenPendingPersistenceRef.current.delete(ruleKey);
+    removeAutoBreakEvenRule(ruleKey, existing.clientMutationId);
+  }
+
+  async function executeAutoBreakEven(ruleKey: string, rule: AutoBreakEvenRule, stopOrder: OrderUpdate, newPrice: number) {
+    if (!selectedAccount || selectedAccount.id !== rule.accountId || autoBreakEvenInFlightRef.current.has(ruleKey)) return;
+    autoBreakEvenInFlightRef.current.add(ruleKey);
+    const original = stopOrder.price ?? stopOrder.stopPrice;
+    updateAutoBreakEvenRule(ruleKey, rule.clientMutationId, { status: "triggering", message: undefined });
+    setReplacingOrderIds((current) => new Set(current).add(stopOrder.id));
+    setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, newPrice) : item));
+    try {
+      const result = await api.replaceOrder(rule.accountId, stopOrder.id, newPrice, rule.clientMutationId);
+      reportMutation(result, "Automatic break-even");
+      if (result.brokerOutcome !== "confirmed") {
+        setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, original) : item));
+        const message = result.brokerOutcome === "rejected"
+          ? result.rejectionReason ?? "TradeStation rejected the stop replacement."
+          : "The broker outcome is unknown. Review the working stop before taking further action.";
+        updateAutoBreakEvenRule(ruleKey, rule.clientMutationId, { status: "attention", message });
+        setNotifications((current) => [{
+          id: crypto.randomUUID(), time: new Date().toISOString(), symbol: rule.symbol,
+          title: "Auto Stop to BE needs attention", text: message, level: "error" as const,
+        }, ...current].slice(0, 250));
+        return;
+      }
+      if (result.brokerOrder) {
+        setOrders((current) => current.map((item) => item.id === stopOrder.id ? { ...item, ...result.brokerOrder! } : item));
+      }
+      removeAutoBreakEvenRule(ruleKey, rule.clientMutationId);
+      brokerageRefreshRef.current(true);
+      setNotifications((current) => [{
+        id: crypto.randomUUID(), time: new Date().toISOString(), symbol: rule.symbol,
+        title: "Automatic break-even complete", text: `Protective stop moved to ${formatPrice(newPrice)}.`, level: "success" as const,
+      }, ...current].slice(0, 250));
+      showToast(`${rule.symbol} stop moved to break-even automatically.`);
+    } catch (error) {
+      setOrders((current) => current.map((item) => item.id === stopOrder.id ? withOrderPrice(item, original) : item));
+      const message = `The automatic stop replacement failed: ${String(error)}`;
+      updateAutoBreakEvenRule(ruleKey, rule.clientMutationId, { status: "attention", message });
+      setNotifications((current) => [{
+        id: crypto.randomUUID(), time: new Date().toISOString(), symbol: rule.symbol,
+        title: "Auto Stop to BE needs attention", text: message, level: "error" as const,
+      }, ...current].slice(0, 250));
+      showToast("Auto Stop to BE needs attention. Review the working stop.");
+    } finally {
+      autoBreakEvenInFlightRef.current.delete(ruleKey);
+      setReplacingOrderIds((current) => { const next = new Set(current); next.delete(stopOrder.id); return next; });
+    }
+  }
+
   async function replaceChartOrder(order: OrderUpdate, newPrice: number) {
     if (!selectedAccount || replacingOrderIds.has(order.id)) return;
     const original = order.price ?? order.stopPrice;
@@ -4600,7 +4791,7 @@ function TradingApp() {
               <span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p>
             </div>
             : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} rollStatus={activeRollStatus} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onUseNextContract={useNextActiveContract} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}</div>
-            : <div id="trade-management-mode-panel" role="tabpanel" aria-labelledby="trade-management-mode-tab"><TradeManagementPanel provider={activeTab.symbol.provider} tradeSymbol={activeTradeSymbol} minMove={activeTradeMeta?.minMove ?? activeTab.symbol.minMove} quote={activeTradeQuote} account={selectedAccount} environment={environment} positions={positions} orders={orders} riskBaselines={activeJournalRiskBaselines} nativeTrading={api.isNative} busy={busy || environmentTransitioning} replacingOrderIds={replacingOrderIds} closingPositionIds={closingPositionIds} onReplaceOrder={replaceChartOrder} onCloseTrade={requestClosePosition} /></div>}
+            : <div id="trade-management-mode-panel" role="tabpanel" aria-labelledby="trade-management-mode-tab"><TradeManagementPanel provider={activeTab.symbol.provider} tradeSymbol={activeTradeSymbol} minMove={activeTradeMeta?.minMove ?? activeTab.symbol.minMove} quote={activeTradeQuote} account={selectedAccount} environment={environment} positions={positions} orders={orders} riskBaselines={activeJournalRiskBaselines} autoBreakEvenRules={workspace.autoBreakEvenRules} brokerageReady={!api.isNative || Boolean(selectedAccount && authenticated && positionsReadyScope === positionSnapshotScope(environment, selectedAccount.id) && ordersReadyScope === positionSnapshotScope(environment, selectedAccount.id) && !brokerageLoading && !brokerageError && !environmentTransitioning)} nativeTrading={api.isNative} busy={busy || environmentTransitioning} replacingOrderIds={replacingOrderIds} closingPositionIds={closingPositionIds} onReplaceOrder={replaceChartOrder} onCloseTrade={requestClosePosition} onArmAutoBreakEven={armAutoBreakEven} onUpdateAutoBreakEven={updateAutoBreakEvenThreshold} onDisableAutoBreakEven={disableAutoBreakEven} /></div>}
         </div>}
       </aside>}
 
@@ -5236,7 +5427,7 @@ function WatchlistSettings({ workspace, onChange, onNotify }: { workspace: Works
   </section>;
 }
 
-function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, environment, positions, orders, riskBaselines, nativeTrading, busy, replacingOrderIds, closingPositionIds, onReplaceOrder, onCloseTrade }: {
+function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, environment, positions, orders, riskBaselines, autoBreakEvenRules, brokerageReady, nativeTrading, busy, replacingOrderIds, closingPositionIds, onReplaceOrder, onCloseTrade, onArmAutoBreakEven, onUpdateAutoBreakEven, onDisableAutoBreakEven }: {
   provider: MarketDataProvider;
   tradeSymbol?: string;
   minMove: number;
@@ -5246,12 +5437,17 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
   positions: Position[];
   orders: OrderUpdate[];
   riskBaselines: JournalRiskBaseline[];
+  autoBreakEvenRules: Record<string, AutoBreakEvenRule>;
+  brokerageReady: boolean;
   nativeTrading: boolean;
   busy: boolean;
   replacingOrderIds: Set<string>;
   closingPositionIds: Set<string>;
   onReplaceOrder: (order: OrderUpdate, newPrice: number) => Promise<void>;
   onCloseTrade: (position: Position) => void;
+  onArmAutoBreakEven: (position: Position, thresholdR: number) => void;
+  onUpdateAutoBreakEven: (position: Position, thresholdR: number) => void;
+  onDisableAutoBreakEven: (position: Position) => void;
 }) {
   const position = provider === "tradestation" ? findManagedPosition(tradeSymbol, account?.id, positions) : undefined;
   const protective = managedProtectiveOrders(position, account?.id, orders);
@@ -5260,19 +5456,34 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
   const baseline = originalRiskBaseline(position, riskBaselines);
   const breakEven = breakEvenPrice(position, minMove);
   const [rInput, setRInput] = useState("2");
+  const [autoRInput, setAutoRInput] = useState("1");
   const rMultiple = Number(rInput);
   const rValid = rInput.trim() !== "" && Number.isFinite(rMultiple) && rMultiple > 0;
+  const autoRMultiple = Number(autoRInput);
+  const autoRValid = autoRInput.trim() !== "" && Number.isFinite(autoRMultiple) && autoRMultiple > 0;
   const targetPrice = rValid ? takeProfitAtOriginalR(position, baseline, rMultiple, minMove) : null;
   const stopReplacing = stopOrder ? replacingOrderIds.has(stopOrder.id) : false;
   const targetReplacing = targetOrder ? replacingOrderIds.has(targetOrder.id) : false;
   const closing = position ? closingPositionIds.has(position.id) : false;
-  const atBreakEven = stopIsAtBreakEven(stopOrder, breakEven, minMove);
+  const atBreakEven = stopProtectsBreakEven(position, stopOrder, breakEven, minMove);
   const existingTargetPrice = targetOrder?.price ?? targetOrder?.stopPrice;
   const targetUnchanged = existingTargetPrice != null && targetPrice != null && !tradeLinePriceChanged(existingTargetPrice, targetPrice, minMove);
   const livePrice = quote.last > 0 ? quote.last : position?.last;
   const currentR = currentRMultiple(position, baseline);
+  const autoRuleKey = position && account ? autoBreakEvenRuleKey(environment, account.id, position.id) : undefined;
+  const autoRule = autoRuleKey ? autoBreakEvenRules[autoRuleKey] : undefined;
+  const autoEvaluation = evaluateAutoBreakEven({
+    position,
+    accountId: account?.id,
+    orders,
+    baseline,
+    minMove,
+    thresholdR: autoRule?.thresholdR ?? autoRMultiple,
+    brokerageReady,
+  });
 
   useEffect(() => { setRInput("2"); }, [position?.id]);
+  useEffect(() => { setAutoRInput(String(autoRule?.thresholdR ?? 1)); }, [position?.id, autoRule?.thresholdR]);
 
   if (provider === "schwab") return <div className="trade-management-empty">
     <span>Schwab</span><strong>Trade management unavailable</strong><p>Schwab positions are monitoring-only. Open a TradeStation futures chart to manage a live trade.</p>
@@ -5286,7 +5497,7 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
     : protective.stops.length === 0 ? "No working protective stop is available."
       : protective.stops.length > 1 ? "Multiple protective stops are working; adjust them individually on the chart."
         : breakEven == null ? "The break-even price is unavailable."
-          : atBreakEven ? "The stop is already at break-even."
+          : atBreakEven ? "The stop already protects break-even or better."
             : stopReplacing ? "Stop replacement is in progress."
               : `Move the stop to ${formatPrice(breakEven)}.`;
   const moveStopDisabled = busy || !nativeTrading || protective.stops.length !== 1 || breakEven == null || atBreakEven || stopReplacing;
@@ -5300,6 +5511,18 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
                 : targetReplacing ? "Take-profit replacement is in progress."
                   : `Move take profit to ${formatPrice(targetPrice)}.`;
   const moveTargetDisabled = busy || !nativeTrading || protective.targets.length !== 1 || !baseline || !rValid || targetPrice == null || targetUnchanged || targetReplacing;
+  const autoStatus = !autoRule ? { kind: "off", label: "Off", detail: "Arm this rule for the current open position." }
+    : autoRule.status === "attention" ? { kind: "attention", label: "Needs attention", detail: autoRule.message ?? "Review the working stop before rearming." }
+      : autoRule.status === "triggering" || autoEvaluation.state === "trigger" ? { kind: "triggering", label: "Triggering", detail: "Moving the protective stop to break-even." }
+        : autoEvaluation.state === "paused" ? { kind: "paused", label: "Paused", detail: autoEvaluation.reason }
+          : autoEvaluation.state === "complete" ? { kind: "triggering", label: "Completing", detail: autoEvaluation.reason }
+            : { kind: "armed", label: `Armed · waiting for +${autoRule.thresholdR.toFixed(2)}R`, detail: autoEvaluation.reason };
+  const autoToggleDisabled = busy || !nativeTrading || (!autoRule && !autoRValid) || autoRule?.status === "triggering";
+  const autoInputDisabled = busy || !nativeTrading || autoRule?.status === "triggering" || autoRule?.status === "attention";
+  const commitAutoThreshold = () => {
+    if (!position || !autoRule || autoRule.status !== "armed" || !autoRValid) return;
+    onUpdateAutoBreakEven(position, autoRMultiple);
+  };
 
   return <div className="trade-management-panel">
     <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
@@ -5321,6 +5544,13 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
     <section className="management-actions" aria-labelledby="management-actions-title">
       <div className="section-label"><span id="management-actions-title">Manage exits</span><small>Submits immediately</small></div>
       <button type="button" className="management-action stop-to-be" disabled={moveStopDisabled} title={stopReason} onClick={() => { if (stopOrder && breakEven != null) void onReplaceOrder(stopOrder, breakEven); }}><span>Stop to BE</span><small>{stopReason}</small></button>
+      <div className={`auto-break-even-control ${autoStatus.kind}`}>
+        <div className="auto-break-even-heading">
+          <label className="auto-break-even-switch"><input type="checkbox" role="switch" checked={Boolean(autoRule)} disabled={autoToggleDisabled} onChange={(event) => { if (!position) return; if (event.target.checked) onArmAutoBreakEven(position, autoRMultiple); else onDisableAutoBreakEven(position); }} /><span aria-hidden="true" /><strong>Auto Stop to BE</strong></label>
+          <label className="auto-break-even-threshold"><span>Trigger at</span><div><input aria-label="Automatic break-even R threshold" aria-invalid={!autoRValid} type="number" min="0.01" step="0.25" inputMode="decimal" value={autoRInput} disabled={autoInputDisabled} onChange={(event) => { const value = event.target.value; setAutoRInput(value); const threshold = Number(value); if (position && autoRule?.status === "armed" && value.trim() && Number.isFinite(threshold) && threshold > 0) onUpdateAutoBreakEven(position, threshold); }} onBlur={commitAutoThreshold} onKeyDown={(event) => { if (event.key === "Enter") { event.currentTarget.blur(); } }} /><span>R</span></div></label>
+        </div>
+        <div className="auto-break-even-status" role="status" aria-live="polite"><span aria-hidden="true" /><div><strong>{autoStatus.label}</strong><small>{!nativeTrading ? "Automation is disabled in browser demo mode." : autoStatus.detail}</small></div></div>
+      </div>
       <div className="move-target-action">
         <label htmlFor="managed-target-r"><span>Target R multiple</span><div><input id="managed-target-r" aria-invalid={!rValid} type="number" min="0.01" step="0.25" inputMode="decimal" value={rInput} onChange={(event) => setRInput(event.target.value)} /><span>R</span></div></label>
         <button type="button" className="primary-button" disabled={moveTargetDisabled} title={targetReason} onClick={() => { if (targetOrder && targetPrice != null) void onReplaceOrder(targetOrder, targetPrice); }}>Move TP</button>

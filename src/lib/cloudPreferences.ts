@@ -235,6 +235,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
     environment: current.environment,
     rightPanelOpen: current.rightPanelOpen,
     rightPanelMode: current.rightPanelMode,
+    autoBreakEvenRules: current.autoBreakEvenRules,
     bottomTab: current.bottomTab,
     bottomBrokerPanel: current.bottomBrokerPanel,
     bottomPanelOpen: current.bottomPanelOpen,

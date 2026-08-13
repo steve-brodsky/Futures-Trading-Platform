@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { JournalRiskBaseline, OrderUpdate, Position } from "../types";
-import { breakEvenPrice, currentRMultiple, findManagedPosition, managedProtectiveOrders, originalRiskBaseline, stopIsAtBreakEven, takeProfitAtOriginalR } from "./tradeManagement";
+import type { AutoBreakEvenRule, JournalRiskBaseline, OrderUpdate, Position } from "../types";
+import { autoBreakEvenRuleKey, breakEvenPrice, currentRMultiple, evaluateAutoBreakEven, findManagedPosition, managedProtectiveOrders, normalizeAutoBreakEvenRules, originalRiskBaseline, removeClosedAutoBreakEvenRules, stopIsAtBreakEven, stopProtectsBreakEven, takeProfitAtOriginalR } from "./tradeManagement";
 
 const position: Position = {
   provider: "tradestation", accountId: "account-1", id: "p1", symbol: "MESU26", side: "Long",
@@ -62,5 +62,54 @@ describe("trade management", () => {
     expect(stopIsAtBreakEven(stop, 6253.25, .25)).toBe(false);
     expect(currentRMultiple(position, baseline)).toBe(1);
     expect(currentRMultiple(position, { ...baseline, deployedRisk: undefined })).toBeNull();
+  });
+
+  it("normalizes persisted automatic break-even rules by their full identity", () => {
+    const key = autoBreakEvenRuleKey("sim", "account-1", "p1");
+    const rule: AutoBreakEvenRule = {
+      environment: "sim", accountId: "account-1", positionId: "p1", symbol: "mesu26",
+      thresholdR: 1.25, status: "armed", clientMutationId: "mutation-1",
+    };
+    expect(normalizeAutoBreakEvenRules({ [key]: rule })).toEqual({ [key]: { ...rule, symbol: "MESU26" } });
+    expect(normalizeAutoBreakEvenRules({ wrong: rule })).toEqual({});
+    expect(normalizeAutoBreakEvenRules({ [key]: { ...rule, thresholdR: 0 } })).toEqual({});
+    expect(normalizeAutoBreakEvenRules([])).toEqual({});
+  });
+
+  it("never weakens a stop that already protects break-even", () => {
+    expect(stopProtectsBreakEven(position, { ...stop, stopPrice: 6253.25 }, 6253.25, .25)).toBe(true);
+    expect(stopProtectsBreakEven(position, { ...stop, stopPrice: 6254 }, 6253.25, .25)).toBe(true);
+    expect(stopProtectsBreakEven(position, { ...stop, stopPrice: 6253 }, 6253.25, .25)).toBe(false);
+    const shortPosition = { ...position, side: "Short" as const };
+    expect(stopProtectsBreakEven(shortPosition, { ...stop, side: "Buy", stopPrice: 6253 }, 6253.25, .25)).toBe(true);
+    expect(stopProtectsBreakEven(shortPosition, { ...stop, side: "Buy", stopPrice: 6253.5 }, 6253.25, .25)).toBe(false);
+  });
+
+  it("evaluates waiting, immediate trigger, and latched completion states", () => {
+    expect(evaluateAutoBreakEven({ position: { ...position, unrealizedPnl: 74 }, accountId: "account-1", orders: [stop], baseline, minMove: .25, thresholdR: 1, brokerageReady: true }).state).toBe("waiting");
+    const triggered = evaluateAutoBreakEven({ position, accountId: "account-1", orders: [stop], baseline, minMove: .25, thresholdR: 1, brokerageReady: true });
+    expect(triggered.state).toBe("trigger");
+    expect(triggered.stop).toEqual(stop);
+    expect(triggered.breakEven).toBe(6253.25);
+    expect(evaluateAutoBreakEven({ position, accountId: "account-1", orders: [{ ...stop, stopPrice: 6254 }], baseline, minMove: .25, thresholdR: 1, brokerageReady: true }).state).toBe("complete");
+  });
+
+  it("pauses automation until brokerage, risk, contract, and stop data are unambiguous", () => {
+    expect(evaluateAutoBreakEven({ position, accountId: "account-1", orders: [stop], baseline, minMove: .25, thresholdR: 1, brokerageReady: false }).reason).toMatch(/brokerage/i);
+    expect(evaluateAutoBreakEven({ position, accountId: "account-1", orders: [stop], minMove: .25, thresholdR: 1, brokerageReady: true }).reason).toMatch(/risk/i);
+    expect(evaluateAutoBreakEven({ position, accountId: "account-1", orders: [stop], baseline, thresholdR: 1, brokerageReady: true }).reason).toMatch(/contract/i);
+    expect(evaluateAutoBreakEven({ position, accountId: "account-1", orders: [], baseline, minMove: .25, thresholdR: 1, brokerageReady: true }).reason).toMatch(/no working/i);
+    expect(evaluateAutoBreakEven({ position, accountId: "account-1", orders: [stop, { ...stop, id: "stop-2" }], baseline, minMove: .25, thresholdR: 1, brokerageReady: true }).reason).toMatch(/multiple/i);
+  });
+
+  it("removes rules only after a ready account snapshot confirms their position closed", () => {
+    const simKey = autoBreakEvenRuleKey("sim", "account-1", "p1");
+    const otherKey = autoBreakEvenRuleKey("live", "account-1", "p2");
+    const rules: Record<string, AutoBreakEvenRule> = {
+      [simKey]: { environment: "sim", accountId: "account-1", positionId: "p1", symbol: "MESU26", thresholdR: 1, status: "armed", clientMutationId: "m1" },
+      [otherKey]: { environment: "live", accountId: "account-1", positionId: "p2", symbol: "MNQU26", thresholdR: 1, status: "armed", clientMutationId: "m2" },
+    };
+    expect(removeClosedAutoBreakEvenRules(rules, "sim", "account-1", [position])).toBe(rules);
+    expect(removeClosedAutoBreakEvenRules(rules, "sim", "account-1", [])).toEqual({ [otherKey]: rules[otherKey] });
   });
 });

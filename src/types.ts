@@ -695,6 +695,19 @@ export interface WorkspaceSettings {
   };
 }
 
+export type AutoBreakEvenRuleStatus = "armed" | "triggering" | "attention";
+
+export interface AutoBreakEvenRule {
+  environment: TradingEnvironment;
+  accountId: string;
+  positionId: string;
+  symbol: string;
+  thresholdR: number;
+  status: AutoBreakEvenRuleStatus;
+  clientMutationId: string;
+  message?: string;
+}
+
 export interface WorkspaceState {
   revision: number;
   environment: TradingEnvironment;
@@ -709,6 +722,7 @@ export interface WorkspaceState {
   optionChain: OptionChainPreferences;
   rightPanelOpen: boolean;
   rightPanelMode: "order-entry" | "trade-management";
+  autoBreakEvenRules: Record<string, AutoBreakEvenRule>;
   bottomTab: "positions" | "orders" | "history" | "summary" | "notifications";
   bottomBrokerPanel: "combined" | "tradestation" | "schwab";
   bottomPanelOpen: boolean;

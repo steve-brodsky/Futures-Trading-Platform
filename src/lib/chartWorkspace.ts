@@ -14,6 +14,7 @@ import { normalizeChartSessionSettings } from "./chartSessions";
 import { normalizeChartEconomicEventSettings } from "./economicEvents";
 import { normalizeContractRollAlertSettings } from "./contractRoll";
 import { normalizeCustomMinuteTimeframes, normalizeTimeframe } from "./timeframes";
+import { normalizeAutoBreakEvenRules } from "./tradeManagement";
 
 export const MAX_CHART_TABS = 12;
 export const MAIN_WINDOW_ID = "main";
@@ -390,6 +391,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
     optionChain: normalizeOptionChainPreferences(value.optionChain ?? fallback.optionChain),
     rightPanelOpen: value.rightPanelOpen ?? fallback.rightPanelOpen,
     rightPanelMode: value.rightPanelMode === "trade-management" ? "trade-management" : "order-entry",
+    autoBreakEvenRules: normalizeAutoBreakEvenRules(value.autoBreakEvenRules),
     bottomTab: (legacyBottomTab ?? fallback.bottomTab) as WorkspaceState["bottomTab"],
     bottomBrokerPanel: ["combined", "tradestation", "schwab"].includes(value.bottomBrokerPanel as string)
       ? value.bottomBrokerPanel as WorkspaceState["bottomBrokerPanel"]
