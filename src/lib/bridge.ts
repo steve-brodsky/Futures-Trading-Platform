@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalRiskBaseline, JournalScope, JournalScreenshotImage, JournalScreenshotMetadata, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, TruthSocialPost, WorkspaceState } from "../types";
+import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalRiskBaseline, JournalScope, JournalScreenshotImage, JournalScreenshotSaveResult, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, TruthSocialPost, WorkspaceState } from "../types";
 import { demoAuditExport, demoAuditPage, instrumentDemoApi } from "./audit";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
@@ -19,7 +19,7 @@ const nativeAuditExcluded = new Set([
 const nativeRecordCommands = new Set([
   "save_credentials", "save_schwab_credentials", "set_environment", "save_workspace",
   "configure_journal", "disconnect_journal", "set_journal_backfill_start", "reset_journal_now",
-  "set_journal_commission", "save_journal_entry_screenshot", "update_journal_annotation",
+  "set_journal_commission", "save_journal_entry_screenshot", "flush_journal_entry_screenshots", "update_journal_annotation",
   "ingest_journal_orders", "place_order", "replace_order", "close_position", "cancel_order",
   "save_risk_policy", "reconcile_broker_mutation", "kill_switch",
 ]);
@@ -325,7 +325,7 @@ const rawApi = {
     if (isTauri) await native("set_schwab_option_fee", { schwabOptionFeePerContractSide });
   },
   async syncJournal(scope?: JournalScope): Promise<JournalSyncStatus> {
-    return isTauri ? native("sync_journal", { scope }) : { state: "synced", pendingEvents: 0, lastSyncedAt: new Date().toISOString(), message: "Browser demo data" };
+    return isTauri ? native("sync_journal", { scope }) : { state: "synced", pendingEvents: 0, pendingScreenshots: 0, screenshotAttention: 0, lastSyncedAt: new Date().toISOString(), message: "Browser demo data" };
   },
   async journalScopes(): Promise<JournalScope[]> {
     return isTauri ? native("get_journal_scopes") : [{ provider: "tradestation", environment: "sim", accountId: "SIM-DEMO-4821", accountLabel: "SIM ··4821" }];
@@ -365,9 +365,13 @@ const rawApi = {
         }];
       });
   },
-  async saveJournalEntryScreenshot(input: { brokerOrderId: string; environment: TradingEnvironment; accountId: string; symbol: string; capturedAt: string; width: number; height: number; dataUrl: string }): Promise<JournalScreenshotMetadata> {
+  async saveJournalEntryScreenshot(input: { brokerOrderId: string; environment: TradingEnvironment; accountId: string; symbol: string; capturedAt: string; width: number; height: number; dataUrl: string }): Promise<JournalScreenshotSaveResult> {
     if (!isTauri) throw new Error("Entry chart screenshots are available in the desktop app.");
     return native("save_journal_entry_screenshot", { input });
+  },
+  async flushJournalEntryScreenshots(): Promise<JournalScreenshotSaveResult> {
+    if (!isTauri) return { state: "uploaded", pendingScreenshots: 0 };
+    return native("flush_journal_entry_screenshots");
   },
   async journalEntryScreenshot(tradeId: string): Promise<JournalScreenshotImage> {
     if (!isTauri) throw new Error("Entry chart screenshots are available in the desktop app.");

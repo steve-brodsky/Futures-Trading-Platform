@@ -4,6 +4,10 @@ use crate::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
+use chacha20poly1305::{
+    aead::{Aead, Payload},
+    KeyInit, XChaCha20Poly1305, XNonce,
+};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -114,6 +118,8 @@ pub struct JournalConnectionInput {
 pub struct JournalSyncStatus {
     pub state: String,
     pub pending_events: usize,
+    pub pending_screenshots: usize,
+    pub screenshot_attention: usize,
     pub last_synced_at: Option<String>,
     pub message: Option<String>,
 }
@@ -255,6 +261,14 @@ pub struct JournalScreenshotInput {
     pub width: u32,
     pub height: u32,
     pub data_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalScreenshotSaveResult {
+    pub state: String,
+    pub trade_id: Option<String>,
+    pub pending_screenshots: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -534,6 +548,8 @@ pub fn init(path: &Path) -> Result<(), AppError> {
       CREATE INDEX IF NOT EXISTS journal_trades_scope_time ON journal_trades(environment,account_id,opened_at);
       CREATE TABLE IF NOT EXISTS journal_annotations (trade_id TEXT PRIMARY KEY, notes TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS journal_screenshots (trade_id TEXT PRIMARY KEY, object_path TEXT NOT NULL UNIQUE, captured_at TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, content_type TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS journal_screenshot_outbox (id TEXT PRIMARY KEY, broker_order_id TEXT NOT NULL, environment TEXT NOT NULL, account_id TEXT NOT NULL, symbol TEXT NOT NULL, trade_id TEXT, captured_at TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, content_type TEXT NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(environment,account_id,broker_order_id));
+      CREATE INDEX IF NOT EXISTS journal_screenshot_outbox_retry ON journal_screenshot_outbox(next_attempt_at,created_at);
       CREATE TABLE IF NOT EXISTS journal_order_state (environment TEXT NOT NULL, account_id TEXT NOT NULL, order_id TEXT NOT NULL, filled_quantity REAL NOT NULL DEFAULT 0, commission REAL NOT NULL DEFAULT 0, PRIMARY KEY(environment,account_id,order_id));
       CREATE TABLE IF NOT EXISTS journal_option_order_state (provider TEXT NOT NULL, account_id TEXT NOT NULL, order_id TEXT NOT NULL, filled_quantity REAL NOT NULL DEFAULT 0, average_fill_price REAL NOT NULL DEFAULT 0, commission REAL NOT NULL DEFAULT 0, PRIMARY KEY(provider,account_id,order_id));
       CREATE TABLE IF NOT EXISTS journal_option_legs (id TEXT PRIMARY KEY, trade_id TEXT NOT NULL, option_symbol TEXT NOT NULL, underlying TEXT NOT NULL, expiration_date TEXT NOT NULL, strike_price REAL NOT NULL, put_call TEXT NOT NULL, opening_side TEXT NOT NULL, opened_quantity REAL NOT NULL DEFAULT 0, closed_quantity REAL NOT NULL DEFAULT 0, average_entry REAL NOT NULL DEFAULT 0, average_exit REAL, multiplier REAL NOT NULL DEFAULT 100, gross_pnl REAL NOT NULL DEFAULT 0, fees REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'open', replaces_leg_id TEXT, updated_at TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(trade_id) REFERENCES journal_trades(id) ON DELETE CASCADE);
@@ -542,6 +558,10 @@ pub fn init(path: &Path) -> Result<(), AppError> {
       CREATE TABLE IF NOT EXISTS journal_protective_state (environment TEXT NOT NULL, account_id TEXT NOT NULL, order_id TEXT NOT NULL, order_type TEXT NOT NULL, last_price REAL NOT NULL, PRIMARY KEY(environment,account_id,order_id));
       CREATE TABLE IF NOT EXISTS journal_sync_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS journal_trade_tombstones (trade_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);")?;
+    db.execute(
+        "INSERT INTO journal_sync_state(key,value) VALUES('screenshot-outbox-schema','1') ON CONFLICT(key) DO NOTHING",
+        [],
+    )?;
     let has_record_from = {
         let mut stmt = db.prepare("PRAGMA table_info(journal_config)")?;
         let columns = stmt
@@ -1158,8 +1178,8 @@ fn matching_entry_intent(
     };
     let direct = db
         .query_row(
-            "SELECT id,original_stop,original_target,quantity,point_value FROM journal_intents WHERE broker_order_id=?1 AND status='confirmed'",
-            params![order.id],
+            "SELECT i.id,i.original_stop,i.original_target,i.quantity,i.point_value FROM journal_intents i LEFT JOIN journal_events e ON e.event_key=('intent:' || i.id) WHERE i.broker_order_id=?1 AND i.environment=?2 AND i.account_id=?3 AND i.symbol=?4 AND i.side=?5 COLLATE NOCASE AND i.status='confirmed' AND e.trade_id IS NULL",
+            params![order.id, env, account_id, order.symbol, order.side],
             map,
         )
         .optional()?;
@@ -1180,7 +1200,7 @@ fn matching_entry_intent(
     };
     let fallback = db
         .query_row(
-            "SELECT i.id,i.original_stop,i.original_target,i.quantity,i.point_value FROM journal_intents i LEFT JOIN journal_events e ON e.event_key=('intent:' || i.id) WHERE i.environment=?1 AND i.account_id=?2 AND i.symbol=?3 AND i.side=?4 COLLATE NOCASE AND i.status='confirmed' AND e.trade_id IS NULL AND ABS((julianday(i.created_at)-julianday(?5))*86400.0)<=3600 ORDER BY i.created_at DESC LIMIT 1",
+            "SELECT i.id,i.original_stop,i.original_target,i.quantity,i.point_value FROM journal_intents i LEFT JOIN journal_events e ON e.event_key=('intent:' || i.id) WHERE i.environment=?1 AND i.account_id=?2 AND i.symbol=?3 AND i.side=?4 COLLATE NOCASE AND i.status='confirmed' AND e.trade_id IS NULL AND ABS((julianday(i.created_at)-julianday(?5))*86400.0)<=300 ORDER BY ABS((julianday(i.created_at)-julianday(?5))*86400.0),i.created_at DESC LIMIT 1",
             params![env, account_id, order.symbol, order.side, occurred_at],
             map,
         )
@@ -1467,6 +1487,192 @@ pub fn record_cancel_intent(
     )
 }
 
+fn existing_fill_allocation(
+    db: &Connection,
+    env: &str,
+    account_id: &str,
+    order_id: &str,
+) -> Result<f64, AppError> {
+    Ok(db.query_row(
+        "SELECT COALESCE(SUM(ABS(quantity)),0) FROM journal_events WHERE provider='tradestation' AND environment=?1 AND account_id=?2 AND broker_order_id=?3 AND event_type='fill' AND trade_id IS NOT NULL",
+        params![env, account_id, order_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn reconcile_authoritative_fill_time(
+    db: &Connection,
+    env: &str,
+    account_id: &str,
+    order: &OrderUpdate,
+    source: &str,
+) -> Result<Option<String>, AppError> {
+    if source != "broker-history" {
+        return Ok(None);
+    }
+    let Some(authoritative_at) = order
+        .closed_at
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let existing: Option<(String, String)> = db
+        .query_row(
+            "SELECT trade_id,occurred_at FROM journal_events WHERE provider='tradestation' AND environment=?1 AND account_id=?2 AND broker_order_id=?3 AND event_type='fill' AND trade_id IS NOT NULL ORDER BY occurred_at LIMIT 1",
+            params![env, account_id, order.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((trade_id, observed_at)) = existing else {
+        return Ok(None);
+    };
+    if parse_broker_timestamp(&observed_at) == parse_broker_timestamp(authoritative_at) {
+        return Ok(Some(trade_id));
+    }
+    insert_event(
+        db,
+        &format!(
+            "fill-time-correction:{}:{}:{}",
+            order.id,
+            order.filled_quantity.unwrap_or_default(),
+            authoritative_at
+        ),
+        Some(&trade_id),
+        env,
+        account_id,
+        Some(&order.id),
+        "fill-time-correction",
+        authoritative_at,
+        "broker-history",
+        Some("confirmed"),
+        None,
+        None,
+        order.filled_quantity,
+        order.average_fill_price,
+        Some(&format!("Authoritative execution time corrected from {observed_at}")),
+    )?;
+    Ok(Some(trade_id))
+}
+
+fn rebuild_futures_trade(db: &Connection, trade_id: &str) -> Result<bool, AppError> {
+    let Some(mut trade) = db
+        .query_row("SELECT id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,provider,asset_class,strategy,underlying FROM journal_trades WHERE id=?1 AND provider='tradestation'",params![trade_id],trade_from_row)
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    let corrections = {
+        let mut stmt = db.prepare("SELECT broker_order_id,occurred_at FROM journal_events WHERE trade_id=?1 AND event_type='fill-time-correction' AND broker_order_id IS NOT NULL ORDER BY occurred_at")?;
+        let rows = stmt.query_map(params![trade_id], |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?)))?;
+        rows.collect::<Result<HashMap<_,_>,_>>()?
+    };
+    let fills = {
+        let mut stmt = db.prepare("SELECT broker_order_id,occurred_at,quantity,price,note FROM journal_events WHERE trade_id=?1 AND event_type='fill' AND quantity IS NOT NULL AND price IS NOT NULL ORDER BY occurred_at,event_key")?;
+        let rows = stmt.query_map(params![trade_id], |row| Ok((row.get::<_,Option<String>>(0)?,row.get::<_,String>(1)?,row.get::<_,f64>(2)?,row.get::<_,f64>(3)?,row.get::<_,Option<String>>(4)?)))?;
+        rows.collect::<Result<Vec<_>,_>>()?
+    };
+    let mut entries = Vec::new();
+    let mut exits = Vec::new();
+    for (order_id, occurred_at, quantity, price, note) in fills {
+        let occurred_at = order_id
+            .as_ref()
+            .and_then(|id| corrections.get(id))
+            .cloned()
+            .unwrap_or(occurred_at);
+        let note = note.unwrap_or_default().to_ascii_lowercase();
+        if note.contains("opening") || note.contains("scale-in") {
+            entries.push((occurred_at, quantity.abs(), price));
+        } else if note.contains("closing") {
+            exits.push((occurred_at, quantity.abs(), price));
+        }
+    }
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    let entry_quantity: f64 = entries.iter().map(|(_, quantity, _)| quantity).sum();
+    let exit_quantity: f64 = exits.iter().map(|(_, quantity, _)| quantity).sum::<f64>().min(entry_quantity);
+    if entry_quantity <= 0.0 {
+        return Ok(false);
+    }
+    let average_entry = entries.iter().map(|(_, quantity, price)| quantity * price).sum::<f64>() / entry_quantity;
+    let average_exit = (exit_quantity > 0.0).then(|| exits.iter().map(|(_, quantity, price)| quantity * price).sum::<f64>() / exits.iter().map(|(_, quantity, _)| quantity).sum::<f64>());
+    let timestamp_min = |items: &[(String, f64, f64)]| items.iter().min_by_key(|(value,_,_)| parse_broker_timestamp(value)).map(|(value,_,_)| value.clone());
+    let timestamp_max = |items: &[(String, f64, f64)]| items.iter().max_by_key(|(value,_,_)| parse_broker_timestamp(value)).map(|(value,_,_)| value.clone());
+    let opened_at = timestamp_min(&entries).unwrap_or_else(|| trade.opened_at.clone());
+    let closed = exit_quantity + 1e-9 >= entry_quantity;
+    let closed_at = closed.then(|| timestamp_max(&exits)).flatten();
+    let point_value = trade.point_value.unwrap_or_default();
+    let direction = if trade.direction == "Long" { 1.0 } else { -1.0 };
+    let gross_pnl = average_exit.map_or(0.0, |exit| direction * (exit - average_entry) * point_value * exit_quantity);
+    let fees = (entry_quantity + exit_quantity) * commission_per_contract_side(db)?;
+    let r_multiple = trade.deployed_risk.filter(|risk| *risk > 0.0).map(|risk| gross_pnl / risk);
+    let changed = trade.status != if closed { "closed" } else { "open" }
+        || trade.opened_at != opened_at
+        || trade.closed_at != closed_at
+        || (trade.entry_quantity-entry_quantity).abs()>1e-9
+        || (trade.exit_quantity-exit_quantity).abs()>1e-9
+        || (trade.average_entry-average_entry).abs()>1e-9
+        || match (trade.average_exit, average_exit) {
+            (Some(current), Some(rebuilt)) => (current - rebuilt).abs() > 1e-9,
+            (None, None) => false,
+            _ => true,
+        }
+        || (trade.gross_pnl-gross_pnl).abs()>1e-9
+        || (trade.fees-fees).abs()>1e-9
+        || (trade.net_pnl-(gross_pnl-fees)).abs()>1e-9
+        || match (trade.r_multiple, r_multiple) {
+            (Some(current), Some(rebuilt)) => (current - rebuilt).abs() > 1e-9,
+            (None, None) => false,
+            _ => true,
+        };
+    if !changed {
+        return Ok(false);
+    }
+    trade.status = if closed { "closed".into() } else { "open".into() };
+    trade.opened_at = opened_at;
+    trade.closed_at = closed_at;
+    trade.entry_quantity = entry_quantity;
+    trade.exit_quantity = exit_quantity;
+    trade.average_entry = average_entry;
+    trade.average_exit = average_exit;
+    trade.gross_pnl = gross_pnl;
+    trade.fees = fees;
+    trade.net_pnl = gross_pnl - fees;
+    trade.r_multiple = r_multiple;
+    save_trade(db, &trade)?;
+    Ok(true)
+}
+
+pub fn repair_futures_projections(path: &Path) -> Result<usize, AppError> {
+    init(path)?;
+    let mut db = Connection::open(path)?;
+    let tx = db.transaction()?;
+    tx.execute("UPDATE journal_events SET trade_id=NULL,synced=0 WHERE id IN (SELECT e.id FROM journal_events e JOIN journal_intents i ON e.event_key=('intent:' || i.id) JOIN journal_trades t ON t.id=e.trade_id WHERE e.event_type='entry-intent' AND ((t.direction='Long' AND i.side<>'Buy') OR (t.direction='Short' AND i.side<>'Sell')))", [])?;
+    let trades = {
+        let mut stmt = tx.prepare("SELECT id,environment,account_id,symbol,direction,opened_at,entry_quantity,average_entry,point_value FROM journal_trades WHERE provider='tradestation' ORDER BY julianday(opened_at),id")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,String>(5)?,row.get::<_,f64>(6)?,row.get::<_,f64>(7)?,row.get::<_,Option<f64>>(8)?)))?;
+        rows.collect::<Result<Vec<_>,_>>()?
+    };
+    let mut repaired = 0;
+    for (trade_id,env,account,symbol,direction,opened_at,entry_quantity,average_entry,current_pv) in trades {
+        let side = if direction == "Long" { "Buy" } else { "Sell" };
+        let intent: Option<(String,Option<f64>,Option<f64>,f64,Option<f64>)> = tx.query_row("SELECT i.id,i.original_stop,i.original_target,i.quantity,i.point_value FROM journal_intents i LEFT JOIN journal_events e ON e.event_key=('intent:' || i.id) WHERE i.environment=?1 AND i.account_id=?2 AND i.symbol=?3 AND i.side=?4 COLLATE NOCASE AND i.status='confirmed' AND (e.trade_id IS NULL OR e.trade_id=?6) AND ABS((julianday(i.created_at)-julianday(?5))*86400.0)<=300 ORDER BY ABS((julianday(i.created_at)-julianday(?5))*86400.0),i.created_at DESC LIMIT 1",params![env,account,symbol,side,opened_at,trade_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))).optional()?;
+        if let Some((intent_id,stop,target,planned_qty,intent_pv)) = intent {
+            if let (Some(stop),Some(point_value))=(stop,intent_pv.or(current_pv)) {
+                tx.execute("UPDATE journal_trades SET original_stop=?1,original_target=COALESCE(?2,original_target),planned_risk=ABS(average_entry-?1)*?3*?4,deployed_risk=ABS(average_entry-?1)*?3*entry_quantity,point_value=?3,risk_provenance='exact',r_multiple=CASE WHEN ABS(average_entry-?1)*?3*entry_quantity>0 THEN gross_pnl/(ABS(average_entry-?1)*?3*entry_quantity) END,updated_at=?5 WHERE id=?6 AND (original_stop IS NOT ?1 OR (?2 IS NOT NULL AND original_target IS NOT ?2) OR point_value IS NOT ?3 OR planned_risk IS NOT ABS(average_entry-?1)*?3*?4 OR deployed_risk IS NOT ABS(average_entry-?1)*?3*entry_quantity OR risk_provenance<>'exact')",params![stop,target,point_value,planned_qty,now(),trade_id])?;
+                tx.execute("UPDATE journal_events SET trade_id=?1,synced=0 WHERE event_key=?2 AND trade_id IS NOT ?1",params![trade_id,format!("intent:{intent_id}")])?;
+            }
+        }
+        if rebuild_futures_trade(&tx, &trade_id)? {
+            repaired += 1;
+        }
+        let _ = (entry_quantity, average_entry);
+    }
+    tx.commit()?;
+    Ok(repaired)
+}
+
 pub fn ingest_orders(
     path: &Path,
     environment: &TradingEnvironment,
@@ -1528,7 +1734,10 @@ pub fn ingest_orders(
         let filled = order.filled_quantity.unwrap_or(0.0);
         let commission = filled * commission_per_contract_side(&tx)?;
         let previous: Option<(f64,f64)>=tx.query_row("SELECT filled_quantity,commission FROM journal_order_state WHERE environment=?1 AND account_id=?2 AND order_id=?3",params![env,account,order.id],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
-        let (prior_filled, prior_commission) = previous.unwrap_or((0.0, 0.0));
+        let allocated = existing_fill_allocation(&tx, env, &account, &order.id)?;
+        let (state_filled, state_commission) = previous.unwrap_or((0.0, 0.0));
+        let prior_filled = state_filled.max(allocated);
+        let prior_commission = state_commission.max(allocated * commission_per_contract_side(&tx)?);
         let delta = (filled - prior_filled).max(0.0);
         let fee_delta = (commission - prior_commission).max(0.0);
         let observed_at = if order.closed_at.as_deref().is_some_and(|v| !v.is_empty()) {
@@ -1559,6 +1768,7 @@ pub fn ingest_orders(
             order.average_fill_price,
             None,
         )?;
+        let _ = reconcile_authoritative_fill_time(&tx, env, &account, &order, source)?;
         tx.execute("INSERT INTO journal_order_state(environment,account_id,order_id,filled_quantity,commission) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(environment,account_id,order_id) DO UPDATE SET filled_quantity=excluded.filled_quantity,commission=excluded.commission",params![env,account,order.id,filled,commission])?;
         if matches!(order.order_type.as_str(), "Limit" | "StopMarket") && order.status == "Working"
         {
@@ -1613,14 +1823,14 @@ pub fn ingest_orders(
             }
         }
         if delta <= 0.0 || order.average_fill_price.is_none() {
-            if filled > 0.0 && order.average_fill_price.is_some() {
+            if source != "broker-history" && filled > 0.0 && order.average_fill_price.is_some() {
                 repair_active_trade_risk_from_intent(&tx, env, &account, &order)?;
             }
             continue;
         }
         fills += 1;
         let fill_price = order.average_fill_price.unwrap();
-        let active: Option<JournalTrade> = query_active_trade(&tx, env, &account, &order.symbol)?;
+        let active: Option<JournalTrade> = query_active_trade_at(&tx, env, &account, &order.symbol, &observed_at)?;
         let explicitly_close = order
             .open_or_close
             .as_deref()
@@ -1798,6 +2008,9 @@ pub fn ingest_orders(
         }
     }
     tx.commit()?;
+    if source == "broker-history" {
+        let _ = repair_futures_projections(path)?;
+    }
     Ok(JournalIngestResult {
         fills,
         unmatched_closes,
@@ -2053,7 +2266,7 @@ fn create_trade_from_fill(
 }
 
 fn save_trade(db: &Connection, trade: &JournalTrade) -> Result<(), AppError> {
-    db.execute("INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(id) DO UPDATE SET status=excluded.status,closed_at=excluded.closed_at,entry_quantity=excluded.entry_quantity,exit_quantity=excluded.exit_quantity,average_entry=excluded.average_entry,average_exit=excluded.average_exit,original_stop=excluded.original_stop,original_target=excluded.original_target,planned_risk=excluded.planned_risk,deployed_risk=excluded.deployed_risk,point_value=excluded.point_value,gross_pnl=excluded.gross_pnl,fees=excluded.fees,net_pnl=excluded.net_pnl,r_multiple=excluded.r_multiple,risk_provenance=excluded.risk_provenance,updated_at=excluded.updated_at",params![trade.id,environment_key(&trade.environment),trade.account_id,trade.symbol,trade.direction,trade.status,trade.opened_at,trade.closed_at,trade.entry_quantity,trade.exit_quantity,trade.average_entry,trade.average_exit,trade.original_stop,trade.original_target,trade.planned_risk,trade.deployed_risk,trade.point_value,trade.gross_pnl,trade.fees,trade.net_pnl,trade.r_multiple,trade.risk_provenance,now()])?;
+    db.execute("INSERT INTO journal_trades(id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23) ON CONFLICT(id) DO UPDATE SET environment=excluded.environment,account_id=excluded.account_id,symbol=excluded.symbol,direction=excluded.direction,status=excluded.status,opened_at=excluded.opened_at,closed_at=excluded.closed_at,entry_quantity=excluded.entry_quantity,exit_quantity=excluded.exit_quantity,average_entry=excluded.average_entry,average_exit=excluded.average_exit,original_stop=excluded.original_stop,original_target=excluded.original_target,planned_risk=excluded.planned_risk,deployed_risk=excluded.deployed_risk,point_value=excluded.point_value,gross_pnl=excluded.gross_pnl,fees=excluded.fees,net_pnl=excluded.net_pnl,r_multiple=excluded.r_multiple,risk_provenance=excluded.risk_provenance,updated_at=excluded.updated_at",params![trade.id,environment_key(&trade.environment),trade.account_id,trade.symbol,trade.direction,trade.status,trade.opened_at,trade.closed_at,trade.entry_quantity,trade.exit_quantity,trade.average_entry,trade.average_exit,trade.original_stop,trade.original_target,trade.planned_risk,trade.deployed_risk,trade.point_value,trade.gross_pnl,trade.fees,trade.net_pnl,trade.r_multiple,trade.risk_provenance,now()])?;
     Ok(())
 }
 
@@ -2064,6 +2277,16 @@ fn query_active_trade(
     symbol: &str,
 ) -> Result<Option<JournalTrade>, AppError> {
     db.query_row("SELECT id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,provider,asset_class,strategy,underlying FROM journal_trades WHERE provider='tradestation' AND environment=?1 AND account_id=?2 AND symbol=?3 AND status='open' ORDER BY opened_at DESC LIMIT 1",params![env,account,symbol],trade_from_row).optional().map_err(Into::into)
+}
+
+fn query_active_trade_at(
+    db: &Connection,
+    env: &str,
+    account: &str,
+    symbol: &str,
+    occurred_at: &str,
+) -> Result<Option<JournalTrade>, AppError> {
+    db.query_row("SELECT id,environment,account_id,symbol,direction,status,opened_at,closed_at,entry_quantity,exit_quantity,average_entry,average_exit,original_stop,original_target,planned_risk,deployed_risk,point_value,gross_pnl,fees,net_pnl,r_multiple,risk_provenance,provider,asset_class,strategy,underlying FROM journal_trades WHERE provider='tradestation' AND environment=?1 AND account_id=?2 AND symbol=?3 AND status='open' AND julianday(opened_at)<=julianday(?4) ORDER BY julianday(opened_at) DESC LIMIT 1",params![env,account,symbol,occurred_at],trade_from_row).optional().map_err(Into::into)
 }
 
 pub fn has_active_trade(
@@ -2738,30 +2961,120 @@ fn resolve_screenshot_trade(
     })
 }
 
-pub async fn save_entry_screenshot(
+fn screenshot_outbox_aad(input: &JournalScreenshotInput) -> String {
+    format!(
+        "{}\0{}\0{}\0{}\0{}\0{}x{}",
+        environment_key(&input.environment),
+        input.account_id,
+        input.symbol,
+        input.broker_order_id,
+        input.captured_at,
+        input.width,
+        input.height
+    )
+}
+
+fn screenshot_outbox_key() -> Result<[u8; 32], AppError> {
+    if let Some(encoded) = storage::get_secret("journal_screenshot_outbox_key")? {
+        let bytes = BASE64
+            .decode(encoded)
+            .map_err(|_| AppError::Api("The screenshot outbox key is invalid".into()))?;
+        return bytes
+            .try_into()
+            .map_err(|_| AppError::Api("The screenshot outbox key is invalid".into()));
+    }
+    let key: [u8; 32] = rand::random();
+    storage::set_secret("journal_screenshot_outbox_key", &BASE64.encode(key))?;
+    Ok(key)
+}
+
+fn encrypt_screenshot_payload(
+    key: &[u8; 32],
+    input: &JournalScreenshotInput,
+    bytes: &[u8],
+) -> Result<([u8; 24], Vec<u8>), AppError> {
+    let cipher = XChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| AppError::Api("Screenshot encryption is unavailable".into()))?;
+    let nonce: [u8; 24] = rand::random();
+    let aad = screenshot_outbox_aad(input);
+    let ciphertext = cipher
+        .encrypt(XNonce::from_slice(&nonce), Payload { msg: bytes, aad: aad.as_bytes() })
+        .map_err(|_| AppError::Api("The entry chart could not be encrypted".into()))?;
+    Ok((nonce, ciphertext))
+}
+
+fn decrypt_screenshot_payload(
+    key: &[u8; 32],
+    input: &JournalScreenshotInput,
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    let nonce: &[u8; 24] = nonce
+        .try_into()
+        .map_err(|_| AppError::Api("The encrypted screenshot nonce is invalid".into()))?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key)
+        .map_err(|_| AppError::Api("Screenshot encryption is unavailable".into()))?;
+    let aad = screenshot_outbox_aad(input);
+    cipher
+        .decrypt(XNonce::from_slice(nonce), Payload { msg: ciphertext, aad: aad.as_bytes() })
+        .map_err(|_| AppError::Api("Encrypted screenshot authentication failed".into()))
+}
+
+fn pending_screenshot_count(path: &Path) -> Result<usize, AppError> {
+    init(path)?;
+    Ok(Connection::open(path)?.query_row(
+        "SELECT COUNT(*) FROM journal_screenshot_outbox",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? as usize)
+}
+
+fn screenshot_attention_count(path: &Path) -> Result<usize, AppError> {
+    init(path)?;
+    Ok(Connection::open(path)?.query_row(
+        "SELECT COUNT(*) FROM journal_screenshot_outbox WHERE last_error LIKE '%authentication failed%' OR last_error LIKE 'Screenshot encryption key unavailable:%'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? as usize)
+}
+
+fn enqueue_entry_screenshot(
     path: &Path,
-    input: JournalScreenshotInput,
+    input: &JournalScreenshotInput,
+) -> Result<Option<String>, AppError> {
+    let bytes = validate_screenshot(input)?;
+    let key = screenshot_outbox_key()?;
+    let (nonce, ciphertext) = encrypt_screenshot_payload(&key, input, &bytes)?;
+    let trade_id = resolve_screenshot_trade(path, input).ok();
+    let created_at = now();
+    Connection::open(path)?.execute(
+        "INSERT INTO journal_screenshot_outbox(id,broker_order_id,environment,account_id,symbol,trade_id,captured_at,width,height,content_type,nonce,ciphertext,attempts,next_attempt_at,last_error,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'image/png',?10,?11,0,NULL,NULL,?12,?12) ON CONFLICT(environment,account_id,broker_order_id) DO UPDATE SET symbol=excluded.symbol,trade_id=COALESCE(journal_screenshot_outbox.trade_id,excluded.trade_id),captured_at=excluded.captured_at,width=excluded.width,height=excluded.height,content_type=excluded.content_type,nonce=excluded.nonce,ciphertext=excluded.ciphertext,attempts=0,next_attempt_at=NULL,last_error=NULL,updated_at=excluded.updated_at",
+        params![stable_id(&format!("screenshot:{}:{}:{}",environment_key(&input.environment),input.account_id,input.broker_order_id)),input.broker_order_id,environment_key(&input.environment),input.account_id,input.symbol,trade_id,input.captured_at,input.width,input.height,nonce.as_slice(),ciphertext,created_at],
+    )?;
+    Ok(trade_id)
+}
+
+async fn upload_entry_screenshot_bytes(
+    path: &Path,
+    cfg: &CloudConfig,
+    token: &str,
+    trade_id: &str,
+    captured_at: &str,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
 ) -> Result<JournalScreenshotMetadata, AppError> {
-    let bytes = validate_screenshot(&input)?;
-    let trade_id = resolve_screenshot_trade(path, &input)?;
-    if let Some((metadata, _)) = screenshot_metadata_from_row(&Connection::open(path)?, &trade_id)?
-    {
+    if let Some((metadata, _)) = screenshot_metadata_from_row(&Connection::open(path)?, trade_id)? {
         return Ok(metadata);
     }
-    let cfg = config(path)?.ok_or_else(|| {
-        AppError::Api("Connect Trade Journal Cloud to save the entry chart".into())
-    })?;
-    let token = access_token(&cfg).await?;
     let client = reqwest::Client::new();
-    if let Some(remote) = remote_screenshot(&client, &cfg, &token, &trade_id).await? {
-        if remote.object_path != screenshot_object_path(&cfg.user_id, &trade_id) {
-            return Err(AppError::Api(
-                "The entry chart object path is invalid".into(),
-            ));
+    if let Some(remote) = remote_screenshot(&client, cfg, token, trade_id).await? {
+        if remote.object_path != screenshot_object_path(&cfg.user_id, trade_id) {
+            return Err(AppError::Api("The entry chart object path is invalid".into()));
         }
         return cache_screenshot_metadata(path, &remote);
     }
-    let trade_rows = trade_upload_rows(&Connection::open(path)?, &cfg.user_id, Some(&trade_id))?;
+    let trade_rows = trade_upload_rows(&Connection::open(path)?, &cfg.user_id, Some(trade_id))?;
     if trade_rows.len() != 1 {
         return Err(AppError::Api(
             "Entry chart trade is not available for cloud upload".into(),
@@ -2769,14 +3082,14 @@ pub async fn save_entry_screenshot(
     }
     // Screenshot metadata has a foreign key to journal_trades. Upload the
     // resolved parent explicitly so capture does not race the background sync.
-    upload_screenshot_parent_trade(&client, &cfg, &token, trade_rows).await?;
-    let object_path = screenshot_object_path(&cfg.user_id, &trade_id);
+    upload_screenshot_parent_trade(&client, cfg, token, trade_rows).await?;
+    let object_path = screenshot_object_path(&cfg.user_id, trade_id);
     let response = client
         .post(format!(
             "{}/storage/v1/object/{SCREENSHOT_BUCKET}/{object_path}",
             cfg.project_url
         ))
-        .headers(storage_headers(&cfg, &token, "image/png")?)
+        .headers(storage_headers(cfg, token, "image/png")?)
         .header("x-upsert", "false")
         .body(bytes)
         .send()
@@ -2790,17 +3103,17 @@ pub async fn save_entry_screenshot(
     }
     let row = json!({
         "user_id": cfg.user_id.clone(),
-        "trade_id": trade_id.clone(),
+        "trade_id": trade_id,
         "object_path": object_path.clone(),
-        "captured_at": input.captured_at.clone(),
-        "width": input.width,
-        "height": input.height,
+        "captured_at": captured_at,
+        "width": width,
+        "height": height,
         "content_type": "image/png"
     });
     if let Err(error) = upload(
         &client,
-        &cfg,
-        &token,
+        cfg,
+        token,
         "journal_screenshots",
         "user_id,trade_id",
         vec![row],
@@ -2813,21 +3126,93 @@ pub async fn save_entry_screenshot(
                 "{}/storage/v1/object/{SCREENSHOT_BUCKET}",
                 cfg.project_url
             ))
-            .headers(storage_headers(&cfg, &token, "application/json")?)
+            .headers(storage_headers(cfg, token, "application/json")?)
             .json(&json!({"prefixes":[object_path]}))
             .send()
             .await;
         return Err(error);
     }
     let remote = RemoteScreenshotRow {
-        trade_id,
+        trade_id: trade_id.into(),
         object_path,
-        captured_at: input.captured_at,
-        width: input.width,
-        height: input.height,
+        captured_at: captured_at.into(),
+        width,
+        height,
         content_type: "image/png".into(),
     };
     cache_screenshot_metadata(path, &remote)
+}
+
+pub async fn flush_entry_screenshots(path: &Path) -> Result<JournalScreenshotSaveResult, AppError> {
+    init(path)?;
+    let pending_before = pending_screenshot_count(path)?;
+    if pending_before == 0 {
+        return Ok(JournalScreenshotSaveResult { state: "uploaded".into(), trade_id: None, pending_screenshots: 0 });
+    }
+    let Some(cfg) = config(path)? else {
+        return Ok(JournalScreenshotSaveResult { state: "queued".into(), trade_id: None, pending_screenshots: pending_before });
+    };
+    let token = match access_token(&cfg).await {
+        Ok(token) => token,
+        Err(_) => return Ok(JournalScreenshotSaveResult { state: "queued".into(), trade_id: None, pending_screenshots: pending_before }),
+    };
+    let key = match screenshot_outbox_key() {
+        Ok(key) => key,
+        Err(error) => {
+            Connection::open(path)?.execute(
+                "UPDATE journal_screenshot_outbox SET attempts=attempts+1,last_error=?1,next_attempt_at=NULL,updated_at=?2",
+                params![format!("Screenshot encryption key unavailable: {error}"), now()],
+            )?;
+            return Ok(JournalScreenshotSaveResult {
+                state: "queued".into(),
+                trade_id: None,
+                pending_screenshots: pending_before,
+            });
+        }
+    };
+    let rows = {
+        let db = Connection::open(path)?;
+        let mut stmt = db.prepare("SELECT id,broker_order_id,environment,account_id,symbol,trade_id,captured_at,width,height,nonce,ciphertext,attempts FROM journal_screenshot_outbox WHERE next_attempt_at IS NULL OR julianday(next_attempt_at)<=julianday('now') ORDER BY created_at LIMIT 20")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?,row.get::<_,Option<String>>(5)?,row.get::<_,String>(6)?,row.get::<_,u32>(7)?,row.get::<_,u32>(8)?,row.get::<_,Vec<u8>>(9)?,row.get::<_,Vec<u8>>(10)?,row.get::<_,u32>(11)?)))?;
+        rows.collect::<Result<Vec<_>,_>>()?
+    };
+    let mut last_trade_id = None;
+    let mut uploaded = false;
+    for (id,broker_order_id,environment,account_id,symbol,stored_trade_id,captured_at,width,height,nonce,ciphertext,attempts) in rows {
+        let input = JournalScreenshotInput { broker_order_id, environment: parse_environment(environment), account_id, symbol, captured_at, width, height, data_url: String::new() };
+        let trade_id = stored_trade_id.or_else(|| resolve_screenshot_trade(path, &input).ok());
+        let Some(trade_id) = trade_id else { continue; };
+        let Ok(bytes) = decrypt_screenshot_payload(&key, &input, &nonce, &ciphertext) else {
+            Connection::open(path)?.execute("UPDATE journal_screenshot_outbox SET attempts=attempts+1,last_error='Encrypted screenshot authentication failed',next_attempt_at=NULL,updated_at=?1 WHERE id=?2",params![now(),id])?;
+            continue;
+        };
+        match upload_entry_screenshot_bytes(path,&cfg,&token,&trade_id,&input.captured_at,width,height,bytes).await {
+            Ok(_) => {
+                Connection::open(path)?.execute("DELETE FROM journal_screenshot_outbox WHERE id=?1",params![id])?;
+                last_trade_id=Some(trade_id);
+                uploaded=true;
+            }
+            Err(error) => {
+                let delay = 5_i64.saturating_mul(2_i64.saturating_pow(attempts.min(8)));
+                let retry_at=(Utc::now()+Duration::seconds(delay.min(900))).to_rfc3339();
+                Connection::open(path)?.execute("UPDATE journal_screenshot_outbox SET trade_id=?1,attempts=attempts+1,next_attempt_at=?2,last_error=?3,updated_at=?4 WHERE id=?5",params![trade_id,retry_at,error.to_string(),now(),id])?;
+            }
+        }
+    }
+    let pending = pending_screenshot_count(path)?;
+    Ok(JournalScreenshotSaveResult { state: if uploaded && pending==0 { "uploaded".into() } else { "queued".into() }, trade_id:last_trade_id, pending_screenshots:pending })
+}
+
+pub async fn save_entry_screenshot(
+    path: &Path,
+    input: JournalScreenshotInput,
+) -> Result<JournalScreenshotSaveResult, AppError> {
+    let trade_id = enqueue_entry_screenshot(path, &input)?;
+    Ok(JournalScreenshotSaveResult {
+        state: "queued".into(),
+        trade_id,
+        pending_screenshots: pending_screenshot_count(path)?,
+    })
 }
 
 pub async fn entry_screenshot(
@@ -3013,6 +3398,10 @@ fn purge_before_record_from(path: &Path, cutoff: &str) -> Result<(), AppError> {
         [],
     )?;
     tx.execute(
+        "DELETE FROM journal_screenshot_outbox WHERE trade_id IS NOT NULL AND trade_id NOT IN (SELECT id FROM journal_trades)",
+        [],
+    )?;
+    tx.execute(
         "DELETE FROM journal_events WHERE trade_id IS NOT NULL AND trade_id NOT IN (SELECT id FROM journal_trades)",
         [],
     )?;
@@ -3027,6 +3416,7 @@ fn purge_before_record_from(path: &Path, cutoff: &str) -> Result<(), AppError> {
     )?;
     hydrate_order_state_from_events(&tx)?;
     tx.commit()?;
+    let _ = repair_futures_projections(path)?;
     Ok(())
 }
 
@@ -3039,6 +3429,7 @@ fn reset_local_journal(path: &Path, cutoff: &str) -> Result<(), AppError> {
     let tx = db.transaction()?;
     tx.execute("DELETE FROM journal_screenshots", [])?;
     tx.execute("DELETE FROM journal_annotations", [])?;
+    tx.execute("DELETE FROM journal_screenshot_outbox", [])?;
     tx.execute("DELETE FROM journal_events", [])?;
     tx.execute("DELETE FROM journal_option_legs", [])?;
     tx.execute("DELETE FROM journal_trades", [])?;
@@ -3075,9 +3466,18 @@ pub fn reconciliation_since(
             |row| row.get(0),
         )
         .optional()?;
+    let repair_key = format!(
+        "futures-projection-repair-v2:{}:{account_id}",
+        environment_key(environment)
+    );
+    let repair_complete: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM journal_sync_state WHERE key=?1)",
+        params![repair_key],
+        |row| row.get(0),
+    )?;
     let backfill = NaiveDate::parse_from_str(backfill_start, "%Y-%m-%d")
         .map_err(|_| AppError::Validation("Backfill start must be YYYY-MM-DD".into()))?;
-    let since = checkpoint
+    let since = (if repair_complete { checkpoint } else { None })
         .and_then(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d").ok())
         .map(|date| date - Duration::days(2))
         .map(|date| date.max(backfill))
@@ -3095,9 +3495,14 @@ pub fn set_reconciliation_checkpoint(
         "broker-checkpoint:{}:{account_id}",
         environment_key(environment)
     );
-    Connection::open(path)?.execute(
+    let db = Connection::open(path)?;
+    db.execute(
         "INSERT INTO journal_sync_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![key, Utc::now().format("%Y-%m-%d").to_string()],
+    )?;
+    db.execute(
+        "INSERT INTO journal_sync_state(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![format!("futures-projection-repair-v2:{}:{account_id}", environment_key(environment)), now()],
     )?;
     Ok(())
 }
@@ -3738,6 +4143,7 @@ fn merge_cloud(
     }
     hydrate_order_state_from_events(&tx)?;
     tx.commit()?;
+    let _ = repair_futures_projections(path)?;
     Ok(())
 }
 
@@ -3794,6 +4200,8 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
         return Ok(JournalSyncStatus {
             state: "syncing".into(),
             pending_events: 0,
+            pending_screenshots: pending_screenshot_count(path).unwrap_or(0),
+            screenshot_attention: screenshot_attention_count(path).unwrap_or(0),
             last_synced_at: None,
             message: Some("A journal sync is already running".into()),
         });
@@ -3947,6 +4355,7 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
     )
     .await?;
     let synced = now();
+    {
     let mut db = Connection::open(path)?;
     let tx = db.transaction()?;
     for id in uploaded_event_ids {
@@ -3969,12 +4378,24 @@ pub async fn sync_cloud(path: &Path) -> Result<JournalSyncStatus, AppError> {
     }
     tx.execute("INSERT INTO journal_sync_state(key,value) VALUES('last_synced_at',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",params![synced])?;
     tx.commit()?;
+    }
+    let pending_screenshots = flush_entry_screenshots(path)
+        .await
+        .map(|result| result.pending_screenshots)
+        .unwrap_or_else(|_| pending_screenshot_count(path).unwrap_or(0));
+    let screenshot_attention = screenshot_attention_count(path).unwrap_or(0);
     Ok(JournalSyncStatus {
         state: "synced".into(),
         pending_events: 0,
+        pending_screenshots,
+        screenshot_attention,
         last_synced_at: Some(synced),
         message: Some(if deferred_extended_events > 0 {
             format!("Uploaded {pending} TradeStation journal events; {deferred_extended_events} Schwab events remain local until the latest journal migration is applied")
+        } else if screenshot_attention > 0 {
+            format!("Uploaded {pending} new journal events; {screenshot_attention} encrypted entry chart(s) need attention because the local vault key is unavailable or no longer matches")
+        } else if pending_screenshots > 0 {
+            format!("Uploaded {pending} new journal events; {pending_screenshots} entry chart(s) remain encrypted locally pending cloud upload")
         } else {
             format!("Uploaded {pending} new journal events")
         }),
@@ -4769,7 +5190,7 @@ mod tests {
     }
 
     #[test]
-    fn repairs_the_mirrored_cross_device_trade_from_its_reversed_timestamps() {
+    fn historical_fill_before_a_newer_campaign_cannot_reverse_its_timestamps() {
         let path = temp();
         let points = HashMap::from([("MESU26".into(), 5.0)]);
         let mut entry = order("mirrored-entry", "Buy", "Open", 1.0, 7617.75);
@@ -4840,7 +5261,7 @@ mod tests {
         )
         .unwrap();
         let before = load_trades(&path, None).unwrap();
-        assert_eq!(before.len(), 3);
+        assert_eq!(before.len(), 2);
         assert_eq!(
             before
                 .iter()
@@ -4851,10 +5272,10 @@ mod tests {
                     })
                 })
                 .count(),
-            2
+            0
         );
 
-        assert_eq!(repair_mirrored_duplicate_trades(&path).unwrap(), 1);
+        assert_eq!(repair_mirrored_duplicate_trades(&path).unwrap(), 0);
         let after = load_trades(&path, None).unwrap();
         assert_eq!(after.len(), 2);
         assert!(after.iter().any(|trade| trade.id == correct_trade_id));
@@ -4865,7 +5286,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(tombstones, 1);
+        assert_eq!(tombstones, 0);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -5398,10 +5819,152 @@ mod tests {
                 params!["broker-checkpoint:sim:A1"],
             )
             .unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "INSERT INTO journal_sync_state(key,value) VALUES(?1,'complete')",
+                params!["futures-projection-repair-v2:sim:A1"],
+            )
+            .unwrap();
         assert_eq!(
             reconciliation_since(&path, &TradingEnvironment::Sim, "A1", "2026-01-01").unwrap(),
             "2026-07-13"
         );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn first_projection_repair_replays_from_the_configured_backfill() {
+        let path = temp();
+        init(&path).unwrap();
+        Connection::open(&path).unwrap().execute(
+            "INSERT INTO journal_sync_state(key,value) VALUES(?1,'2026-07-15')",
+            params!["broker-checkpoint:sim:A1"],
+        ).unwrap();
+        assert_eq!(
+            reconciliation_since(&path, &TradingEnvironment::Sim, "A1", "2026-01-01").unwrap(),
+            "2026-01-01"
+        );
+        set_reconciliation_checkpoint(&path, &TradingEnvironment::Sim, "A1").unwrap();
+        assert_ne!(
+            reconciliation_since(&path, &TradingEnvironment::Sim, "A1", "2026-01-01").unwrap(),
+            "2026-01-01"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bracket_child_id_with_the_wrong_side_cannot_claim_an_entry_intent() {
+        let path = temp();
+        init(&path).unwrap();
+        let db = Connection::open(&path).unwrap();
+        db.execute("INSERT INTO journal_intents(id,environment,account_id,symbol,side,quantity,original_stop,point_value,broker_order_id,created_at,status) VALUES('short-intent','sim','A1','MESU26','Sell',1,7839.75,5,'converted-child','2026-08-13T14:38:30Z','confirmed')", []).unwrap();
+        db.execute("INSERT INTO journal_intents(id,environment,account_id,symbol,side,quantity,original_stop,point_value,created_at,status) VALUES('long-intent','sim','A1','MESU26','Buy',1,7810.25,5,'2026-08-13T15:20:20Z','confirmed')", []).unwrap();
+        insert_event(&db,"intent:short-intent",None,"sim","A1",Some("converted-child"),"entry-intent","2026-08-13T14:38:30Z","northstar",Some("confirmed"),None,None,Some(1.0),None,None).unwrap();
+        insert_event(&db,"intent:long-intent",None,"sim","A1",None,"entry-intent","2026-08-13T15:20:20Z","northstar",Some("confirmed"),None,None,Some(1.0),None,None).unwrap();
+        let mut converted_child = order("converted-child", "Buy", "", 1.0, 7832.5);
+        converted_child.timestamp = "2026-08-13T14:38:31Z".into();
+        assert!(matching_entry_intent(&db,"sim","A1",&converted_child).unwrap().is_none());
+        let mut actual_entry = order("actual-entry", "Buy", "", 1.0, 7816.0);
+        actual_entry.timestamp = "2026-08-13T15:20:21Z".into();
+        assert_eq!(matching_entry_intent(&db,"sim","A1",&actual_entry).unwrap().unwrap().id,"long-intent");
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn august_thirteenth_broker_history_rebuilds_expected_day_totals() {
+        let fixture = include_str!("../tests/fixtures/august_13_orders.csv");
+        assert_eq!(fixture.lines().skip(1).count(), 29);
+        assert!(fixture.contains("1296718800,Buy,Market,Filled,2026-08-13T14:38:31Z,2026-08-13T14:42:30Z"));
+        assert!(fixture.contains("1296265808,Sell,Market,Filled,2026-08-12T15:06:55Z,2026-08-13T13:15:24Z"));
+        let path = temp();
+        init(&path).unwrap();
+        set_commission_per_contract_side(&path, 0.90).unwrap();
+        let specs = [
+            ("Buy",7807.0,7811.75,7799.0,"13:46:01","13:47:33"),
+            ("Sell",7827.25,7827.25,7831.5,"14:16:27","14:17:32"),
+            ("Sell",7833.75,7832.5,7839.75,"14:38:32","14:42:30"),
+            ("Buy",7823.0,7826.0,7816.75,"14:58:02","15:00:53"),
+            ("Buy",7816.0,7810.25,7810.25,"15:20:21","15:25:58"),
+            ("Buy",7806.5,7799.25,7799.25,"15:31:41","15:52:41"),
+            ("Buy",7801.75,7801.75,7797.5,"15:54:15","16:13:37"),
+            ("Buy",7802.0,7810.25,7798.75,"16:18:35","16:47:57"),
+            ("Sell",7815.0,7811.75,7821.25,"17:13:26","17:37:19"),
+        ];
+        let db = Connection::open(&path).unwrap();
+        let mut orders = Vec::new();
+        for (index,(side,entry_price,exit_price,stop,opened,closed)) in specs.into_iter().enumerate() {
+            let entry_id=format!("entry-{index}");
+            let close_id=format!("close-{index}");
+            let intent_id=format!("intent-{index}");
+            let created=format!("2026-08-13T{opened}Z");
+            db.execute("INSERT INTO journal_intents(id,environment,account_id,symbol,side,quantity,original_stop,point_value,broker_order_id,created_at,status) VALUES(?1,'sim','A1','MESU26',?2,1,?3,5,?4,?5,'confirmed')",params![intent_id,side,stop,entry_id,created]).unwrap();
+            insert_event(&db,&format!("intent:{intent_id}"),None,"sim","A1",Some(&entry_id),"entry-intent",&created,"northstar",Some("confirmed"),None,None,Some(1.0),None,None).unwrap();
+            let mut entry=order(&entry_id,side,"Open",1.0,entry_price);
+            entry.timestamp=created.clone(); entry.closed_at=Some(created.clone());
+            let close_side=if side=="Buy" { "Sell" } else { "Buy" };
+            let mut close=order(&close_id,close_side,"Close",1.0,exit_price);
+            close.timestamp=created; close.closed_at=Some(format!("2026-08-13T{closed}Z"));
+            orders.push(entry); orders.push(close);
+        }
+        drop(db);
+        let live_orders = orders.iter().cloned().map(|mut order| {
+            order.closed_at = None;
+            order
+        }).collect::<Vec<_>>();
+        ingest_orders(&path,&TradingEnvironment::Sim,&live_orders,"broker-stream",&HashMap::from([("MESU26".into(),5.0)])).unwrap();
+        let before_history=load_trades(&path,None).unwrap();
+        assert_eq!(before_history[2].closed_at.as_deref(),Some("2026-08-13T14:38:32Z"));
+        assert_eq!(before_history[3].closed_at.as_deref(),Some("2026-08-13T14:58:02Z"));
+        assert_eq!(before_history[8].closed_at.as_deref(),Some("2026-08-13T17:13:26Z"));
+        ingest_orders(&path,&TradingEnvironment::Sim,&orders,"broker-history",&HashMap::from([("MESU26".into(),5.0)])).unwrap();
+        let trades=load_trades(&path,None).unwrap();
+        let summary=metrics(&trades);
+        assert_eq!(trades.len(),9);
+        assert!((summary.gross_pnl-37.50).abs()<1e-9);
+        assert!((summary.fees-16.20).abs()<1e-9);
+        assert!((summary.net_pnl-21.30).abs()<1e-9);
+        assert!((summary.total_r.unwrap()-2.340544871794872).abs()<1e-9);
+        assert!((summary.win_rate.unwrap()-0.5555555555555556).abs()<1e-9);
+        let first=&trades[0];
+        assert_eq!((first.entry_quantity,first.average_entry,first.average_exit),(1.0,7807.0,Some(7811.75)));
+        assert!((first.net_pnl-21.95).abs()<1e-9);
+        let fifth=&trades[4];
+        assert_eq!(fifth.original_stop,Some(7810.25));
+        assert_eq!(fifth.r_multiple,Some(-1.0));
+        assert_eq!(trades[2].closed_at.as_deref(),Some("2026-08-13T14:42:30Z"));
+        assert_eq!(trades[3].closed_at.as_deref(),Some("2026-08-13T15:00:53Z"));
+        assert_eq!(trades[8].closed_at.as_deref(),Some("2026-08-13T17:37:19Z"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn overnight_campaign_is_counted_on_its_opening_day_only() {
+        let path = temp();
+        let points = HashMap::from([("MESU26".into(), 5.0)]);
+        let mut entry = order("overnight-entry", "Buy", "Open", 1.0, 7770.75);
+        entry.timestamp = "2026-08-12T15:06:54Z".into();
+        entry.closed_at = Some(entry.timestamp.clone());
+        let mut exit = order("overnight-exit", "Sell", "Close", 1.0, 7790.75);
+        exit.timestamp = "2026-08-12T15:06:55Z".into();
+        exit.closed_at = Some("2026-08-13T13:15:24Z".into());
+        ingest_orders(
+            &path,
+            &TradingEnvironment::Sim,
+            &[entry, exit],
+            "broker-history",
+            &points,
+        )
+        .unwrap();
+        let scope = JournalScope {
+            provider: MarketDataProvider::Tradestation,
+            environment: TradingEnvironment::Sim,
+            account_id: "A1".into(),
+            account_label: "A1".into(),
+        };
+        assert_eq!(day(&path, scope.clone(), "2026-08-12").unwrap().trades.len(), 1);
+        assert!(day(&path, scope, "2026-08-13").unwrap().trades.is_empty());
         std::fs::remove_file(path).unwrap();
     }
 
@@ -5613,6 +6176,19 @@ mod tests {
         wrong_type.data_url = wrong_type.data_url.replacen("image/png", "image/jpeg", 1);
         assert!(validate_screenshot(&wrong_type).is_err());
         assert!(validate_screenshot(&screenshot_input(8193, 720)).is_err());
+    }
+
+    #[test]
+    fn screenshot_outbox_payload_is_authenticated_and_not_plaintext() {
+        let input = screenshot_input(1512, 720);
+        let bytes = validate_screenshot(&input).unwrap();
+        let key = [7_u8; 32];
+        let (nonce, ciphertext) = encrypt_screenshot_payload(&key, &input, &bytes).unwrap();
+        assert!(!ciphertext.windows(8).any(|window| window == b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(decrypt_screenshot_payload(&key, &input, &nonce, &ciphertext).unwrap(),bytes);
+        let mut wrong_scope=input.clone();
+        wrong_scope.account_id="other-account".into();
+        assert!(decrypt_screenshot_payload(&key,&wrong_scope,&nonce,&ciphertext).is_err());
     }
 
     #[test]

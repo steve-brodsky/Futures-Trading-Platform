@@ -49,6 +49,8 @@ struct SchwabCredentials {
 #[derive(Clone, Default, Deserialize, Serialize)]
 struct SupabaseCredentials {
     refresh_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    screenshot_outbox_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -95,6 +97,7 @@ fn split_legacy_credentials(legacy: Credentials) -> (TradeStationCredentials, Su
         },
         SupabaseCredentials {
             refresh_token: legacy.journal_refresh_token,
+            screenshot_outbox_key: None,
         },
     )
 }
@@ -260,6 +263,7 @@ pub fn get_secret(key: &str) -> Result<Option<String>, AppError> {
         "client_secret" => Ok(read_tradestation_credentials()?.client_secret),
         "refresh_token" => Ok(read_tradestation_credentials()?.refresh_token),
         "journal_refresh_token" => Ok(read_supabase_credentials()?.refresh_token),
+        "journal_screenshot_outbox_key" => Ok(read_supabase_credentials()?.screenshot_outbox_key),
         _ => Err(AppError::Validation(format!(
             "Unknown credential key: {key}"
         ))),
@@ -278,9 +282,13 @@ pub fn set_secret(key: &str, value: &str) -> Result<(), AppError> {
             }
             write_tradestation_credentials(&credentials)
         }
-        "journal_refresh_token" => {
+        "journal_refresh_token" | "journal_screenshot_outbox_key" => {
             let mut credentials = read_supabase_credentials()?;
-            credentials.refresh_token = Some(value.to_owned());
+            if key == "journal_refresh_token" {
+                credentials.refresh_token = Some(value.to_owned());
+            } else {
+                credentials.screenshot_outbox_key = Some(value.to_owned());
+            }
             write_supabase_credentials(&credentials)
         }
         _ => Err(AppError::Validation(format!(
@@ -301,9 +309,13 @@ pub fn delete_secret(key: &str) -> Result<(), AppError> {
             }
             write_tradestation_credentials(&credentials)
         }
-        "journal_refresh_token" => {
+        "journal_refresh_token" | "journal_screenshot_outbox_key" => {
             let mut credentials = read_supabase_credentials()?;
-            credentials.refresh_token = None;
+            if key == "journal_refresh_token" {
+                credentials.refresh_token = None;
+            } else {
+                credentials.screenshot_outbox_key = None;
+            }
             write_supabase_credentials(&credentials)
         }
         _ => Err(AppError::Validation(format!(

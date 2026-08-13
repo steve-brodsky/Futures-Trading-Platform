@@ -4581,25 +4581,36 @@ async fn save_journal_entry_screenshot(
     input: journal::JournalScreenshotInput,
     app: tauri::AppHandle,
     state: State<'_, NativeState>,
-) -> Result<journal::JournalScreenshotMetadata, AppError> {
+) -> Result<journal::JournalScreenshotSaveResult, AppError> {
     let result = journal::save_entry_screenshot(&state.db_path, input).await?;
     let mut record = audit::AuditRecord::completed(
         "record",
         "supabase",
         "save-entry-screenshot",
         "success",
-        format!(
-            "Entry screenshot metadata was saved for trade {}",
-            result.trade_id
-        ),
+        if result.state == "uploaded" { "Entry screenshot was uploaded" } else { "Entry screenshot was encrypted locally for retry" },
     );
     record.entity_type = Some("journal-screenshot".into());
-    record.entity_id = Some(result.trade_id.clone());
+    record.entity_id = result.trade_id.clone();
     record.changes = Some(serde_json::to_value(&result)?);
     state.audit.record(record);
     let _ = app.emit(
         "journal-updated",
         serde_json::json!({"reason":"entry-screenshot"}),
+    );
+    schedule_journal_flush(app, state.db_path.clone());
+    Ok(result)
+}
+
+#[tauri::command]
+async fn flush_journal_entry_screenshots(
+    app: tauri::AppHandle,
+    state: State<'_, NativeState>,
+) -> Result<journal::JournalScreenshotSaveResult, AppError> {
+    let result = journal::flush_entry_screenshots(&state.db_path).await?;
+    let _ = app.emit(
+        "journal-updated",
+        serde_json::json!({"reason":"entry-screenshot-outbox","status":result}),
     );
     Ok(result)
 }
@@ -6139,6 +6150,7 @@ pub fn run() {
             get_journal_trade,
             get_active_journal_risk_baselines,
             save_journal_entry_screenshot,
+            flush_journal_entry_screenshots,
             get_journal_entry_screenshot,
             update_journal_annotation,
             ingest_journal_orders,

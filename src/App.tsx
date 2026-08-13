@@ -3342,7 +3342,7 @@ function TradingApp() {
     if (!candidate?.capture || !candidate.brokerOrderId || screenshotUploadingRef.current.has(id)) return;
     screenshotUploadingRef.current.add(id);
     try {
-      await api.saveJournalEntryScreenshot({
+      const result = await api.saveJournalEntryScreenshot({
         brokerOrderId: candidate.brokerOrderId,
         environment: candidate.environment,
         accountId: candidate.accountId,
@@ -3353,7 +3353,14 @@ function TradingApp() {
         dataUrl: candidate.capture.dataUrl,
       });
       removeScreenshotCandidate(id);
-      screenshotNotification("Entry chart saved", "The chart is available in this trade's journal details.", "info", candidate.tradeSymbol);
+      screenshotNotification(
+        result.state === "uploaded" ? "Entry chart saved" : "Entry chart captured",
+        result.state === "uploaded"
+          ? "The chart is available in this trade's journal details."
+          : `The encrypted chart is saved locally and queued for cloud upload${result.pendingScreenshots > 1 ? ` with ${result.pendingScreenshots - 1} other chart${result.pendingScreenshots === 2 ? "" : "s"}` : ""}.`,
+        "info",
+        candidate.tradeSymbol,
+      );
     } catch (error) {
       const message = String(error);
       const attempts = candidate.attempts + 1;
@@ -3376,12 +3383,14 @@ function TradingApp() {
 
   function retryEntryScreenshots() {
     entryScreenshotCandidatesRef.current.filter((candidate) => candidate.capture && candidate.brokerOrderId).forEach((candidate) => { void uploadEntryScreenshot(candidate.id); });
+    if (api.isNative) void api.flushJournalEntryScreenshots().catch(() => undefined);
   }
   retryEntryScreenshotsRef.current = retryEntryScreenshots;
 
   useEffect(() => {
     const retry = () => retryEntryScreenshotsRef.current();
     window.addEventListener("focus", retry);
+    retry();
     return () => {
       window.removeEventListener("focus", retry);
       screenshotRetryTimersRef.current.forEach((timer) => window.clearTimeout(timer));

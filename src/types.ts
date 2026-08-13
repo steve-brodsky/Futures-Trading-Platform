@@ -882,6 +882,8 @@ export interface JournalAuthStatus {
 export interface JournalSyncStatus {
   state: "idle" | "syncing" | "synced" | "offline" | "error";
   pendingEvents: number;
+  pendingScreenshots: number;
+  screenshotAttention: number;
   lastSyncedAt?: string;
   message?: string;
 }
@@ -937,6 +939,12 @@ export interface JournalScreenshotMetadata {
   width: number;
   height: number;
   contentType: "image/png";
+}
+
+export interface JournalScreenshotSaveResult {
+  state: "queued" | "uploaded";
+  tradeId?: string;
+  pendingScreenshots: number;
 }
 
 export interface JournalScreenshotImage extends JournalScreenshotMetadata {

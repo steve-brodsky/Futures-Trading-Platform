@@ -91,7 +91,7 @@ TradeStation and Schwab authenticate, stream, and reconnect independently. Switc
 - Schwab long/short strangle reconstruction from authoritative order snapshots, including call/put execution legs, partial closes, linked one-leg rolls, and configurable estimated option fees.
 - A durable SQLite outbox for entry intent, fills, closes, and observed stop-loss or take-profit movement, reconciled with broker history and Supabase.
 - Exact initial-risk provenance for Northstar entries, with inferred or unknown labels for incomplete imported history. Active chart R labels use that same persisted baseline.
-- One private entry-chart PNG per Northstar futures campaign, captured after the position and protective lines appear, retried in memory during the desktop session, and displayed in an expandable trade-detail view.
+- One private entry-chart PNG per Northstar futures campaign, captured after the position and protective lines appear, durably queued with authenticated encryption, and displayed in an expandable trade-detail view.
 - Trade details include execution/risk timelines, original plan, fees, gross/net P&L, R, editable notes, up to twelve tags, and immutable execution history.
 - A Stats page with month, rolling 30/90-day, year-to-date, all-time, and custom ranges; dollar/R equity curves; daily outcome bars; win rate; payoff ratio; profit factor; expectancy; drawdown; average win/loss/hold; streaks; largest outcomes; and breakdowns by symbol, direction, setup tag, and New York entry hour.
 
@@ -99,7 +99,7 @@ TradeStation and Schwab authenticate, stream, and reconnect independently. Switc
 
 - A local audit viewer for API calls, saved-record changes, streams, and system events with live updates, health/degraded state, search, category/status/source/time filters, expandable redacted evidence, pagination, copy, and JSON export.
 - Native audit history is kept in SQLite for seven days with a 10,000-event cap. The browser demo provides session-only diagnostic fixtures.
-- The native workspace, bar caches, journal outbox, safety policies, broker mutation state, Trading Today cache, and screenshot metadata live in the app-data SQLite database. Credentials remain outside it in the OS vault.
+- The native workspace, bar caches, journal outbox, safety policies, broker mutation state, Trading Today cache, screenshot metadata, and encrypted screenshot upload queue live in the app-data SQLite database. Credentials and the screenshot encryption key remain outside it in the OS vault.
 - Optional Supabase sync is owner-scoped with row-level security. It covers journal data, notes/tags, private screenshot objects, and categorized non-secret preferences with conflict-aware revisions and Realtime notifications.
 - The local workspace continues operating when cloud services are offline; preference changes are queued and only changed categories are uploaded.
 
@@ -246,7 +246,7 @@ GEX and the Options workspace use only the current Schwab option chain in memory
 
 The password is used only for the initial token exchange. Northstar stores the Supabase refresh token in its own operating-system vault record and keeps access tokens in memory. Use only the project's publishable key; never provide a service-role or secret key. Journal and preference tables use row-level security keyed to the authenticated Supabase user.
 
-Entry-chart PNGs use the private `trade-screenshots` Supabase Storage bucket created by migration `202607150006_trade_screenshots.sql`. Images are uploaded and downloaded with the authenticated journal user, are limited to 5 MB, and are never written to SQLite or the local filesystem. If cloud access is unavailable after an entry, the order continues normally and the image is retried only while that desktop session remains open.
+Entry-chart PNGs use the private `trade-screenshots` Supabase Storage bucket created by migration `202607150006_trade_screenshots.sql`. Images are uploaded and downloaded with the authenticated journal user and are limited to 5 MB. Pending images are stored only as authenticated ciphertext in SQLite using a per-install key held in the OS vault; the ciphertext is deleted immediately after upload. Cloud or authentication outages no longer block later captures, and pending uploads resume after restart, reconnect, focus, or manual sync.
 
 Supabase synchronizes chart tabs, window/layout identities, custom timeframes, recent symbols, chart and indicator settings, GEX selections, Options workspace preferences, EMA and Truth Social alert settings, drawings, the watchlist, crosshair/session/economic-event display settings, order-ticket and rollover preferences, entry rules and their lock/alert state, and both journal fee rates. Window geometry, split ratios, panel layout, SIM/LIVE selection, selected broker accounts, order-confirmation state, transient order/option drafts, and alert history remain local to each computer.
 
@@ -256,7 +256,7 @@ Supabase synchronizes chart tabs, window/layout identities, custom timeframes, r
 - The Schwab App Key, App Secret, and refresh token use a separate operating-system vault record. Schwab access tokens also remain only in native process memory.
 - The Supabase refresh token is stored in a separate Supabase-only vault record. The Supabase password is never retained, and no Supabase connection fields or tokens are included in synchronized preference payloads.
 - Chart workspace state, cached bars, journal/outbox data, safety policies, durable broker mutations, Trading Today cache, and audit history are stored in `northstar.sqlite3` under the operating system's Tauri application-data directory. The local workspace continues to work while Supabase is offline.
-- Entry-chart image bytes are cloud-only; SQLite caches only their private object path, dimensions, and capture time.
+- Uploaded entry-chart image bytes are cloud-only. SQLite caches their private object path, dimensions, and capture time, plus authenticated ciphertext only while an upload is pending; the encryption key remains in the OS vault.
 - TradeStation SIM and LIVE bar caches are separate. Schwab uses its own provider namespace and never mixes with either TradeStation environment.
 - Native audit evidence is recursively redacted for credential/token/password-like fields and data URLs. Plain Schwab account/activity payloads are excluded from the audit boundary entirely.
 - TradeStation account IDs are masked before they are displayed by the app.

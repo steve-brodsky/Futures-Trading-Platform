@@ -222,7 +222,7 @@ export function TradeJournalWindow() {
   const [view, setView] = useState<{ kind: "month" } | { kind: "day"; date: string }>({ kind: "month" });
   const [mode, setMode] = useState<"pnl" | "r">("pnl");
   const [auth, setAuth] = useState<JournalAuthStatus>({ configured: !api.isNative, authenticated: !api.isNative });
-  const [sync, setSync] = useState<JournalSyncStatus>({ state: "idle", pendingEvents: 0 });
+  const [sync, setSync] = useState<JournalSyncStatus>({ state: "idle", pendingEvents: 0, pendingScreenshots: 0, screenshotAttention: 0 });
   const [scopes, setScopes] = useState<JournalScope[]>([]);
   const [scope, setScope] = useState<JournalScope>();
   const [month, setMonth] = useState<JournalMonthSummary>();
@@ -338,7 +338,7 @@ export function TradeJournalWindow() {
   async function runSync() {
     setSync((current) => ({ ...current, state: "syncing", message: "Reconciling orders and flushing the outbox…" }));
     try { setSync(await api.syncJournal(scope)); await loadScopes(); if (scope) setMonth(await api.journalMonth(scope, cursor.year, cursor.month)); }
-    catch (reason) { setSync({ state: "error", pendingEvents: sync.pendingEvents, message: String(reason) }); }
+    catch (reason) { setSync({ state: "error", pendingEvents: sync.pendingEvents, pendingScreenshots: sync.pendingScreenshots, screenshotAttention: sync.screenshotAttention, message: String(reason) }); }
   }
 
   function moveMonth(delta: number) {
@@ -368,7 +368,7 @@ export function TradeJournalWindow() {
     <header className="journal-titlebar">
       <div className="journal-brand"><div><TrendingUp size={15} /></div><span>NORTHSTAR</span><small>JOURNAL</small></div>
       <div className="journal-drag" data-tauri-drag-region />
-      <div className={`journal-sync-state ${sync.state}`} title={sync.message}><span />{sync.state === "syncing" ? "Syncing" : sync.pendingEvents ? `${sync.pendingEvents} pending` : auth.authenticated ? "Cloud ready" : api.isNative ? "Local only" : "Demo"}</div>
+      <div className={`journal-sync-state ${sync.screenshotAttention ? "error" : sync.state}`} title={sync.message}><span />{sync.state === "syncing" ? "Syncing" : sync.screenshotAttention ? `${sync.screenshotAttention} chart${sync.screenshotAttention === 1 ? "" : "s"} need attention` : sync.pendingScreenshots ? `${sync.pendingScreenshots} chart${sync.pendingScreenshots === 1 ? "" : "s"} pending` : sync.pendingEvents ? `${sync.pendingEvents} pending` : auth.authenticated ? "Cloud ready" : api.isNative ? "Local only" : "Demo"}</div>
     </header>
 
     <nav className="journal-nav">
