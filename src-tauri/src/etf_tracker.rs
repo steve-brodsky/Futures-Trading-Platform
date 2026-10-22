@@ -1,5 +1,5 @@
 use crate::{schwab::Schwab, storage, AppError};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, NaiveTime, Utc};
 use chrono_tz::America::New_York;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -101,10 +101,48 @@ struct Movement {
     effect: String,
 }
 
-fn timestamp(value: &Value, key: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(value.get(key)?.as_str()?)
+fn parse_timestamp(text: &str) -> Option<DateTime<FixedOffset>> {
+    let text = text.trim();
+    DateTime::parse_from_rfc3339(text)
+        // Production Schwab responses also use basic offsets such as +0000,
+        // which RFC 3339's stricter +00:00 parser rejects.
+        .or_else(|_| DateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f%z"))
         .ok()
-        .map(|at| at.with_timezone(&Utc))
+}
+
+fn timestamp(value: &Value, key: &str) -> Option<DateTime<Utc>> {
+    parse_timestamp(value.get(key)?.as_str()?).map(|at| at.with_timezone(&Utc))
+}
+
+fn trade_date(value: &Value) -> Option<(String, DateTime<Utc>)> {
+    let recorded_at = timestamp(value, "time");
+    let explicit = value
+        .get("tradeDate")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(text) = explicit {
+        if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+            let at = recorded_at.unwrap_or(date.and_hms_opt(0, 0, 0)?.and_utc());
+            return Some((date.to_string(), at));
+        }
+        let at = parse_timestamp(text)?;
+        if at.time() == NaiveTime::MIN {
+            // Schwab uses midnight tradeDate values as calendar-date markers,
+            // not executions at midnight UTC. Preserve the stated trade date.
+            return Some((
+                at.date_naive().to_string(),
+                recorded_at.unwrap_or(at.with_timezone(&Utc)),
+            ));
+        }
+        return Some((
+            at.with_timezone(&New_York).date_naive().to_string(),
+            at.with_timezone(&Utc),
+        ));
+    }
+    // time is the transaction timestamp; settlementDate must never drive a
+    // full-close countdown when tradeDate is absent.
+    recorded_at.map(|at| (at.with_timezone(&New_York).date_naive().to_string(), at))
 }
 
 fn reconstruct(
@@ -142,6 +180,10 @@ fn reconstruct(
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .contains("OPTION")
+                    && !item
+                        .get("feeType")
+                        .and_then(Value::as_str)
+                        .is_some_and(|fee| fee != "NONE")
             })
             .collect();
         if matching.is_empty() {
@@ -174,17 +216,6 @@ fn reconstruct(
             return fail(result, "Corrected share activity requires reconciliation");
         }
         let trade = activity.get("type").and_then(Value::as_str) == Some("TRADE");
-        let Some(trade_at) = timestamp(activity, "tradeDate")
-            .or_else(|| (!trade).then(|| timestamp(activity, "time")).flatten())
-        else {
-            return fail(result, "Share activity is missing its trade date");
-        };
-        // Prefer execution chronology over posting chronology. Some broker trade
-        // dates share one timestamp; recorded time can then disambiguate them.
-        let recorded_at = timestamp(activity, "time").unwrap_or(trade_at);
-        if recorded_at < start || recorded_at > end || trade_at > end {
-            return fail(result, "Share activity falls outside verified history");
-        }
         let mut delta = 0.0;
         let mut effect = None;
         let mut direction = 0.0_f64;
@@ -223,20 +254,36 @@ fn reconstruct(
         if delta.abs() <= EPSILON {
             continue;
         }
+        let Some((date, trade_at)) = trade_date(activity) else {
+            return fail(
+                result,
+                "Share activity has no valid trade date or transaction timestamp",
+            );
+        };
+        let recorded_at = timestamp(activity, "time").unwrap_or(trade_at);
+        if recorded_at < start || recorded_at > end || trade_at > end {
+            return fail(result, "Share activity falls outside verified history");
+        }
         movements.push(Movement {
             at: trade_at,
             recorded_at,
-            date: trade_at.with_timezone(&New_York).date_naive().to_string(),
+            date,
             delta,
             trade,
             effect: effect.unwrap_or("").into(),
         });
     }
-    movements.sort_by(|a, b| b.at.cmp(&a.at).then(b.recorded_at.cmp(&a.recorded_at)));
+    movements.sort_by(|a, b| {
+        b.date
+            .cmp(&a.date)
+            .then(b.at.cmp(&a.at))
+            .then(b.recorded_at.cmp(&a.recorded_at))
+    });
     // Activity IDs are identities, not execution ordering. Tied opposite directions
     // can hide an intraday flatten/reopen, so do not guess their order.
     for pair in movements.windows(2) {
-        if pair[0].at == pair[1].at
+        if pair[0].date == pair[1].date
+            && pair[0].at == pair[1].at
             && pair[0].recorded_at == pair[1].recorded_at
             && pair[0].delta.signum() != pair[1].delta.signum()
         {
@@ -393,6 +440,130 @@ mod tests {
     }
 
     #[test]
+    fn accepts_production_basic_offsets_with_and_without_fractional_seconds() {
+        for text in [
+            "2026-09-03T15:30:00+0000",
+            "2026-09-03T15:30:00.123+0000",
+            "2026-09-03T11:30:00-0400",
+            "2026-09-03T15:30:00+00:00",
+            "2026-09-03T15:30:00Z",
+        ] {
+            let mut sell = trade(1, 3, -10.0, "CLOSING");
+            sell["tradeDate"] = json!(text);
+            sell["time"] = json!(text);
+            let result = row(0.0, vec![sell]);
+            assert_eq!(
+                result.last_closed_date.as_deref(),
+                Some("2026-09-03"),
+                "{text}"
+            );
+            assert_eq!(result.availability_reason, None, "{text}");
+        }
+    }
+
+    #[test]
+    fn calendar_trade_dates_do_not_shift_back_to_the_previous_new_york_day() {
+        for text in [
+            "2026-09-03",
+            "2026-09-03T00:00:00+0000",
+            "2026-09-03T00:00:00.000+0000",
+            "2026-09-03T00:00:00+00:00",
+            "2026-09-03T00:00:00Z",
+        ] {
+            let mut sell = trade(1, 3, -10.0, "CLOSING");
+            sell["tradeDate"] = json!(text);
+            sell["time"] = json!("2026-09-04T01:00:00+0000");
+            sell["settlementDate"] = json!("2026-09-05T00:00:00+0000");
+            let result = row(0.0, vec![sell.clone()]);
+            assert_eq!(
+                result.last_closed_date.as_deref(),
+                Some("2026-09-03"),
+                "{text}"
+            );
+            assert_eq!(result.availability_reason, None, "{text}");
+            sell.as_object_mut().unwrap().remove("time");
+            assert_eq!(
+                row(0.0, vec![sell]).last_closed_date.as_deref(),
+                Some("2026-09-03"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_trade_date_uses_transaction_time_but_never_settlement_date() {
+        for value in [None, Some(Value::Null), Some(json!(""))] {
+            let mut sell = trade(1, 3, -10.0, "CLOSING");
+            sell.as_object_mut().unwrap().remove("tradeDate");
+            if let Some(value) = value {
+                sell["tradeDate"] = value;
+            }
+            sell["time"] = json!("2026-09-03T01:00:00+0000");
+            sell["settlementDate"] = json!("2026-09-04T00:00:00+0000");
+            let result = row(0.0, vec![sell]);
+            assert_eq!(result.last_closed_date.as_deref(), Some("2026-09-02"));
+            assert_eq!(result.availability_reason, None);
+        }
+        let mut missing = trade(1, 3, -10.0, "CLOSING");
+        missing.as_object_mut().unwrap().remove("tradeDate");
+        missing.as_object_mut().unwrap().remove("time");
+        missing["settlementDate"] = json!("2026-09-04T00:00:00+0000");
+        let result = row(0.0, vec![missing]);
+        assert_eq!(result.last_closed_date, None);
+        assert!(result
+            .availability_reason
+            .unwrap()
+            .contains("no valid trade date"));
+        let mut malformed = trade(1, 3, -10.0, "CLOSING");
+        malformed["tradeDate"] = json!("not-a-date");
+        assert!(row(0.0, vec![malformed]).availability_reason.is_some());
+    }
+
+    #[test]
+    fn ignores_zero_quantity_and_fee_activity_without_dates() {
+        let mut zero = trade(2, 4, 0.0, "CLOSING");
+        zero.as_object_mut().unwrap().remove("tradeDate");
+        zero.as_object_mut().unwrap().remove("time");
+        let mut fee = zero.clone();
+        fee["activityId"] = json!(3);
+        fee["transferItems"][0]["amount"] = json!(-0.01);
+        fee["transferItems"][0]["feeType"] = json!("COMMISSION");
+        let result = row(0.0, vec![trade(1, 3, -10.0, "CLOSING"), zero, fee]);
+        assert_eq!(result.last_closed_date.as_deref(), Some("2026-09-03"));
+        assert_eq!(result.availability_reason, None);
+    }
+
+    #[test]
+    fn production_spxl_and_tqqq_round_trips_reconcile_with_partial_sales() {
+        for symbol in ["SPXL", "TQQQ"] {
+            let mut rows = vec![
+                trade(1, 2, 100.5, "OPENING"),
+                trade(2, 3, -70.0, "CLOSING"),
+                trade(3, 4, -30.5, "CLOSING"),
+            ];
+            for (index, activity) in rows.iter_mut().enumerate() {
+                let day = index + 2;
+                activity["time"] = json!(format!("2026-09-{day:02}T15:30:00.000+0000"));
+                activity["tradeDate"] = json!(format!("2026-09-{day:02}T00:00:00+0000"));
+                activity["transferItems"][0]["instrument"] =
+                    json!({"assetType":"EQUITY","type":"COLLECTIVE_INVESTMENT","symbol":symbol});
+                activity["transferItems"].as_array_mut().unwrap().push(json!({"instrument":{"assetType":"CURRENCY","symbol":"CURRENCY_USD"},"amount":0.0,"feeType":"SEC_FEE"}));
+            }
+            let result = reconstruct(symbol, 0.0, &rows, at(1), at(30));
+            assert_eq!(
+                result.last_closed_date.as_deref(),
+                Some("2026-09-04"),
+                "{symbol}"
+            );
+            assert_eq!(result.availability_reason, None, "{symbol}");
+            rows.pop();
+            let partial = reconstruct(symbol, 30.5, &rows, at(1), at(30));
+            assert_eq!(partial.last_closed_date, None);
+            assert_eq!(partial.availability_reason, None, "{symbol}");
+        }
+    }
+
+    #[test]
     fn posting_order_does_not_override_execution_order() {
         let mut buy = trade(1, 2, 10.0, "OPENING");
         let mut sell = trade(2, 3, -10.0, "CLOSING");
@@ -539,13 +710,19 @@ mod tests {
     #[tokio::test]
     async fn refresh_reconciles_live_positions_and_saves_only_verified_snapshot() {
         let flat = json!({"securitiesAccount":{"positions":[]}});
-        let sell_date = Utc::now() - Duration::days(40);
+        let sell_date = Utc::now() - Duration::days(12);
         let mut sell = trade(1, 3, -10.0, "CLOSING");
-        sell["time"] = json!(sell_date.to_rfc3339());
-        sell["tradeDate"] = json!(sell_date.to_rfc3339());
+        sell["time"] = json!(sell_date.format("%Y-%m-%dT%H:%M:%S%.3f%z").to_string());
+        sell["tradeDate"] = json!(format!(
+            "{}T00:00:00+0000",
+            sell_date.with_timezone(&New_York).date_naive()
+        ));
+        let mut tqqq = sell.clone();
+        tqqq["activityId"] = json!(2);
+        tqqq["transferItems"][0]["instrument"]["symbol"] = json!("TQQQ");
         let replies = vec![
             (200, flat.clone()),
-            (200, json!([sell])),
+            (200, json!([sell, tqqq])),
             (200, json!([])),
             (200, json!([])),
             (200, json!([])),
@@ -560,6 +737,14 @@ mod tests {
             snapshot.rows[0].last_closed_date,
             Some(sell_date.with_timezone(&New_York).date_naive().to_string())
         );
+        assert_eq!(
+            snapshot.rows[4].last_closed_date,
+            snapshot.rows[0].last_closed_date
+        );
+        assert!(snapshot
+            .rows
+            .iter()
+            .all(|row| row.availability_reason.is_none()));
         assert_eq!(
             get_cache(&path, "hash").unwrap().unwrap().rows,
             snapshot.rows
