@@ -466,7 +466,7 @@ async fn preflight(
     api: &Schwab,
     path: &Path,
     draft: &SchwabEquityOrderDraft,
-) -> Result<(), AppError> {
+) -> Result<Value, AppError> {
     // Independent reads can overlap. The final quote is fetched after these
     // checks so sizing is still validated immediately before submission.
     let (accounts, meta, hours, snapshot, orders) = tokio::try_join!(
@@ -486,12 +486,39 @@ async fn preflight(
             "Only Schwab equities and ETFs can be traded".into(),
         ));
     }
-    if !session_open(&hours, Utc::now()) {
+    validate_entry_state(api, path, draft, &hours, &snapshot.positions, &orders).await?;
+    Ok(hours)
+}
+
+async fn revalidate_entry(
+    api: &Schwab,
+    path: &Path,
+    draft: &SchwabEquityOrderDraft,
+    hours: &Value,
+) -> Result<(), AppError> {
+    // Authorization and instrument metadata were checked in this same locked
+    // submission. Refresh mutable broker state, then fetch the final quote.
+    let (snapshot, orders) = tokio::try_join!(
+        api.account_snapshot(&draft.account_id),
+        broker_orders(api, path, &draft.account_id),
+    )?;
+    validate_entry_state(api, path, draft, hours, &snapshot.positions, &orders).await
+}
+
+async fn validate_entry_state(
+    api: &Schwab,
+    path: &Path,
+    draft: &SchwabEquityOrderDraft,
+    hours: &Value,
+    positions: &[Position],
+    orders: &[OrderUpdate],
+) -> Result<(), AppError> {
+    if !session_open(hours, Utc::now()) {
         return Err(AppError::Validation(
             "Schwab regular equity session is closed".into(),
         ));
     }
-    if snapshot.positions.iter().any(|p| {
+    if positions.iter().any(|p| {
         equity(p.asset_type.as_deref()) && p.symbol == draft.symbol && p.quantity.abs() > 0.0
     }) || orders
         .iter()
@@ -502,8 +529,8 @@ async fn preflight(
         ));
     }
     if !protection_issues(
-        &managed_positions(path, &draft.account_id, &snapshot.positions)?,
-        &orders,
+        &managed_positions(path, &draft.account_id, positions)?,
+        orders,
     )
     .is_empty()
     {
@@ -517,7 +544,12 @@ async fn preflight(
         .into_iter()
         .next()
         .ok_or_else(|| AppError::Validation("Schwab quote unavailable".into()))?;
-    validate_draft(draft, &quote)
+    validate_draft(draft, &quote)?;
+    // The final quote request may cross a closing boundary.
+    if !session_open(hours, Utc::now()) {
+        return Err(AppError::Validation("Schwab regular equity session is closed".into()));
+    }
+    Ok(())
 }
 
 async fn preview(api: &Schwab, payload: &Value) -> Result<OrderPreview, AppError> {
@@ -732,7 +764,9 @@ async fn mutate(
     }
     let _session = state.schwab_trading_lifecycle.read().await;
     let _guard = state.safety.provider_account_lock("schwab", account).await;
-    if !state
+    // Entry authorization is part of preflight below. Management actions also
+    // need this check because they do not use the entry preflight.
+    if kind != "schwab_place" && !state
         .schwab
         .accounts()
         .await?
@@ -926,15 +960,15 @@ async fn prepare(
 ) -> Result<Value, AppError> {
     if kind == "schwab_place" {
         let draft: SchwabEquityOrderDraft = serde_json::from_value(request.clone())?;
-        preflight(api, path, &draft).await?;
+        let hours = preflight(api, path, &draft).await?;
         let payload = placement_payload(&draft);
         let result = preview(api, &json!({"account":account,"order":payload})).await?;
         if !result.valid {
             return Err(AppError::Validation(result.errors.join("; ")));
         }
-        // Preview can take long enough to invalidate a quote: final read-only
-        // preflight repeats immediately before the write.
-        preflight(api, path, &draft).await?;
+        // Preview can invalidate quotes or holdings. Recheck those immediately
+        // before writing, using the session boundaries fetched this attempt.
+        revalidate_entry(api, path, &draft, &hours).await?;
         return Ok(payload);
     }
     let orders = broker_orders(api, path, account).await?;
@@ -1772,16 +1806,24 @@ mod tests {
     async fn server(
         replies: Vec<(u16, Value, Option<&str>)>,
     ) -> (Schwab, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let replies: Vec<_> = replies
+        let count = replies.len();
+        let mut replies = replies
             .into_iter()
             .map(|(s, b, l)| (s, b, l.map(str::to_owned)))
-            .collect();
+            .collect::<Vec<_>>().into_iter();
+        routed_server(count, move |_| replies.next().unwrap()).await
+    }
+
+    async fn routed_server(
+        count: usize,
+        mut reply: impl FnMut(&str) -> (u16, Value, Option<String>) + Send + 'static,
+    ) -> (Schwab, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
         let task = tokio::spawn(async move {
-            for (status, body, location) in replies {
+            for _ in 0..count {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut data = Vec::new();
                 let mut buffer = [0u8; 8192];
@@ -1805,10 +1847,12 @@ mod tests {
                         }
                     }
                 }
+                let request = String::from_utf8_lossy(&data).into_owned();
+                let (status, body, location) = reply(&request);
                 captured
                     .lock()
                     .unwrap()
-                    .push(String::from_utf8_lossy(&data).into_owned());
+                    .push(request);
                 let body = if body.is_null() {
                     String::new()
                 } else {
@@ -1838,6 +1882,65 @@ mod tests {
         assert_eq!(id, "123");
         task.await.unwrap();
         assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn entry_preparation_reuses_metadata_and_rechecks_mutable_state_after_preview() {
+        for scenario in ["ok", "risk", "position", "pending"] {
+            let path = database();
+            let mut previewed = false;
+            let (api, requests, task) = routed_server(100, move |request| {
+                let route = request.split_whitespace().nth(1).unwrap();
+                let body = if route == "/accounts/accountNumbers" {
+                    json!([{"accountNumber":"fixture-number","hashValue":"hash"}])
+                } else if route == "/accounts" {
+                    json!([{"securitiesAccount":{"accountNumber":"fixture-number","type":"MARGIN"}}])
+                } else if route.starts_with("/instruments?") {
+                    json!({"instruments":[{"symbol":"AAPL","assetType":"EQUITY"}]})
+                } else if route.starts_with("/markets/equity?") {
+                    json!({"isOpen":true,"sessionHours":{"regularMarket":[{
+                        "start":(Utc::now()-chrono::Duration::hours(1)).to_rfc3339(),
+                        "end":(Utc::now()+chrono::Duration::hours(1)).to_rfc3339()}]}})
+                } else if route.starts_with("/accounts/hash?") {
+                    let positions = if previewed && scenario == "position" {
+                        json!([{"longQuantity":1,"averagePrice":200,"instrument":{"symbol":"AAPL","assetType":"COLLECTIVE_INVESTMENT"}}])
+                    } else { json!([]) };
+                    json!({"securitiesAccount":{"accountNumber":"fixture-number","positions":positions}})
+                } else if route.starts_with("/accounts/hash/orders?") {
+                    if previewed && scenario == "pending" {
+                        json!([{"orderId":99,"orderType":"MARKET","status":"WORKING","orderLegCollection":[{
+                            "instruction":"BUY","quantity":1,"instrument":{"symbol":"AAPL","assetType":"EQUITY"}}]}])
+                    } else { json!([]) }
+                } else if route.starts_with("/quotes?") {
+                    let ask = if previewed && scenario == "risk" { 200.05 } else { 200.0 };
+                    json!({"AAPL":{"realtime":true,"quote":{"lastPrice":200,"bidPrice":199.99,"askPrice":ask,"quoteTime":Utc::now().timestamp_millis()}}})
+                } else if route == "/accounts/hash/previewOrder" {
+                    assert!(request.starts_with("POST "));
+                    previewed = true;
+                    json!({"orderValidationResult":{"accepts":[]}})
+                } else { panic!("Unexpected fixture request: {route}") };
+                (200, body, None)
+            }).await;
+            let request = serde_json::to_value(draft()).unwrap();
+            let result = prepare(&api, &path, "hash", "schwab_place", &request).await;
+            task.abort();
+            let _ = task.await;
+            let requests = requests.lock().unwrap();
+            if scenario == "ok" {
+                assert_eq!(result.unwrap(), placement_payload(&draft()));
+                assert_eq!(requests.len(), 12);
+            } else {
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains(if scenario == "risk" { "risk budget" } else { "already has shares" }), "{scenario}: {message}");
+            }
+            for route in ["/accounts/accountNumbers", "/accounts ", "/instruments?", "/markets/equity?"] {
+                assert_eq!(requests.iter().filter(|r| r.contains(route)).count(), 1, "Repeated metadata lookup: {route}");
+            }
+            assert_eq!(requests.iter().filter(|r| r.contains("/accounts/hash?fields=positions")).count(), 2);
+            assert_eq!(requests.iter().filter(|r| r.contains("/previewOrder ")).count(), 1);
+            assert!(requests.iter().all(|r| r.starts_with("GET ") || r.starts_with("POST /accounts/hash/previewOrder ")));
+            std::fs::remove_file(path).ok();
+        }
     }
     #[tokio::test]
     async fn server_failure_is_unknown_and_never_resubmitted() {

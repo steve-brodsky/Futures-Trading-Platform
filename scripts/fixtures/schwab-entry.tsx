@@ -94,6 +94,11 @@ Object.assign(window, {
     assert(!control.busy && accepted.length === 1, "Confirmed mutation did not finish after refresh");
     passed.push("Coalesced post-mutation refresh discards stale account state");
     await reset();
+    placements = [{ ...result("confirmed"), brokerOrder: { provider: "schwab", accountId: account.id, id: "filled", symbol: "SPY", side: "Buy", type: "Market", quantity: 50, filledQuantity: 50, averageFillPrice: 100.01, status: "Filled", timestamp: new Date().toISOString(), assetType: "EQUITY" } }];
+    await submit();
+    assert(text().includes("Schwab filled 50 shares of SPY at $100.01.") && !text().includes("order status is updating"), "A confirmed fill still looks like an order in progress");
+    passed.push("Confirmed fills report completion immediately");
+    await reset();
     placements = [result("rejected", riskError), result("confirmed")];
     await submit();
     assert(text().includes("Reduce shares to stay within risk?") && text().includes("50 → 47"), "Risk rejection did not open reduced-share review");

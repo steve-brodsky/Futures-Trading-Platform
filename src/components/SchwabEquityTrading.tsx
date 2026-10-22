@@ -125,7 +125,11 @@ export function useSchwabEquityTrading({ account, connected, confirmOrders, onSn
           return;
         }
         if (entry && latest.current.account?.id === actionAccountId) latest.current.onAccepted(entry.draft.symbol);
-        report(result.warnings.join("; ") || "Schwab confirmed the request; order status is updating.", result.warnings.length ? "warning" : "success", actionAccountId);
+        const order = result.brokerOrder;
+        const message = entry && order?.status === "Filled"
+          ? `Schwab filled ${order.filledQuantity ?? order.quantity} shares of ${order.symbol}${order.averageFillPrice != null ? ` at $${order.averageFillPrice.toFixed(2)}` : ""}.`
+          : "Schwab confirmed the request; order status is updating.";
+        report(result.warnings.join("; ") || message, result.warnings.length ? "warning" : "success", actionAccountId);
         setReview(undefined);
       } else {
         const rejected = result.brokerOutcome === "rejected";

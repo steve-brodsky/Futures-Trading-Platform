@@ -161,11 +161,14 @@ impl Schwab {
             }
             let status = response.status();
             if status.is_success()
-                && method != reqwest::Method::GET
+                && matches!(method, reqwest::Method::PUT | reqwest::Method::DELETE)
                 && !path.ends_with("/previewOrder")
             {
                 self.open_order_cache.lock().await.clear();
             }
+            // A newly placed order cannot change older order trees. Today's
+            // orders and persisted bracket IDs are always refreshed separately,
+            // so POST need not force a full history download before showing it.
             let location = response
                 .headers()
                 .get(reqwest::header::LOCATION)
@@ -2076,6 +2079,29 @@ mod tests {
         let from = chrono::DateTime::parse_from_rfc3339(&query["fromEnteredTime"]).unwrap();
         let to = chrono::DateTime::parse_from_rfc3339(&query["toEnteredTime"]).unwrap();
         assert_eq!((to - from).num_days(), 360);
+    }
+
+    #[tokio::test]
+    async fn new_entries_keep_history_cache_but_replace_and_cancel_invalidate_it() {
+        let (client, server) = history_server(vec![
+            (200, serde_json::json!([])),
+            (201, Value::Null),
+            (200, Value::Null),
+            (200, serde_json::json!([])),
+            (200, Value::Null),
+            (200, serde_json::json!([])),
+        ]).await;
+        client.open_equity_orders("hash").await.unwrap();
+        let original_time = client.open_order_cache.lock().await["hash"].0;
+        client.trading_request(reqwest::Method::POST, "/accounts/hash/orders", Some(&serde_json::json!({}))).await.unwrap();
+        client.open_equity_orders("hash").await.unwrap();
+        assert_eq!(client.open_order_cache.lock().await["hash"].0, original_time);
+        for method in [reqwest::Method::PUT, reqwest::Method::DELETE] {
+            client.trading_request(method, "/accounts/hash/orders/123", None).await.unwrap();
+            assert!(client.open_order_cache.lock().await.is_empty());
+            client.open_equity_orders("hash").await.unwrap();
+        }
+        assert_eq!(server.await.unwrap().len(), 6);
     }
 
     #[tokio::test]
