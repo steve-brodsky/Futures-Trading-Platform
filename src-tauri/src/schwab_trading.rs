@@ -155,35 +155,32 @@ pub fn placement_payload(draft: &SchwabEquityOrderDraft) -> Value {
         json!([{"instruction":instruction,"quantity":draft.quantity,
         "instrument":{"symbol":draft.symbol,"assetType":"EQUITY"}}])
     };
+    let exit_duration = schwab_duration(&draft.exit_duration);
     json!({"session":"NORMAL","duration":"DAY","orderType":"MARKET","orderStrategyType":"TRIGGER",
         "orderLegCollection":leg(entry),"childOrderStrategies":[{"orderStrategyType":"OCO","childOrderStrategies":[
-            {"session":"NORMAL","duration":draft.exit_duration,"orderType":"LIMIT","price":draft.take_profit,
+            {"session":"NORMAL","duration":exit_duration,"orderType":"LIMIT","price":draft.take_profit,
              "orderStrategyType":"SINGLE","orderLegCollection":leg(exit)},
-            {"session":"NORMAL","duration":draft.exit_duration,"orderType":"STOP","stopPrice":draft.stop_loss,
+            {"session":"NORMAL","duration":exit_duration,"orderType":"STOP","stopPrice":draft.stop_loss,
              "orderStrategyType":"SINGLE","orderLegCollection":leg(exit)}]}]})
 }
 
-/// Preview uses the documented orderStrategy/orderLegs model, not the placement model.
+// The ticket uses GTC; Schwab's order API uses the full duration enum value.
+fn schwab_duration(value: &str) -> &str {
+    match value {
+        "GTC" => "GOOD_TILL_CANCEL",
+        value => value,
+    }
+}
+
+/// previewOrder accepts an order request, including the full bracket tree.
+/// orderStrategy/orderLegs describes its RESPONSE, not the request envelope.
+/// Keep a separate adapter only to normalize legacy persisted durations.
 pub fn preview_payload(order: &Value) -> Value {
     fn strategy(order: &Value) -> Value {
         let mut result = order.clone();
         if let Some(object) = result.as_object_mut() {
-            if let Some(legs) = object.remove("orderLegCollection") {
-                object.insert(
-                    "orderLegs".into(),
-                    Value::Array(
-                        legs.as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|leg| {
-                                json!({
-                                    "instruction":leg["instruction"],"quantity":leg["quantity"],
-                                    "finalSymbol":leg["instrument"]["symbol"],"assetType":"EQUITY"
-                                })
-                            })
-                            .collect(),
-                    ),
-                );
+            if let Some(duration) = object.get("duration").and_then(Value::as_str) {
+                object.insert("duration".into(), json!(schwab_duration(duration)));
             }
             if let Some(children) = object
                 .get_mut("childOrderStrategies")
@@ -196,17 +193,25 @@ pub fn preview_payload(order: &Value) -> Value {
         }
         result
     }
-    json!({"orderStrategy":strategy(order)})
+    strategy(order)
 }
 
 pub fn parse_preview(value: &Value) -> OrderPreview {
     let validation = value.get("orderValidationResult");
     let mut errors = Vec::new();
-    if validation.is_none()
-        || !validation
-            .and_then(|v| v.get("rejects"))
-            .is_some_and(Value::is_array)
-    {
+    // Empty validation categories are often omitted in broker responses.
+    // An accepts-only response is recognized; an absent/malformed result is not.
+    let categories = ["alerts", "accepts", "rejects", "reviews", "warns"];
+    let recognized = validation.is_some_and(|result| {
+        result.is_object()
+            && categories
+                .iter()
+                .any(|key| result.get(key).is_some_and(Value::is_array))
+            && categories
+                .iter()
+                .all(|key| result.get(key).is_none_or(|v| v.is_null() || v.is_array()))
+    });
+    if !recognized {
         errors.push(
             "Schwab did not return a recognized order validation result; submission is disabled"
                 .into(),
@@ -228,6 +233,16 @@ pub fn parse_preview(value: &Value) -> OrderPreview {
                     .to_string(),
             );
         }
+    }
+    if value
+        .pointer("/orderStrategy/status")
+        .and_then(Value::as_str)
+        == Some("REJECTED")
+        && errors.is_empty()
+    {
+        errors.push(
+            "Schwab rejected the preview without a validation message; submission is disabled".into(),
+        );
     }
     OrderPreview {
         valid: errors.is_empty(),
@@ -1050,7 +1065,7 @@ pub fn replacement_payload(raw: &Value, selected: &str, price: f64) -> Result<Va
         .ok_or_else(|| AppError::Validation("Incomplete OCO group".into()))?;
     let mut found = false;
     let children: Vec<_> = children.iter().map(|child| {
-        let mut order=json!({"session":child["session"],"duration":child["duration"],"orderType":child["orderType"],"orderStrategyType":"SINGLE",
+        let mut order=json!({"session":child["session"],"duration":schwab_duration(child["duration"].as_str().unwrap_or_default()),"orderType":child["orderType"],"orderStrategyType":"SINGLE",
             "orderLegCollection":child["orderLegCollection"].as_array().into_iter().flatten().map(|leg|json!({"instruction":leg["instruction"],"quantity":leg["quantity"],"instrument":{"symbol":leg["instrument"]["symbol"],"assetType":"EQUITY"}})).collect::<Vec<_>>()});
         let is_selected = child["orderId"].as_u64().map(|id| id.to_string()).or_else(||child["orderId"].as_str().map(str::to_owned)).as_deref()==Some(selected);
         if is_selected {found=true;}
@@ -1683,9 +1698,9 @@ mod tests {
         json!({"orderId":123,"orderStrategyType":"TRIGGER","orderType":"MARKET","status":"FILLED","quantity":50,"filledQuantity":50,
             "orderLegCollection":[{"legId":1,"instruction":"BUY","quantity":50,"instrument":{"symbol":"AAPL","assetType":"EQUITY"}}],
             "childOrderStrategies":[{"orderId":124,"orderStrategyType":"OCO","childOrderStrategies":[
-                {"orderId":125,"orderStrategyType":"SINGLE","orderType":"LIMIT","session":"NORMAL","duration":"GTC","price":203,"status":status,"cancelable":true,"editable":true,
+                {"orderId":125,"orderStrategyType":"SINGLE","orderType":"LIMIT","session":"NORMAL","duration":"GOOD_TILL_CANCEL","price":203,"status":status,"cancelable":true,"editable":true,
                     "orderLegCollection":[{"legId":1,"instruction":"SELL","quantity":50,"instrument":{"symbol":"AAPL","assetType":"EQUITY"}}]},
-                {"orderId":126,"orderStrategyType":"SINGLE","orderType":"STOP","session":"NORMAL","duration":"GTC","stopPrice":198,"status":status,"cancelable":true,"editable":true,
+                {"orderId":126,"orderStrategyType":"SINGLE","orderType":"STOP","session":"NORMAL","duration":"GOOD_TILL_CANCEL","stopPrice":198,"status":status,"cancelable":true,"editable":true,
                     "orderLegCollection":[{"legId":1,"instruction":"SELL","quantity":50,"instrument":{"symbol":"AAPL","assetType":"EQUITY"}}]}]}]})
     }
     async fn server(
@@ -1783,6 +1798,77 @@ mod tests {
         assert!(matches!(error, AppError::BrokerRejected(_)));
         assert!(error.to_string().contains("buying power"));
         task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn preview_rejection_reports_endpoint_and_field_validation() {
+        let (api, requests, task) = server(vec![(
+            400,
+            json!({"message":"A validation error occurred while processing the request.",
+                "errors":["orderStrategy.duration: unsupported value"]}),
+            None,
+        )])
+        .await;
+        let error = preview(
+            &api,
+            &json!({"account":"hash","order":placement_payload(&draft())}),
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(error, AppError::BrokerRejected(_)));
+        assert!(message.contains("Schwab order preview rejected"));
+        assert!(message.contains("orderStrategy.duration: unsupported value"));
+        task.await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /accounts/hash/previewOrder "));
+        let body: Value =
+            serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["duration"], "DAY");
+        assert!(body.get("orderStrategy").is_none());
+        let children = &body["childOrderStrategies"][0]["childOrderStrategies"];
+        assert_eq!(children[0]["duration"], "GOOD_TILL_CANCEL");
+        assert_eq!(children[1]["duration"], "GOOD_TILL_CANCEL");
+        assert!(!body.to_string().contains("\"GTC\""));
+    }
+    #[tokio::test]
+    async fn preview_posts_the_full_order_request_and_parses_response_only_fields() {
+        // The request is an order dictionary, as passed to Client.preview_order:
+        // https://github.com/tylerebowers/Schwabdev/blob/main/schwabdev/client.py
+        // orderStrategy/orderLegs belong to the returned preview, not this body.
+        let expected: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/schwab_preview_bracket_request.json"
+        ))
+        .unwrap();
+        let response = json!({
+            "orderStrategy": {
+                "orderStrategyType":"TRIGGER", "advancedOrderType":"OTOCO", "status":"ACCEPTED",
+                "orderBalance":{"projectedCommission":0,"projectedBuyingPower":764.03},
+                "orderLegs":[{"finalSymbol":"SPY","assetType":"EQUITY","instruction":"BUY"}]
+            },
+            "orderValidationResult":{"accepts":[{"activityMessage":"Order accepted","originalSeverity":"ACCEPT"}]}
+        });
+        let (api, requests, task) = server(vec![(200, response, None)]).await;
+        let mut d = draft();
+        d.symbol = "SPY".into();
+        d.quantity = 1;
+        d.reference_entry = 764.03;
+        d.stop_loss = 762.11;
+        d.take_profit = 766.91;
+        let checked = preview(&api, &json!({"account":"hash","order":placement_payload(&d)}))
+            .await
+            .unwrap();
+        assert!(checked.valid, "{:?}", checked.errors);
+        assert_eq!(checked.initial_margin.as_deref(), Some("764.03"));
+        task.await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1); // preview only; no placement or fallback
+        assert!(requests[0].starts_with("POST /accounts/hash/previewOrder "));
+        let actual: Value =
+            serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual.get("orderStrategy").is_none());
+        assert!(actual.get("orderLegs").is_none());
     }
     #[tokio::test]
     async fn delayed_get_keeps_acceptance_and_durable_broker_id() {
@@ -1984,13 +2070,57 @@ mod tests {
         );
         assert_eq!(
             short["childOrderStrategies"][0]["childOrderStrategies"][1]["duration"],
-            "GTC"
+            "GOOD_TILL_CANCEL"
         );
     }
     #[test]
-    fn preview_is_separate_and_unknown_contract_blocks() {
+    fn day_and_gtc_brackets_use_schwab_duration_values_at_every_exit() {
+        for direction in ["Long", "Short"] {
+            for (ticket, wire) in [("DAY", "DAY"), ("GTC", "GOOD_TILL_CANCEL")] {
+                let mut d = draft();
+                d.direction = direction.into();
+                d.exit_duration = ticket.into();
+                let placed = placement_payload(&d);
+                let preview = preview_payload(&placed);
+                for root in [&placed, &preview] {
+                    assert_eq!(root["duration"], "DAY");
+                    let exits = root["childOrderStrategies"][0]["childOrderStrategies"]
+                        .as_array()
+                        .unwrap();
+                    assert_eq!(exits.len(), 2);
+                    for exit in exits {
+                        assert_eq!(exit["duration"], wire);
+                        assert_eq!(exit["session"], "NORMAL");
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn replacement_normalizes_legacy_gtc_without_changing_oco_or_sibling_price() {
+        let mut raw = json!({"orderStrategyType":"OCO","childOrderStrategies":[
+            {"orderId":1,"orderType":"LIMIT","session":"NORMAL","duration":"GTC","price":203,
+                "orderLegCollection":[{"instruction":"SELL","quantity":50,"instrument":{"symbol":"AAPL","assetType":"EQUITY"}}]},
+            {"orderId":2,"orderType":"STOP","session":"NORMAL","duration":"GOOD_TILL_CANCEL","stopPrice":198,
+                "orderLegCollection":[{"instruction":"SELL","quantity":50,"instrument":{"symbol":"AAPL","assetType":"EQUITY"}}]}
+        ]});
+        let replaced = replacement_payload(&raw, "2", 199.0).unwrap();
+        assert_eq!(replaced["orderStrategyType"], "OCO");
+        assert_eq!(replaced["childOrderStrategies"][0]["price"], 203);
+        assert_eq!(replaced["childOrderStrategies"][1]["stopPrice"], 199.0);
+        for exit in replaced["childOrderStrategies"].as_array().unwrap() {
+            assert_eq!(exit["duration"], "GOOD_TILL_CANCEL");
+        }
+        // The preview adapter also handles older persisted payloads directly.
+        raw["childOrderStrategies"][1]["duration"] = json!("GTC");
+        let preview = preview_payload(&raw);
+        assert!(!preview.to_string().contains("\"GTC\""));
+    }
+    #[test]
+    fn preview_preserves_request_shape_and_unknown_response_contract_blocks() {
         let p = preview_payload(&placement_payload(&draft()));
-        assert_eq!(p["orderStrategy"]["orderLegs"][0]["finalSymbol"], "AAPL");
+        assert_eq!(p["orderLegCollection"][0]["instrument"]["symbol"], "AAPL");
+        assert_eq!(p, placement_payload(&draft()));
         assert!(!parse_preview(&json!({})).valid);
         assert!(
             !parse_preview(
@@ -1999,6 +2129,21 @@ mod tests {
             .valid
         );
         assert!(parse_preview(&json!({"orderValidationResult":{"rejects":[],"reviews":[]}})).valid);
+    }
+    #[test]
+    fn preview_accepts_optional_empty_categories_but_rejects_malformed_or_rejected_results() {
+        assert!(parse_preview(&json!({"orderValidationResult":{"accepts":[{"activityMessage":"Accepted"}]}})).valid);
+        for value in [
+            json!({}),
+            json!({"orderValidationResult":{}}),
+            json!({"orderValidationResult":{"rejects":"invalid"}}),
+            json!({"orderValidationResult":{"accepts":[],"reviews":{}}}),
+            json!({"orderStrategy":{"status":"REJECTED"},"orderValidationResult":{"accepts":[]}}),
+            json!({"orderValidationResult":{"rejects":[{"activityMessage":"Buying power unavailable"}]}}),
+            json!({"orderValidationResult":{"reviews":[{"activityMessage":"Short sale requires review"}]}}),
+        ] {
+            assert!(!parse_preview(&value).valid, "Unexpected approval for {value}");
+        }
     }
     #[test]
     fn early_close_and_holiday_fail_closed() {

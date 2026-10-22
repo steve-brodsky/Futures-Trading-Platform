@@ -1,0 +1,48 @@
+{
+  "session": "NORMAL",
+  "duration": "DAY",
+  "orderType": "MARKET",
+  "orderStrategyType": "TRIGGER",
+  "orderLegCollection": [
+    {
+      "instruction": "BUY",
+      "quantity": 1,
+      "instrument": { "symbol": "SPY", "assetType": "EQUITY" }
+    }
+  ],
+  "childOrderStrategies": [
+    {
+      "orderStrategyType": "OCO",
+      "childOrderStrategies": [
+        {
+          "session": "NORMAL",
+          "duration": "GOOD_TILL_CANCEL",
+          "orderType": "LIMIT",
+          "price": 766.91,
+          "orderStrategyType": "SINGLE",
+          "orderLegCollection": [
+            {
+              "instruction": "SELL",
+              "quantity": 1,
+              "instrument": { "symbol": "SPY", "assetType": "EQUITY" }
+            }
+          ]
+        },
+        {
+          "session": "NORMAL",
+          "duration": "GOOD_TILL_CANCEL",
+          "orderType": "STOP",
+          "stopPrice": 762.11,
+          "orderStrategyType": "SINGLE",
+          "orderLegCollection": [
+            {
+              "instruction": "SELL",
+              "quantity": 1,
+              "instrument": { "symbol": "SPY", "assetType": "EQUITY" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

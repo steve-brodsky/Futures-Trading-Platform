@@ -123,6 +123,7 @@ impl Schwab {
         payload: Option<&Value>,
     ) -> Result<(Value, Option<String>), AppError> {
         let mut token = self.access_token(false).await?;
+        let is_preview = path.ends_with("/previewOrder");
         for attempt in 0..2 {
             let mut request = self
                 .http
@@ -135,7 +136,11 @@ impl Schwab {
             let span = self.audit.as_ref().map(|audit| {
                 audit.begin_api(
                     "schwab",
-                    "equity-trading",
+                    if is_preview {
+                        "equity-preview"
+                    } else {
+                        "equity-trading"
+                    },
                     method.as_str(),
                     &format!("{TRADER_URL}/[redacted]"),
                     None,
@@ -174,10 +179,7 @@ impl Schwab {
                     span.error(Some(status.as_u16()), "Schwab trading response redacted");
                 }
                 let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
-                let message = value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Schwab rejected the request");
+                let message = trading_rejection_detail(&value);
                 // Broker messages are shown to the user, never recorded with account payloads.
                 return Err(
                     if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT {
@@ -185,7 +187,15 @@ impl Schwab {
                             "Schwab response {status}; reconcile before retrying"
                         ))
                     } else {
-                        AppError::BrokerRejected(format!("{} ({status})", truncate(message)))
+                        AppError::BrokerRejected(format!(
+                            "{}: {} ({status})",
+                            if is_preview {
+                                "Schwab order preview rejected"
+                            } else {
+                                "Schwab order request rejected"
+                            },
+                            message
+                        ))
                     },
                 );
             }
@@ -1938,6 +1948,42 @@ fn text(value: &Value, key: &str) -> String {
         .to_owned()
 }
 
+// Schwab commonly puts the useful field-level validation in `errors`, while
+// `message` only says "A validation error occurred". These messages are for the
+// user; trading audit records must continue to omit account response bodies.
+fn trading_rejection_detail(value: &Value) -> String {
+    fn message(value: &Value) -> Option<String> {
+        if let Some(text) = value.as_str().filter(|text| !text.trim().is_empty()) {
+            return Some(truncate(text));
+        }
+        let detail = value
+            .get("message")
+            .or_else(|| value.get("defaultMessage"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())?;
+        Some(match value.get("field").and_then(Value::as_str) {
+            Some(field) => truncate(&format!("{field}: {detail}")),
+            None => truncate(detail),
+        })
+    }
+    let mut messages = Vec::new();
+    if let Some(main) = message(value) {
+        messages.push(main);
+    }
+    if let Some(errors) = value.get("errors").and_then(Value::as_array) {
+        for error in errors.iter().take(8).filter_map(message) {
+            if !messages.contains(&error) {
+                messages.push(error);
+            }
+        }
+    }
+    if messages.is_empty() {
+        "Schwab rejected the request".into()
+    } else {
+        messages.join("; ").chars().take(2_000).collect()
+    }
+}
+
 fn truncate(value: &str) -> String {
     value.chars().take(500).collect()
 }
@@ -1945,6 +1991,27 @@ fn truncate(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trading_validation_keeps_useful_details_without_dumping_the_response() {
+        let body = serde_json::json!({
+            "message": "A validation error occurred while processing the request.",
+            "errors": [
+                "duration must be DAY or GOOD_TILL_CANCEL",
+                {"field":"orderStrategy.quantity", "defaultMessage":"must be positive"},
+                {"accountNumber":"private-account", "unrelated":"not a message"}
+            ],
+            "accountNumber": "private-account"
+        });
+        let detail = trading_rejection_detail(&body);
+        assert!(detail.contains("duration must be DAY or GOOD_TILL_CANCEL"));
+        assert!(detail.contains("orderStrategy.quantity: must be positive"));
+        assert!(!detail.contains("private-account"));
+        assert_eq!(
+            trading_rejection_detail(&Value::Null),
+            "Schwab rejected the request"
+        );
+    }
 
     async fn history_server(replies: Vec<(u16, Value)>) -> (Schwab, tokio::task::JoinHandle<Vec<url::Url>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
