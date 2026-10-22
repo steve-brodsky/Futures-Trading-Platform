@@ -6,6 +6,8 @@ import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "
 import { demoAccounts, demoBalance, demoBodBalance, demoOptionChain, demoOptionExpirations, demoOrders, demoPositions, demoSchwabAccounts, demoSchwabBalance, demoSchwabBodBalance, demoSchwabOrders, demoSchwabPositions, demoSymbols, futures, makeDemoBars, quoteFor } from "./demo";
 import { CME_HOURS_URL, demoTradingTodaySnapshot, NYSE_HOURS_URL, TRADING_ECONOMICS_CALENDAR_URL } from "./tradingToday";
 import { timeframeSeconds } from "./timeframes";
+import type { EtfTrackerSnapshot } from "../types";
+import { demoEtfTrackerSnapshot } from "./etfTracker";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -14,6 +16,7 @@ export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in
 const nativeAuditExcluded = new Set([
   "get_audit_events", "get_audit_health", "export_audit_events", "record_client_audit",
   "get_schwab_accounts", "get_schwab_account_snapshot", "get_schwab_orders",
+  "get_etf_tracker_cache", "refresh_etf_tracker",
   "fetch_truth_social_posts",
   "get_schwab_equity_state", "preview_schwab_equity_order", "place_schwab_equity_order",
   "replace_schwab_equity_order", "cancel_schwab_equity_order", "close_schwab_equity_position", "reconcile_schwab_equity_mutation",
@@ -287,6 +290,19 @@ const rawApi = {
     } catch {
       return null;
     }
+  },
+  async getEtfTrackerCache(accountId: string): Promise<EtfTrackerSnapshot | null> {
+    if (isTauri) return native("get_etf_tracker_cache", { accountId });
+    try {
+      const snapshot = JSON.parse(localStorage.getItem(`northstar-etf-tracker:${accountId}`) ?? "null") as EtfTrackerSnapshot | null;
+      return snapshot?.accountId === accountId ? { ...snapshot, status: "cache" } : null;
+    } catch { return null; }
+  },
+  async refreshEtfTracker(accountId: string): Promise<EtfTrackerSnapshot> {
+    if (isTauri) return native("refresh_etf_tracker", { accountId });
+    const snapshot = demoEtfTrackerSnapshot(accountId);
+    localStorage.setItem(`northstar-etf-tracker:${accountId}`, JSON.stringify(snapshot));
+    return snapshot;
   },
   async refreshTradingToday(date: string): Promise<TradingTodaySnapshot> {
     if (isTauri) return native("refresh_trading_today", { date });

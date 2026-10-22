@@ -5204,6 +5204,10 @@ function TradingApp() {
     </>}
 
     {tradingTodayOpen && !isDetached && <TradingTodayModal
+      schwabAccountId={selectedSchwabAccount?.id}
+      schwabAccountLabel={selectedSchwabAccount?.displayId}
+      schwabConnected={schwabAuthenticated}
+      schwabAuthEpoch={schwabAuthEpoch}
       displayDate={tradingTodayPresentation.displayDate}
       economicDate={tradingTodayPresentation.economicDate}
       sundayPreview={tradingTodayPresentation.mode === "sunday-preview"}

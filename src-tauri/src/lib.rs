@@ -1,4 +1,5 @@
 mod audit;
+mod etf_tracker;
 mod journal;
 mod models;
 mod safety;
@@ -3734,6 +3735,16 @@ fn get_trading_today_cache(
     trading_today::get_cache(&state.db_path, &date)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn get_etf_tracker_cache(account_id: String, state: State<'_, NativeState>) -> Result<Option<etf_tracker::EtfTrackerSnapshot>, AppError> {
+    etf_tracker::get_cache(&state.db_path, &account_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn refresh_etf_tracker(account_id: String, state: State<'_, NativeState>) -> Result<etf_tracker::EtfTrackerSnapshot, AppError> {
+    etf_tracker::refresh(&state.db_path, &state.schwab, &account_id).await
+}
+
 #[tauri::command]
 async fn refresh_trading_today(
     date: String,
@@ -6099,6 +6110,8 @@ pub fn run() {
             get_schwab_accounts,
             get_schwab_account_snapshot,
             get_schwab_orders,
+            get_etf_tracker_cache,
+            refresh_etf_tracker,
             search_symbols,
             get_symbol_details,
             get_future_contracts,

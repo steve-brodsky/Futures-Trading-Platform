@@ -70,6 +70,22 @@ export interface RapidMarketMove {
 }
 
 export type TradingTodaySnapshotStatus = "live" | "cache" | "demo";
+
+export interface EtfTrackerRow {
+  symbol: string;
+  quantity: number;
+  lastClosedDate: string | null;
+  availabilityReason: string | null;
+}
+
+export interface EtfTrackerSnapshot {
+  accountId: string;
+  fetchedAt: string;
+  coverageStart: string;
+  coverageEnd: string;
+  status: TradingTodaySnapshotStatus;
+  rows: EtfTrackerRow[];
+}
 export type EconomicEventImportance = 1 | 2 | 3 | null;
 export type MarketHolidayVenue = "NYSE" | "CME";
 export type MarketHolidayStatus = "closed" | "early-close" | "modified-hours";

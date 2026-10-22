@@ -557,6 +557,73 @@ impl Schwab {
         })
     }
 
+    pub(crate) async fn etf_share_quantities(&self, account: &str) -> Result<[f64; 5], AppError> {
+        let mut url = url::Url::parse(&format!("{TRADER_URL}/accounts/{account}"))?;
+        url.query_pairs_mut().append_pair("fields", "positions");
+        let value = self.get_json(url.as_str()).await?;
+        let account_value = value.get("securitiesAccount").filter(|v| v.is_object())
+            .ok_or_else(|| AppError::Api("Schwab returned no securities account".into()))?;
+        let mut quantities = [0.0; 5];
+        if let Some(positions) = account_value.get("positions") {
+            let positions = positions.as_array().ok_or_else(|| AppError::Api("Schwab returned invalid positions".into()))?;
+            for position in positions {
+                let Some(symbol) = position.pointer("/instrument/symbol").and_then(Value::as_str) else {
+                    return Err(AppError::Api("Schwab position is missing its symbol".into()));
+                };
+                let Some(index) = crate::etf_tracker::SYMBOLS.iter().position(|s| symbol.eq_ignore_ascii_case(s)) else { continue; };
+                if position.pointer("/instrument/assetType").and_then(Value::as_str) == Some("OPTION") { continue; }
+                let long = number_named(position, "longQuantity").filter(|n| n.is_finite() && *n >= 0.0);
+                let short = number_named(position, "shortQuantity").filter(|n| n.is_finite() && *n >= 0.0);
+                let (Some(long), Some(short)) = (long, short) else {
+                    return Err(AppError::Api("Schwab ETF quantity is unavailable".into()));
+                };
+                if long > 0.0 && short > 0.0 {
+                    return Err(AppError::Api("Schwab reports simultaneous long and short ETF holdings".into()));
+                }
+                quantities[index] += long - short;
+            }
+        }
+        Ok(quantities)
+    }
+
+    pub(crate) async fn etf_transactions(
+        &self,
+        account: &str,
+        kind: &str,
+        start: chrono::DateTime<Utc>,
+        end: chrono::DateTime<Utc>,
+    ) -> Result<Vec<Value>, AppError> {
+        let mut windows = vec![(start, end)];
+        let mut rows = Vec::new();
+        let mut requests = 0;
+        while let Some((from, to)) = windows.pop() {
+            requests += 1;
+            if requests > 128 {
+                return Err(AppError::Api("Schwab transaction history is too large to verify in one refresh".into()));
+            }
+            let mut url = url::Url::parse(&format!("{TRADER_URL}/accounts/{account}/transactions"))?;
+            url.query_pairs_mut()
+                .append_pair("startDate", &from.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                .append_pair("endDate", &to.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+                .append_pair("types", kind);
+            let value = self.get_json(url.as_str()).await?;
+            let page = value.as_array().ok_or_else(|| AppError::Api("Schwab returned invalid transaction history".into()))?;
+            if page.len() >= 3_000 {
+                let millis = (to - from).num_milliseconds();
+                if millis <= 1 {
+                    return Err(AppError::Api("Schwab transaction limit prevents complete ETF history".into()));
+                }
+                let middle = from + chrono::Duration::milliseconds(millis / 2);
+                // Inclusive boundaries can repeat activities; the tracker deduplicates IDs.
+                windows.push((middle, to));
+                windows.push((from, middle));
+            } else {
+                rows.extend(page.iter().cloned());
+            }
+        }
+        Ok(rows)
+    }
+
     pub async fn orders(
         &self,
         account_id: &str,

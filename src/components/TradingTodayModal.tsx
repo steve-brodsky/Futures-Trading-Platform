@@ -3,10 +3,15 @@ import { AlertTriangle, CalendarDays, ExternalLink, RefreshCw, Sunrise, X } from
 import type { ChartTimezone, EconomicEventImportance, TradingTodaySnapshot } from "../types";
 import { eventState, formatEventTime, formatHolidayDate, newYorkDateHeading } from "../lib/tradingToday";
 import { resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
+import { EtfTracker } from "./EtfTracker";
 
 export type TradingTodaySource = "calendar" | "nyse" | "cme";
 
 interface TradingTodayModalProps {
+  schwabAccountId?: string;
+  schwabAccountLabel?: string;
+  schwabConnected: boolean;
+  schwabAuthEpoch: number;
   displayDate: string;
   economicDate: string;
   sundayPreview: boolean;
@@ -31,6 +36,10 @@ function statusLabel(status: "closed" | "early-close" | "modified-hours"): strin
 }
 
 export function TradingTodayModal({
+  schwabAccountId,
+  schwabAccountLabel,
+  schwabConnected,
+  schwabAuthEpoch,
   displayDate,
   economicDate,
   sundayPreview,
@@ -51,6 +60,9 @@ export function TradingTodayModal({
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const [now, setNow] = useState(Date.now());
+  const [etfRefreshKey, setEtfRefreshKey] = useState(0);
+  const [etfRefreshing, setEtfRefreshing] = useState(false);
+  const refreshAll = () => { setEtfRefreshKey((value) => value + 1); onRefresh(); };
   const heading = newYorkDateHeading(new Date(`${displayDate}T12:00:00Z`));
   const economicHeading = newYorkDateHeading(new Date(`${economicDate}T12:00:00Z`));
   const resolvedTimezone = resolveTimezone(timezone, "CME");
@@ -112,6 +124,7 @@ export function TradingTodayModal({
           <button ref={closeRef} type="button" className="trading-today-close" aria-label="Close Trading Today" onClick={onClose}><X size={18} /></button>
         </header>
 
+        <div className="trading-today-body">
         <div className="trading-today-summary">
           <div className="trading-today-date">
             <span>{weekday}</span>
@@ -161,6 +174,8 @@ export function TradingTodayModal({
           <div className="trading-today-notice" role="status"><AlertTriangle size={14} /><span>{warning ?? error}</span></div>
         )}
 
+        <EtfTracker accountId={schwabAccountId} accountLabel={schwabAccountLabel} connected={schwabConnected} authEpoch={schwabAuthEpoch} today={displayDate} refreshKey={etfRefreshKey} onRefreshingChange={setEtfRefreshing} />
+
         <section className="trading-today-events" aria-labelledby="trading-today-events-title">
           <header>
             <div>
@@ -191,7 +206,7 @@ export function TradingTodayModal({
               <AlertTriangle size={22} />
               <strong>{sundayPreview ? "Monday’s preview is unavailable" : "Today’s events are unavailable"}</strong>
               <p>{error}</p>
-              <div><button type="button" onClick={onRefresh}><RefreshCw size={13} />Retry</button><button type="button" onClick={() => onOpenSource("calendar")}><ExternalLink size={13} />Open source</button></div>
+              <div><button type="button" onClick={refreshAll}><RefreshCw size={13} />Retry</button><button type="button" onClick={() => onOpenSource("calendar")}><ExternalLink size={13} />Open source</button></div>
             </div>
           ) : events.length ? (
             <div className="trading-today-table-wrap">
@@ -215,13 +230,14 @@ export function TradingTodayModal({
             <div className="trading-today-empty"><CalendarDays size={21} /><strong>{sundayPreview ? "No U.S. events scheduled Monday" : "No U.S. events scheduled today"}</strong><span>{sundayPreview ? "The Monday calendar is clear. Venue schedule changes are shown above." : "The calendar is clear for this New York trading day."}</span></div>
           )}
         </section>
+        </div>
 
         <footer className="trading-today-footer">
           <div>
             <button type="button" onClick={() => onOpenSource("calendar")}>{sundayPreview ? "Monday preview: Trading Economics" : "Data: Trading Economics"} <ExternalLink size={11} /></button>
             <span>{snapshot ? `Updated ${new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit" }).format(new Date(snapshot.fetchedAt))} ET` : "Not updated"}</span>
           </div>
-          <button type="button" className="trading-today-refresh" disabled={refreshing} onClick={onRefresh}><RefreshCw size={14} className={refreshing ? "rotating" : ""} />{refreshing ? "Refreshing" : "Refresh"}</button>
+          <button type="button" className="trading-today-refresh" disabled={refreshing || etfRefreshing} onClick={refreshAll}><RefreshCw size={14} className={refreshing || etfRefreshing ? "rotating" : ""} />{refreshing || etfRefreshing ? "Refreshing" : "Refresh"}</button>
         </footer>
       </section>
     </div>

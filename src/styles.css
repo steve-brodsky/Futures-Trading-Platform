@@ -1203,6 +1203,26 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .trading-today-backdrop { position: fixed; z-index: 110; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(2,5,9,.82); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); animation: trading-today-backdrop-in .18s ease-out; }
 .trading-today-modal { width: min(1120px,calc(100vw - 40px)); height: min(800px,calc(100vh - 40px)); min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid #3b4a5b; border-radius: 10px; outline: none; background: #0d131a; box-shadow: 0 34px 110px rgba(0,0,0,.68); animation: trading-today-modal-in .24s cubic-bezier(.2,.8,.2,1); }
 .trading-today-header { height: 48px; flex: 0 0 48px; display: flex; align-items: center; justify-content: space-between; padding: 0 10px 0 19px; border-bottom: 1px solid #27313d; background: #0f151d; }
+.trading-today-body { min-height: 0; flex: 1 1 auto; overflow: auto; scrollbar-gutter: stable; }
+.etf-tracker { border-bottom: 1px solid #354252; background: #101820; }
+.etf-tracker > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 20px 11px; }
+.etf-tracker h2 { margin: 0; color: #eef4f8; font-size: 14px; font-weight: 650; }
+.etf-tracker header p { display: flex; flex-wrap: wrap; gap: 5px 14px; margin: 5px 0 0; color: #a2b2c4; font: 500 9px DM Mono,monospace; }
+.etf-tracker header p span { color: #7b8b9e; }
+.etf-tracker-freshness { display: grid; justify-items: end; gap: 5px; flex-shrink: 0; font: 600 9px DM Mono,monospace; }
+.etf-tracker-freshness > span { color: var(--green); }.etf-tracker-freshness > span.stale { color: var(--amber); }.etf-tracker-freshness > span.demo { color: var(--cyan); }
+.etf-tracker-freshness small { color: #7b8b9e; font-size: 8px; font-weight: 500; }
+.etf-tracker-notice { margin: 0; padding: 6px 20px; color: #d4aa5d; background: rgba(240,184,75,.05); font: 500 9px/1.5 DM Mono,monospace; }
+.etf-tracker-table-wrap { overflow-x: auto; }
+.etf-tracker table { width: 100%; min-width: 660px; border-collapse: collapse; table-layout: fixed; font: 500 10px DM Mono,monospace; }
+.etf-tracker th,.etf-tracker td { padding: 8px 12px; text-align: left; border-top: 1px solid #273440; }
+.etf-tracker thead th { padding-top: 7px; padding-bottom: 7px; color: #7f92a7; font-size: 8px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.etf-tracker th:first-child { width: 12%; padding-left: 20px; }.etf-tracker th:nth-child(2) { width: 24%; }.etf-tracker th:nth-child(3) { width: 15%; }.etf-tracker th:nth-child(4) { width: 21%; }.etf-tracker th:nth-child(5) { width: 28%; }
+.etf-tracker tbody th { color: #d7f9fc; font-size: 11px; font-weight: 700; }.etf-tracker td { color: #b8c5d3; }
+.etf-tracker-status { color: #7d8fa3; font-size: 9px; }.etf-tracker-status.complete { color: var(--green); }.etf-tracker-status.waiting,.etf-tracker-status.stale { color: var(--amber); }.etf-tracker-status.open { color: var(--cyan); }
+.etf-tracker-row-reason { display: block; margin-top: 4px; color: #7d8fa3; font-size: 8px; line-height: 1.4; }
+.etf-tracker-no-close { display: inline-block; max-width: 200px; color: #8193a7; font-size: 8px; line-height: 1.5; }
+.etf-tracker > footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px 16px; padding: 8px 20px; border-top: 1px solid #273440; color: #718499; font: 500 8px/1.5 DM Mono,monospace; }
 .trading-today-kicker { display: flex; align-items: center; gap: 8px; color: var(--cyan); }
 .trading-today-kicker span { color: #edf3f7; font: 650 10px DM Mono,monospace; letter-spacing: .13em; text-transform: uppercase; }
 .trading-today-close { width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 5px; color: #798697; background: transparent; cursor: pointer; transition: color .15s,background .15s,transform .15s; }
@@ -1240,7 +1260,7 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .venue-status.early-close,.venue-status.modified-hours { color: #d7aa55; border-color: rgba(240,184,75,.2); background: rgba(240,184,75,.04); }
 .trading-today-holidays-empty { min-height: 125px; display: grid; place-items: center; border-top: 1px solid #202a35; color: #667589; font: 500 9px DM Mono,monospace; text-align: center; }
 .trading-today-notice { min-height: 34px; flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 7px 20px; border-bottom: 1px solid rgba(240,184,75,.2); color: #d4aa5d; background: rgba(240,184,75,.045); font: 500 9px/1.4 DM Mono,monospace; }
-.trading-today-events { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; }
+.trading-today-events { min-height: 240px; display: flex; flex-direction: column; }
 .trading-today-events > header { min-height: 58px; flex: 0 0 58px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; border-bottom: 1px solid #27313d; }
 .trading-today-events > header > div:first-child span { color: var(--cyan); font: 650 8px DM Mono,monospace; letter-spacing: .14em; text-transform: uppercase; }
 .trading-today-events h2 { margin: 4px 0 0; color: #f1f5f8; font-size: 15px; font-weight: 650; }
