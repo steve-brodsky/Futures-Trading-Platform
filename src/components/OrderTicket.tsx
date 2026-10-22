@@ -95,24 +95,16 @@ export function OrderTicket({ equity, equityBlockReason, onEquitySubmit, chartSy
     }
   }, [orderProjection?.takeProfit, orderProjection?.stopLoss]);
 
+  // Chart edits reach the shared projection before the text inputs synchronize.
+  // Size from those authoritative prices, never from the previous input render.
+  // App owns R recalculation for chart edits, ticket edits, and quote changes.
+  const projectionSide = orderProjection?.side ?? side;
+  const projectionQuantity = resolvedQuantity(projectionSide, String(orderProjection?.stopLoss ?? ""));
+  const projectionEntryPrice = equity ? (projectionSide === "Buy" ? quote.ask : quote.bid) : orderProjection?.entryPrice;
   useEffect(() => {
-    if (!orderProjection || orderProjection.quantity === effectiveQuantity) return;
-    onProjectionChange({
-      takeProfit: orderProjection.takeProfit,
-      stopLoss: orderProjection.stopLoss,
-      side: orderProjection.side,
-      quantity: effectiveQuantity,
-      rMultiple: orderProjection.rMultiple,
-    });
-  }, [effectiveQuantity, orderProjection?.quantity]);
-
-  useEffect(() => {
-    if (!equity || (!takeProfit.trim() && !stopLoss.trim())) return;
-    const target = selectedR == null ? null : calculateTakeProfitAtR(entryPrice, Number(stopLoss), side, selectedR, symbol.minMove);
-    const nextTarget = target == null ? takeProfit : String(target);
-    if (nextTarget !== takeProfit) setTakeProfit(nextTarget);
-    publishProjection(nextTarget, stopLoss, side, effectiveQuantity);
-  }, [equity, entryPrice, effectiveQuantity, selectedR, stopLoss]);
+    if (!orderProjection || (orderProjection.quantity === projectionQuantity && orderProjection.entryPrice === projectionEntryPrice)) return;
+    onProjectionChange({ ...orderProjection, quantity: projectionQuantity, entryPrice: projectionEntryPrice });
+  }, [projectionQuantity, projectionEntryPrice, orderProjection?.quantity, orderProjection?.entryPrice]);
 
   const swingStopPrice = calculateSwingStop({
     bars,

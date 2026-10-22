@@ -200,7 +200,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const [candleCountdownTop, setCandleCountdownTop] = useState<number | null>(null);
   const [draggingOrder, setDraggingOrder] = useState<{ id: string; originalPrice: number; price: number } | null>(null);
   const draggingOrderRef = useRef<typeof draggingOrder>(null);
-  const [draggingProjection, setDraggingProjection] = useState<{ field: ProjectedExitField; lineId: string; originalPrice: number; price: number; originalProjection: OrderProjection; edited: boolean } | null>(null);
+  const [draggingProjection, setDraggingProjection] = useState<{ field: ProjectedExitField; lineId: string; originalPrice: number; price: number; originalProjection: OrderProjection; edited: boolean; autoScale?: boolean } | null>(null);
   const draggingProjectionRef = useRef<typeof draggingProjection>(null);
   const syncTradeLabelsRef = useRef<() => void>(() => undefined);
   const movingDrawingIdRef = useRef<string | null>(null);
@@ -796,6 +796,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       if (currentProjection) {
         tradeLineRefs.current.get(currentProjection.lineId)?.applyOptions({ price: currentProjection.originalPrice });
         if (currentProjection.edited) onOrderProjectionRestore(currentProjection.originalProjection);
+        if (currentProjection.autoScale != null) priceRef.current?.priceScale().applyOptions({ autoScale: currentProjection.autoScale });
       }
       requestAnimationFrame(() => syncTradeLabelsRef.current());
       draggingOrderRef.current = null;
@@ -988,9 +989,13 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    const drag = { field, lineId, originalPrice: price, price, originalProjection: snapshotOrderProjection(orderProjection), edited: false };
+    // Equity exits participate in autoscaling. Freeze the scale so moving an R
+    // target cannot change the pointer-to-price mapping during the same drag.
+    const autoScale = provider === "schwab" ? priceRef.current?.priceScale().options().autoScale : undefined;
+    const drag = { field, lineId, originalPrice: price, price, originalProjection: snapshotOrderProjection(orderProjection), edited: false, autoScale };
     draggingProjectionRef.current = drag;
     setDraggingProjection(drag);
+    if (autoScale) priceRef.current?.priceScale().applyOptions({ autoScale: false });
     chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: false, horzTouchDrag: false, vertTouchDrag: false } });
   };
 
@@ -1023,6 +1028,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     else if (current.edited) onOrderProjectionRestore(current.originalProjection);
     draggingProjectionRef.current = null;
     setDraggingProjection(null);
+    if (current.autoScale != null) priceRef.current?.priceScale().applyOptions({ autoScale: current.autoScale });
     chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   };
@@ -1035,6 +1041,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     if (current.edited) onOrderProjectionRestore(current.originalProjection);
     draggingProjectionRef.current = null;
     setDraggingProjection(null);
+    if (current.autoScale != null) priceRef.current?.priceScale().applyOptions({ autoScale: current.autoScale });
     chartRef.current?.applyOptions({ handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false } });
     requestAnimationFrame(() => syncTradeLabelsRef.current());
   };
