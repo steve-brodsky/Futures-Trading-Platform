@@ -100,6 +100,11 @@ Object.assign(window, {
     await act(async () => { control.edit("stopLoss", 96, 100.1); });
     assert(control.snapshot().stopLoss === 96 && control.snapshot().quantity === 1, "Drag changed manual share count");
     results.push("Manual shares stay fixed during dragging");
+    writes = [];
+    await act(async () => { control.reset({}); });
+    await settle();
+    assert(Object.keys(control.snapshot()).length === 0 && writes.length === 0, "Cleared ticket republished a ghost entry projection");
+    results.push("Accepted ticket stays cleared across quote updates");
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: false });
     return results;
   },

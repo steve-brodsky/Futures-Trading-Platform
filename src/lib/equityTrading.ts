@@ -17,7 +17,8 @@ export function normalizeEquityTicketSettings(value: unknown): OrderTicketSettin
 }
 
 export function isEquity(assetType?: string): boolean {
-  return ["EQUITY", "ETF"].includes(assetType?.toUpperCase() ?? "");
+  // Schwab's order responses classify ETFs such as SPY this way.
+  return ["EQUITY", "ETF", "COLLECTIVE_INVESTMENT"].includes(assetType?.toUpperCase() ?? "");
 }
 
 export function sharesForRisk(budget: number | undefined, entry: number, stop: number, side: "Buy" | "Sell"): number {

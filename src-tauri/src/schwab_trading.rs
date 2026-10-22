@@ -103,7 +103,7 @@ fn save_prepared(
 pub fn equity(asset: Option<&str>) -> bool {
     matches!(
         asset.unwrap_or("").to_ascii_uppercase().as_str(),
-        "EQUITY" | "ETF"
+        "EQUITY" | "ETF" | "COLLECTIVE_INVESTMENT"
     )
 }
 fn active(order: &OrderUpdate) -> bool {
@@ -467,25 +467,30 @@ async fn preflight(
     path: &Path,
     draft: &SchwabEquityOrderDraft,
 ) -> Result<(), AppError> {
-    let accounts = api.accounts().await?;
+    // Independent reads can overlap. The final quote is fetched after these
+    // checks so sizing is still validated immediately before submission.
+    let (accounts, meta, hours, snapshot, orders) = tokio::try_join!(
+        api.accounts(),
+        api.symbol_details(&draft.symbol),
+        api.equity_market_hours(),
+        api.account_snapshot(&draft.account_id),
+        broker_orders(api, path, &draft.account_id),
+    )?;
     if !accounts.iter().any(|a| a.id == draft.account_id) {
         return Err(AppError::Validation(
             "Select an authorized Schwab account".into(),
         ));
     }
-    let meta = api.symbol_details(&draft.symbol).await?;
     if !equity(Some(&meta.asset_type)) {
         return Err(AppError::Validation(
             "Only Schwab equities and ETFs can be traded".into(),
         ));
     }
-    if !session_open(&api.equity_market_hours().await?, Utc::now()) {
+    if !session_open(&hours, Utc::now()) {
         return Err(AppError::Validation(
             "Schwab regular equity session is closed".into(),
         ));
     }
-    let snapshot = api.account_snapshot(&draft.account_id).await?;
-    let orders = broker_orders(api, path, &draft.account_id).await?;
     if snapshot.positions.iter().any(|p| {
         equity(p.asset_type.as_deref()) && p.symbol == draft.symbol && p.quantity.abs() > 0.0
     }) || orders
@@ -558,9 +563,14 @@ pub async fn get_schwab_equity_state(
         .provider_account_lock("schwab", &account_id)
         .await;
     reconcile_account(&state.schwab, &state.db_path, &account_id).await?;
-    let snapshot = state.schwab.account_snapshot(&account_id).await?;
-    let orders = broker_orders(&state.schwab, &state.db_path, &account_id).await?;
-    let (session_open, session_message) = match state.schwab.equity_market_hours().await {
+    let (snapshot, orders, hours) = tokio::join!(
+        state.schwab.account_snapshot(&account_id),
+        broker_orders(&state.schwab, &state.db_path, &account_id),
+        state.schwab.equity_market_hours(),
+    );
+    let snapshot = snapshot?;
+    let orders = orders?;
+    let (session_open, session_message) = match hours {
         Ok(value) if session_open(&value, Utc::now()) => {
             (true, "Regular equity session open".into())
         }
@@ -825,7 +835,7 @@ async fn mutate(
     )
     .await;
     match outcome {
-        Ok((order, local_warning)) => {
+        Ok((order, local_warning, confirmed_orders)) => {
             let object = serde_json::to_value(&order)?;
             let persistence = safety::record_confirmed(
                 &state.db_path,
@@ -834,6 +844,16 @@ async fn mutate(
                 &object,
                 local_warning,
             );
+            // Publish the broker's entire returned tree immediately. Waiting for
+            // the next account snapshot hides working OCO children after a fill.
+            for confirmed in confirmed_orders {
+                let _ = app.emit("order-stream-update", OrderStreamUpdateEvent {
+                    provider: MarketDataProvider::Schwab,
+                    account_id: account.into(),
+                    environment_generation: state.safety.lifecycle.generation(),
+                    order: confirmed,
+                });
+            }
             let _ = app.emit(
                 "broker-mutation-updated",
                 json!({"provider":"schwab","accountId":account,"mutationId":mutation_id}),
@@ -1129,7 +1149,7 @@ async fn execute(
     request: &Value,
     prepared: &Value,
     mutation: &str,
-) -> Result<(OrderUpdate, Option<String>), AppError> {
+) -> Result<(OrderUpdate, Option<String>, Vec<OrderUpdate>), AppError> {
     if kind == "schwab_cancel" {
         let id = prepared["cancelId"].as_str().unwrap();
         safety::update_intent(
@@ -1145,10 +1165,9 @@ async fn execute(
             false,
         )?;
         cancel_confirmed(api, account, id).await?;
-        return flatten(&api.equity_order(account, id).await?, account)
-            .into_iter()
-            .next()
-            .map(|order| (order, None))
+        let rows = flatten(&api.equity_order(account, id).await?, account);
+        return rows.first().cloned()
+            .map(|order| (order, None, rows))
             .ok_or_else(|| {
                 AppError::AmbiguousBrokerOutcome("Canceled group has no order legs".into())
             });
@@ -1267,8 +1286,8 @@ async fn execute(
             Err(error) => warnings.push(format!("Replacement tracking pending: {error}")),
         }
     }
-    let order = flatten(&raw, account)
-        .into_iter()
+    let rows = flatten(&raw, account);
+    let order = rows.iter().cloned()
         .find(|o| {
             kind != "schwab_replace" || Some(o.order_type.as_str()) == prepared["type"].as_str()
         })
@@ -1294,6 +1313,7 @@ async fn execute(
         } else {
             Some(warnings.join("; "))
         },
+        rows,
     ))
 }
 
@@ -1607,6 +1627,52 @@ mod tests {
         path
     }
 
+    #[test]
+    fn filled_etf_brackets_retain_actionable_exits_and_protection_checks() {
+        let raw: Value = serde_json::from_str(include_str!("../tests/fixtures/schwab_filled_etf_bracket.json")).unwrap();
+        let rows = flatten(&raw, "hash");
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].average_fill_price, Some(765.0));
+        for exit in &rows[1..] {
+            assert!(equity(exit.asset_type.as_deref()));
+            assert_eq!(exit.status, "Working");
+            assert_eq!(exit.open_or_close.as_deref(), Some("Close"));
+            let details = exit.schwab.as_ref().unwrap();
+            assert_eq!(details.root_order_id, "100");
+            assert_eq!(details.oco_order_id.as_deref(), Some("101"));
+            assert!(details.editable && details.cancelable && !details.contingent);
+        }
+        let position: Position = serde_json::from_value(json!({"provider":"schwab","accountId":"hash","id":"p","symbol":"SPY","side":"Long","quantity":1,"averagePrice":765,"last":765,"unrealizedPnl":0,"assetType":"COLLECTIVE_INVESTMENT"})).unwrap();
+        assert!(protection_issues(&[position.clone()], &rows).is_empty());
+        assert!(!protection_issues(&[Position { quantity: 2.0, ..position }], &rows).is_empty());
+        let replacement = replacement_payload(&raw["childOrderStrategies"][0], "102", 764.0).unwrap();
+        assert_eq!(replacement["childOrderStrategies"][0]["orderLegCollection"][0]["instrument"]["assetType"], "EQUITY");
+    }
+
+    #[tokio::test]
+    async fn accepted_etf_entry_returns_all_confirmed_children_without_history_scan() {
+        let path = database();
+        let raw: Value = serde_json::from_str(include_str!("../tests/fixtures/schwab_filled_etf_bracket.json")).unwrap();
+        let mut draft = draft();
+        draft.symbol = "SPY".into();
+        draft.quantity = 1;
+        draft.stop_loss = 763.25;
+        draft.take_profit = 767.58;
+        let request = serde_json::to_value(&draft).unwrap();
+        mutation(&path, "place", "schwab_place", request.clone(), None);
+        let (api, requests, task) = server(vec![
+            (201, Value::Null, Some("/orders/100")), (200, raw, None),
+        ]).await;
+        let (order, warning, rows) = execute(&api, &path, "hash", "schwab_place", &request, &placement_payload(&draft), "place").await.unwrap();
+        assert_eq!(order.status, "Filled");
+        assert!(warning.is_none());
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.iter().filter(|o| active(o)).count(), 2);
+        task.await.unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        std::fs::remove_file(path).ok();
+    }
+
     #[tokio::test]
     async fn restart_refresh_recovers_older_gtc_orders_by_persisted_root() {
         let path = database();
@@ -1622,7 +1688,7 @@ mod tests {
         .unwrap();
         // A new client represents a restart. No order appears in the list query;
         // persisted roots still get an authoritative individual-order lookup.
-        let mut replies = vec![(200, json!([]), None); 13];
+        let mut replies = vec![(200, json!([]), None); 2];
         replies.push((200, raw, None));
         let (api, requests, task) = server(replies).await;
         let rows = broker_orders(&api, &path, "hash").await.unwrap();
@@ -1880,7 +1946,7 @@ mod tests {
             (404, json!({"message":"Not yet visible"}), None),
         ])
         .await;
-        let (order, warning) = execute(
+        let (order, warning, _) = execute(
             &api,
             &path,
             "hash",

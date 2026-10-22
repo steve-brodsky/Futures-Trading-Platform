@@ -298,7 +298,7 @@ function saveContractRollReceipts(receipts: Record<string, string>) {
 }
 
 function supportsGex(symbol: SymbolMeta): boolean {
-  return symbol.provider === "schwab" && ["EQUITY", "ETF"].includes(symbol.assetType.toUpperCase());
+  return symbol.provider === "schwab" && isEquity(symbol.assetType);
 }
 
 function instrumentGlyph(symbol: SymbolMeta): "E" | "F" | "I" {
@@ -2056,19 +2056,14 @@ function TradingApp() {
     let active = true;
     setSchwabBrokerageLoading(true);
     setSchwabBrokerageError(undefined);
-    const now = new Date();
-    // The native stream refresh narrows this to the current 04:00 ET trading
-    // session. A rolling day keeps the initial load valid across ET midnight.
-    const start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    void Promise.all([
-      api.schwabAccountSnapshot(selectedSchwabAccount.id),
-      api.schwabOrders(selectedSchwabAccount.id, start.toISOString(), now.toISOString()),
-    ]).then(([snapshot, orderPage]) => {
+    setSchwabOrders([]);
+    // Orders come from the complete equity state/stream, including tracked GTC
+    // brackets. A second today-only writer could erase older protective exits.
+    void api.schwabAccountSnapshot(selectedSchwabAccount.id).then((snapshot) => {
       if (!active) return;
       setSchwabPositions(snapshot.positions);
       setSchwabBalances(snapshot.balances);
       setSchwabBodBalances(snapshot.beginningOfDayBalances);
-      setSchwabOrders(orderPage.orders);
       setSchwabBrokerageLoading(false);
     }).catch((error) => {
       if (active) { setSchwabBrokerageLoading(false); setSchwabBrokerageError(String(error)); }

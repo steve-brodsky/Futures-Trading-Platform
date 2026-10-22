@@ -27,25 +27,36 @@ export function useSchwabEquityTrading({ account, connected, confirmOrders, onSn
   const latest = useRef({ account, connected, confirmOrders, onSnapshot, onAccepted, onNotify, validateEntry });
   latest.current = { account, connected, confirmOrders, onSnapshot, onAccepted, onNotify, validateEntry };
   const inFlight = useRef<Promise<void> | undefined>(undefined);
+  const refreshQueued = useRef(false);
+  const snapshotEpoch = useRef(0);
   const operation = useRef(false);
   const pendingUntil = useRef(0);
   const refresh = useCallback(async (force = false) => {
-    if (inFlight.current) { await inFlight.current; if (!force) return; }
-    const id = latest.current.account?.id;
-    if (!id || !latest.current.connected) return;
+    if (inFlight.current) {
+      refreshQueued.current ||= force;
+      return inFlight.current;
+    }
     const work = (async () => {
-      try {
-        const state = await api.schwabEquityState(id);
-        if (latest.current.account?.id !== id || !latest.current.connected) return;
-        setSnapshot({ ...state, accountId: id, fetchedAt: Date.now() }); setError(undefined);
-        latest.current.onSnapshot(state);
-      } catch (reason) { if (latest.current.account?.id === id) setError(String(reason)); }
+      do {
+        refreshQueued.current = false;
+        const id = latest.current.account?.id;
+        if (!id || !latest.current.connected) return;
+        const epoch = snapshotEpoch.current;
+        try {
+          const state = await api.schwabEquityState(id);
+          if (latest.current.account?.id !== id || !latest.current.connected || snapshotEpoch.current !== epoch) continue;
+          setSnapshot({ ...state, accountId: id, fetchedAt: Date.now() }); setError(undefined);
+          latest.current.onSnapshot(state);
+        } catch (reason) { if (latest.current.account?.id === id && snapshotEpoch.current === epoch) setError(String(reason)); }
+      } while (refreshQueued.current);
     })();
     inFlight.current = work;
     try { await work; } finally { inFlight.current = undefined; }
   }, []);
 
   useEffect(() => {
+    snapshotEpoch.current += 1;
+    refreshQueued.current = true;
     setSnapshot(undefined); setError(undefined); setReview(undefined); setFeedback(undefined);
   }, [account?.id, connected]);
 
@@ -102,7 +113,10 @@ export function useSchwabEquityTrading({ account, connected, confirmOrders, onSn
     if (pendingId) setPendingIds((ids) => new Set(ids).add(pendingId));
     try {
       const result = await action();
-      pendingUntil.current = Date.now() + 15_000;
+      // Discard a read begun before this mutation, then coalesce its forced
+      // follow-up instead of starting competing refreshes for the same account.
+      snapshotEpoch.current += 1;
+      pendingUntil.current = Date.now() + 30_000;
       setRefreshEpoch((value) => value + 1);
       if (result.brokerOutcome === "confirmed") {
         if (result.brokerOrder?.status === "Rejected") {

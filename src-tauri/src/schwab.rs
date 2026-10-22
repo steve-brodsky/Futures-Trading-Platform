@@ -246,8 +246,8 @@ impl Schwab {
         &self,
         account: &str,
     ) -> Result<Vec<OrderUpdate>, AppError> {
-        // API order queries allow at most a year. Split windows to avoid the 3,000
-        // result cap; include GTC orders entered before today's session.
+        // Read the complete lookback once. Split only saturated responses, rather
+        // than paying for twelve sequential requests after every mutation.
         let mut cache = self.open_order_cache.lock().await;
         if let Some((time, rows)) = cache.get(account) {
             if time.elapsed().as_secs() < 60 {
@@ -256,16 +256,25 @@ impl Schwab {
         }
         let now = Utc::now();
         let mut rows = Vec::new();
-        for day in (0..360).step_by(30) {
-            let from = (now - chrono::Duration::days(day + 30)).to_rfc3339();
-            let to = (now - chrono::Duration::days(day)).to_rfc3339();
-            let page = self.orders(account, &from, &to).await?;
-            rows.extend(
-                page.orders
-                    .into_iter()
-                    .filter(|o| matches!(o.status.as_str(), "Working" | "Pending")),
-            );
+        let mut windows = vec![(now - chrono::Duration::days(360), now)];
+        while let Some((from, to)) = windows.pop() {
+            let page = self.order_history_values(account, &from.to_rfc3339(), &to.to_rfc3339()).await?;
+            if page.len() >= 3_000 {
+                let millis = (to - from).num_milliseconds();
+                if millis <= 1 {
+                    return Err(AppError::Api("Schwab order limit prevents a complete open-order snapshot".into()));
+                }
+                let middle = from + chrono::Duration::milliseconds(millis / 2);
+                // Inclusive boundaries may repeat orders; deduplicate below.
+                windows.push((from, middle));
+                windows.push((middle, to));
+                continue;
+            }
+            for raw in page {
+                flatten_order(&raw, account, None, &mut rows);
+            }
         }
+        rows.retain(|o| matches!(o.status.as_str(), "Working" | "Pending" | "Indeterminate"));
         rows.sort_by(|a, b| a.id.cmp(&b.id));
         rows.dedup_by(|a, b| a.id == b.id);
         cache.insert(account.into(), (std::time::Instant::now(), rows.clone()));
@@ -674,20 +683,14 @@ impl Schwab {
         from_entered_time: &str,
         to_entered_time: &str,
     ) -> Result<HistoricalOrderPage, AppError> {
-        let mut url = url::Url::parse(&format!("{TRADER_URL}/accounts/{account_id}/orders"))?;
-        url.query_pairs_mut()
-            .append_pair("maxResults", "3000")
-            .append_pair("fromEnteredTime", from_entered_time)
-            .append_pair("toEnteredTime", to_entered_time);
-        let value = self.get_json(url.as_str()).await?;
-        let raw_order_count = value.as_array().map_or(0, Vec::len);
-        if raw_order_count >= 3_000 {
+        let values = self.order_history_values(account_id, from_entered_time, to_entered_time).await?;
+        if values.len() >= 3_000 {
             return Err(AppError::Api(format!(
                 "Schwab returned the 3,000-order limit for {from_entered_time} through {to_entered_time}; journal history may be incomplete, so its checkpoint was not advanced"
             )));
         }
         let mut orders = Vec::new();
-        for order in value.as_array().into_iter().flatten() {
+        for order in &values {
             flatten_order(order, account_id, None, &mut orders);
         }
         orders.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
@@ -695,6 +698,16 @@ impl Schwab {
             orders,
             next_token: None,
         })
+    }
+
+    async fn order_history_values(&self, account: &str, from: &str, to: &str) -> Result<Vec<Value>, AppError> {
+        let mut url = url::Url::parse(&format!("{TRADER_URL}/accounts/{account}/orders"))?;
+        url.query_pairs_mut()
+            .append_pair("maxResults", "3000")
+            .append_pair("fromEnteredTime", from)
+            .append_pair("toEnteredTime", to);
+        self.get_json(url.as_str()).await?.as_array().cloned()
+            .ok_or_else(|| AppError::Api("Schwab returned an invalid order history snapshot".into()))
     }
 
     pub async fn search_symbols(&self, query: &str) -> Result<Vec<SymbolMeta>, AppError> {
@@ -2042,6 +2055,50 @@ mod tests {
             requests
         });
         (Schwab::test_client(format!("http://{address}")).await, task)
+    }
+
+    #[tokio::test]
+    async fn open_orders_use_one_complete_lookback_request_and_cache_it() {
+        let body = serde_json::json!([{
+            "orderId": 71, "orderType": "STOP", "status": "WORKING", "stopPrice": 763.25,
+            "enteredTime": (Utc::now() - chrono::Duration::days(90)).to_rfc3339(),
+            "orderLegCollection": [{"instruction":"SELL", "quantity":1,
+                "instrument":{"symbol":"SPY", "assetType":"COLLECTIVE_INVESTMENT"}}]
+        }]);
+        let (client, server) = history_server(vec![(200, body)]).await;
+        let rows = client.open_equity_orders("hash").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stop_price, Some(763.25));
+        assert_eq!(client.open_equity_orders("hash").await.unwrap().len(), 1);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let query = requests[0].query_pairs().collect::<BTreeMap<_, _>>();
+        let from = chrono::DateTime::parse_from_rfc3339(&query["fromEnteredTime"]).unwrap();
+        let to = chrono::DateTime::parse_from_rfc3339(&query["toEnteredTime"]).unwrap();
+        assert_eq!((to - from).num_days(), 360);
+    }
+
+    #[tokio::test]
+    async fn open_orders_split_only_saturated_windows_and_deduplicate_boundaries() {
+        let working = serde_json::json!({"orderId":72,"orderType":"LIMIT","status":"WORKING","price":767.58,
+            "orderLegCollection":[{"instruction":"SELL","quantity":1,"instrument":{"symbol":"SPY","assetType":"COLLECTIVE_INVESTMENT"}}]});
+        let saturated = Value::Array(vec![working.clone(); 3_000]);
+        let (client, server) = history_server(vec![
+            (200, saturated), (200, serde_json::json!([working.clone()])), (200, serde_json::json!([working])),
+        ]).await;
+        let rows = client.open_equity_orders("hash").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        let halves: Vec<_> = requests[1..].iter().map(|r| r.query_pairs().collect::<BTreeMap<_, _>>()).collect();
+        assert_eq!(halves[0]["fromEnteredTime"], halves[1]["toEnteredTime"]);
+    }
+
+    #[tokio::test]
+    async fn malformed_open_order_responses_fail_closed() {
+        let (client, server) = history_server(vec![(200, serde_json::json!({"unexpected":"response"}))]).await;
+        assert!(client.open_equity_orders("hash").await.is_err());
+        server.await.unwrap();
     }
 
     fn candles(times: impl IntoIterator<Item = i64>) -> Value {

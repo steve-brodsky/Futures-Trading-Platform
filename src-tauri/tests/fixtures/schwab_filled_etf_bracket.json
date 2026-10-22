@@ -1,0 +1,57 @@
+{
+  "orderId": 100,
+  "orderStrategyType": "TRIGGER",
+  "orderType": "MARKET",
+  "status": "FILLED",
+  "quantity": 1,
+  "filledQuantity": 1,
+  "cancelable": false,
+  "editable": false,
+  "orderLegCollection": [
+    { "legId": 1, "instruction": "BUY", "quantity": 1, "instrument": { "symbol": "SPY", "assetType": "COLLECTIVE_INVESTMENT" } }
+  ],
+  "orderActivityCollection": [
+    { "activityType": "EXECUTION", "executionType": "FILL", "executionLegs": [ { "legId": 1, "quantity": 1, "price": 765, "time": "2026-10-22T16:02:49Z" } ] }
+  ],
+  "childOrderStrategies": [
+    {
+      "orderId": 101,
+      "orderStrategyType": "OCO",
+      "status": "WORKING",
+      "childOrderStrategies": [
+        {
+          "orderId": 102,
+          "orderStrategyType": "SINGLE",
+          "orderType": "STOP",
+          "status": "WORKING",
+          "quantity": 1,
+          "filledQuantity": 0,
+          "stopPrice": 763.25,
+          "session": "NORMAL",
+          "duration": "GOOD_TILL_CANCEL",
+          "editable": true,
+          "cancelable": true,
+          "orderLegCollection": [
+            { "legId": 1, "instruction": "SELL", "quantity": 1, "instrument": { "symbol": "SPY", "assetType": "COLLECTIVE_INVESTMENT" } }
+          ]
+        },
+        {
+          "orderId": 103,
+          "orderStrategyType": "SINGLE",
+          "orderType": "LIMIT",
+          "status": "WORKING",
+          "quantity": 1,
+          "filledQuantity": 0,
+          "price": 767.58,
+          "session": "NORMAL",
+          "duration": "GOOD_TILL_CANCEL",
+          "editable": true,
+          "cancelable": true,
+          "orderLegCollection": [
+            { "legId": 1, "instruction": "SELL", "quantity": 1, "instrument": { "symbol": "SPY", "assetType": "COLLECTIVE_INVESTMENT" } }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import type { ChartLabelSettings, JournalRiskBaseline, MarketDataProvider, OrderDraft, OrderUpdate, Position } from "../types";
 import { calculateTakeProfitAtR, roundToTick } from "./indicators";
 import { positionMatchesSchwabChart } from "./schwabBrokerage";
+import { isEquity } from "./equityTrading";
 
 export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "projected-entry" | "projected-take-profit" | "projected-stop-loss" | "order";
 export const orderRMultiples = [1, 1.5, 2] as const;
@@ -137,7 +138,7 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
       quantity: Math.abs(position.quantity),
       draggable: false,
       position,
-      actionable: position.provider !== "schwab" || ["EQUITY", "ETF"].includes(position.assetType?.toUpperCase() ?? ""),
+      actionable: position.provider !== "schwab" || isEquity(position.assetType),
       suppressMetrics: Boolean(position.putCall),
       label: position.putCall
         ? `SCHWAB ${position.side.toUpperCase()} ${Math.abs(position.quantity)} · ${position.expirationDate?.slice(5).replace("-", "/")} ${position.strikePrice}${position.putCall[0]} · ${position.unrealizedPnl >= 0 ? "+" : "-"}$${Math.abs(position.unrealizedPnl).toFixed(2)}`
@@ -145,7 +146,7 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
     }));
   const orderLines = orders.flatMap((order): TradeLineModel[] => {
     if (order.symbol !== tradeSymbol || !["Working", "Pending"].includes(order.status)) return [];
-    if (order.provider === "schwab" && !["EQUITY", "ETF"].includes(order.assetType?.toUpperCase() ?? "")) return [];
+    if (order.provider === "schwab" && !isEquity(order.assetType)) return [];
     const price = order.price ?? order.stopPrice;
     if (price == null || price <= 0) return [];
     const protective = isBracketExit(order) || isPositionExit(order, positions);
@@ -170,7 +171,7 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
 }
 
 export function buildProjectedTradeLines(projection?: OrderProjection): TradeLineModel[] {
-  if (!projection) return [];
+  if (!projection || ![projection.stopLoss, projection.takeProfit].some(price => price != null && Number.isFinite(price) && price > 0)) return [];
   const lines: TradeLineModel[] = [];
   const side = projection.side ?? "Buy";
   const quantity = projection.quantity != null && Number.isFinite(projection.quantity) && projection.quantity >= 0

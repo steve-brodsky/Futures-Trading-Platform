@@ -102,9 +102,10 @@ export function OrderTicket({ equity, equityBlockReason, onEquitySubmit, chartSy
   const projectionQuantity = resolvedQuantity(projectionSide, String(orderProjection?.stopLoss ?? ""));
   const projectionEntryPrice = equity ? (projectionSide === "Buy" ? quote.ask : quote.bid) : orderProjection?.entryPrice;
   useEffect(() => {
-    if (!orderProjection || (orderProjection.quantity === projectionQuantity && orderProjection.entryPrice === projectionEntryPrice)) return;
+    if (!orderProjection || (orderProjection.stopLoss == null && orderProjection.takeProfit == null)
+      || (orderProjection.quantity === projectionQuantity && orderProjection.entryPrice === projectionEntryPrice)) return;
     onProjectionChange({ ...orderProjection, quantity: projectionQuantity, entryPrice: projectionEntryPrice });
-  }, [projectionQuantity, projectionEntryPrice, orderProjection?.quantity, orderProjection?.entryPrice]);
+  }, [projectionQuantity, projectionEntryPrice, orderProjection?.quantity, orderProjection?.entryPrice, orderProjection?.stopLoss, orderProjection?.takeProfit]);
 
   const swingStopPrice = calculateSwingStop({
     bars,

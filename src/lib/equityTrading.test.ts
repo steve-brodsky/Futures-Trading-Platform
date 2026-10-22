@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrderUpdate, Position, Quote, SchwabEquityOrderDraft } from "../types";
-import { equityQuoteAvailable, hasEquityExposure, isEquityRiskBudgetRejection, reducedEquityRiskDraft, sharesForRisk } from "./equityTrading";
+import { equityQuoteAvailable, hasEquityExposure, isEquity, isEquityRiskBudgetRejection, reducedEquityRiskDraft, sharesForRisk } from "./equityTrading";
 import { applyProjectedExitEdit, buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, orderProjectionScope, recalculateOrderProjectionAtR } from "./tradeLines";
 
 const now = Date.parse("2026-10-21T15:00:00Z");
@@ -64,6 +64,13 @@ describe("Schwab equity sizing", () => {
 });
 
 describe("equity trading eligibility", () => {
+  it("recognizes Schwab ETF order classifications without enabling other assets", () => {
+    for (const asset of ["EQUITY", "ETF", "COLLECTIVE_INVESTMENT"]) {
+      expect(isEquity(asset)).toBe(true);
+      expect(hasEquityExposure("account", "SPY", [], [{ ...stop, assetType: asset }])).toBe(true);
+    }
+    for (const asset of [undefined, "INDEX", "OPTION", "MUTUAL_FUND", "FIXED_INCOME"]) expect(isEquity(asset)).toBe(false);
+  });
   it("requires genuine recent executable quotes, including the source timestamp", () => {
     expect(equityQuoteAvailable(quote, now)).toBe(true);
     for (const patch of [{ bid: 0 }, { ask: 0 }, { ask: 99 }, { bid: NaN }, { delayed: true }, { halted: true }, { receivedAt: now - 5_001 }, { timestamp: "" }, { timestamp: new Date(now - 5_001).toISOString() }]) {
@@ -81,6 +88,21 @@ describe("equity trading eligibility", () => {
 });
 
 describe("equity chart lines", () => {
+  it("renders both working SPY exits when Schwab reports COLLECTIVE_INVESTMENT", () => {
+    const etfPosition = { ...position, assetType: "COLLECTIVE_INVESTMENT" };
+    const etfStop = { ...stop, assetType: "COLLECTIVE_INVESTMENT" };
+    const target: OrderUpdate = { ...etfStop, id: "target", type: "Limit", price: 103, stopPrice: undefined };
+    const lines = buildTradeLines("SPY", [etfPosition], [etfStop, target]);
+    expect(lines.map(line => line.kind)).toEqual(["position", "stop-loss", "take-profit"]);
+    expect(lines[0].actionable).toBe(true);
+    expect(lines.slice(1).every(line => line.draggable)).toBe(true);
+    expect(buildTradeLines("SPY", [etfPosition], [etfStop, target].map(order => ({ ...order, status: "Cancelled" }))).map(line => line.kind)).toEqual(["position"]);
+  });
+  it("clears empty projections after acceptance while retaining zero-share sizing previews with exits", () => {
+    expect(buildProjectedTradeLines({})).toEqual([]);
+    expect(buildProjectedTradeLines({ entryPrice: 765, quantity: 0, side: "Buy" })).toEqual([]);
+    expect(buildProjectedTradeLines({ entryPrice: 765, quantity: 0, stopLoss: 763 }).map(line => line.kind)).toEqual(["projected-entry", "projected-stop-loss"]);
+  });
   it("isolates drafts across symbols, accounts, and brokers while sharing same-symbol panes", () => {
     const scope = orderProjectionScope("schwab", "account", "SPY");
     expect(orderProjectionScope("schwab", "account", "spy")).toBe(scope);

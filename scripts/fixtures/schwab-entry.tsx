@@ -30,9 +30,11 @@ let ask = 100.1;
 let blocked: string | undefined;
 let placements: BrokerMutationResult[] = [];
 let preview: () => Promise<OrderPreview> = async () => ({ valid: true, summary: "Fixture preview", errors: [] });
+let readState: () => Promise<SchwabEquityState> = async () => state;
+let snapshots: SchwabEquityState[] = [];
 Object.assign(api, {
   isNative: true,
-  schwabEquityState: async () => state,
+  schwabEquityState: () => readState(),
   quotes: async (): Promise<Quote[]> => [{ provider: "schwab", symbol: "SPY", ask, bid: ask - .02, last: ask, change: 0, changePct: 0, delayed: false, halted: false, timestamp: new Date().toISOString(), receivedAt: Date.now() }],
   previewSchwabEquityOrder: () => preview(),
   placeSchwabEquityOrder: async (order: SchwabEquityOrderDraft, id: string) => {
@@ -45,7 +47,7 @@ Object.assign(api, {
 
 let control: ReturnType<typeof useSchwabEquityTrading>;
 function Fixture({ confirmOrders }: { confirmOrders: boolean }) {
-  control = useSchwabEquityTrading({ account, connected: true, confirmOrders, onSnapshot: () => {}, onAccepted: symbol => accepted.push(symbol), onNotify: message => notifications.push(message), validateEntry: () => blocked });
+  control = useSchwabEquityTrading({ account, connected: true, confirmOrders, onSnapshot: value => snapshots.push(value), onAccepted: symbol => accepted.push(symbol), onNotify: message => notifications.push(message), validateEntry: () => blocked });
   return <main style={{ padding: 20, width: 480 }}>{control.alerts}{control.review}</main>;
 }
 const root = createRoot(document.getElementById("root")!);
@@ -57,7 +59,9 @@ const button = (pattern: RegExp) => Array.from(document.querySelectorAll<HTMLBut
 const reset = async (confirmOrders = false) => {
   placed.length = 0; notifications = []; accepted = []; ask = 100.1; blocked = undefined; placements = [];
   preview = async () => ({ valid: true, summary: "Fixture preview", errors: [] });
+  readState = async () => state;
   await act(async () => { root.render(<Fixture key={++generation} confirmOrders={confirmOrders} />); });
+  snapshots = [];
 };
 const submit = () => act(async () => { await control.submit(draft, "fixture-tab", "SPY"); });
 const click = (pattern: RegExp) => act(async () => { button(pattern).click(); });
@@ -72,6 +76,23 @@ Object.assign(window, {
   async runSchwabEntryRegression() {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
     const passed: string[] = [];
+    await reset();
+    let resolveOld!: (value: SchwabEquityState) => void;
+    let reads = 0;
+    const updated = { ...state, sessionMessage: "After confirmed mutation" };
+    readState = () => ++reads === 1 ? new Promise(resolve => { resolveOld = resolve; }) : Promise.resolve(updated);
+    let first!: Promise<void>;
+    await act(async () => { first = control.refresh(true); });
+    placements = [result("confirmed")];
+    let mutationRefresh!: Promise<void>;
+    await act(async () => { mutationRefresh = control.submit(draft, "fixture-tab", "SPY"); });
+    const forced = [control.refresh(true), control.refresh(true)];
+    assert(reads === 1, "Concurrent refreshes started competing native reads");
+    await act(async () => { resolveOld({ ...state, sessionMessage: "Stale before mutation" }); await Promise.all([first, mutationRefresh, ...forced]); });
+    assert(Number(reads) === 2, `Expected one coalesced follow-up, got ${reads} reads`);
+    assert(snapshots.length === 1 && snapshots[0].sessionMessage === updated.sessionMessage, "A stale pre-mutation snapshot overwrote the accepted order state");
+    assert(!control.busy && accepted.length === 1, "Confirmed mutation did not finish after refresh");
+    passed.push("Coalesced post-mutation refresh discards stale account state");
     await reset();
     placements = [result("rejected", riskError), result("confirmed")];
     await submit();
