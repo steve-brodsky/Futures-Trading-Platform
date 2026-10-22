@@ -1508,5 +1508,12 @@ button[aria-checked="true"] .chart-layout-glyph i { background: rgba(55,213,232,
 .schwab-order-review h2 { margin: 0 0 18px; font-size: 15px; }
 .schwab-order-review p { color: #abb9c9; font-size: 12px; line-height: 1.6; }
 .schwab-order-review footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
+.schwab-order-review footer .secondary-button { flex: 0 0 auto; width: auto; min-width: 76px; padding: 0 12px; }
+.schwab-order-review .ticket-info { gap: 9px; font-size: 11px; }
+.schwab-order-review .ticket-info dd { font-size: 11px; }
+.schwab-action-feedback { display: flex; align-items: flex-start; gap: 8px; margin: 8px 10px; padding: 10px; border: 1px solid #334154; border-radius: 5px; color: #c8d0db; background: #121b25; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.schwab-action-feedback.error { border-color: #824253; color: #f395aa; }
+.schwab-action-feedback.warning { border-color: #825e30; color: var(--amber); }
+.schwab-action-feedback button { flex: 0 0 auto; padding: 2px 4px; border: 0; color: inherit; background: transparent; font-size: 10px; cursor: pointer; }
 .schwab-recovery { display: grid; gap: 8px; padding: 12px; border: 1px solid #825e30; font-size: 11px; }
 .schwab-recovery small { color: #abb9c9; line-height: 1.5; }

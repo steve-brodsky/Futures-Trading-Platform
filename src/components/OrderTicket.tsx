@@ -213,7 +213,7 @@ export function OrderTicket({ equity, equityBlockReason, onEquitySubmit, chartSy
   const riskExceedsBudget = settings.sizingMode === "risk" && strictRiskQuantity === 0 && calculatedRiskQuantity === 1;
   const selectedEligibility = entryEligibility[side === "Buy" ? "long" : "short"];
   const orderDisabled = Boolean(equityBlockReason) || busy || !account || Boolean(contractStatus) || marketUnavailable || effectiveQuantity < 1 || !takeProfitValid || !stopLossValid || estimatedRisk == null || !selectedEligibility.allowed;
-  const orderLabel = equityBlockReason ?? contractStatus ?? (marketUnavailable ? equity ? "Live bid/ask unavailable" : "Contract market data unavailable"
+  const orderLabel = busy ? "Processing order…" : equityBlockReason ?? contractStatus ?? (marketUnavailable ? equity ? "Live bid/ask unavailable" : "Contract market data unavailable"
     : !selectedEligibility.allowed ? `${side === "Buy" ? "Long" : "Short"} entry blocked`
     : `${confirmOrders ? "Review" : "Place"} ${equity ? (side === "Buy" ? "Long" : "Short") : side} market order`);
   const manualMissing = tradeContract && !contracts.some((contract) => contract.symbol === tradeContract);

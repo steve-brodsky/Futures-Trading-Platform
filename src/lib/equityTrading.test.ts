@@ -1,12 +1,47 @@
 import { describe, expect, it } from "vitest";
-import type { OrderUpdate, Position, Quote } from "../types";
-import { equityQuoteAvailable, hasEquityExposure, sharesForRisk } from "./equityTrading";
+import type { OrderUpdate, Position, Quote, SchwabEquityOrderDraft } from "../types";
+import { equityQuoteAvailable, hasEquityExposure, isEquityRiskBudgetRejection, reducedEquityRiskDraft, sharesForRisk } from "./equityTrading";
 import { applyProjectedExitEdit, buildProjectedTradeLines, buildTradeLineMetrics, buildTradeLines, orderProjectionScope, recalculateOrderProjectionAtR } from "./tradeLines";
 
 const now = Date.parse("2026-10-21T15:00:00Z");
 const quote: Quote = { provider: "schwab", symbol: "SPY", bid: 99.98, ask: 100.02, last: 100, change: 0, changePct: 0, delayed: false, halted: false, timestamp: new Date(now).toISOString(), receivedAt: now };
 const position: Position = { provider: "schwab", accountId: "account", id: "position", symbol: "SPY", side: "Long", quantity: 50, averagePrice: 100, last: 101, unrealizedPnl: 50, assetType: "EQUITY" };
 const stop: OrderUpdate = { provider: "schwab", accountId: "account", id: "stop", symbol: "SPY", side: "Sell", type: "StopMarket", quantity: 50, stopPrice: 98, status: "Working", timestamp: "", assetType: "EQUITY", openOrClose: "Close", groupName: "OCO", schwab: { rootOrderId: "1", parentOrderId: "2", ocoOrderId: "2", instruction: "SELL", contingent: false, editable: true, cancelable: true } };
+
+describe("risk-budget share reduction", () => {
+  const draft: SchwabEquityOrderDraft = { accountId: "account", symbol: "SPY", direction: "Long", sizingMode: "risk", riskBudget: 100, quantity: 50, referenceEntry: 100, stopLoss: 98, takeProfit: 103, rMultiple: 1.5, exitDuration: "GTC" };
+  it("proposes fewer whole shares at ask while preserving the reviewed exits and budget", () => {
+    const proposal = reducedEquityRiskDraft(draft, { ...quote, bid: 100.08, ask: 100.10 }, now);
+    expect(proposal).toEqual({ ...draft, quantity: 47, referenceEntry: 100.10 });
+    expect((proposal.referenceEntry - proposal.stopLoss) * proposal.quantity).toBeLessThanOrEqual(100);
+    expect(draft.quantity).toBe(50);
+  });
+  it("sizes short reductions from bid", () => {
+    const short = { ...draft, direction: "Short" as const, referenceEntry: 100, stopLoss: 102, takeProfit: 97 };
+    expect(reducedEquityRiskDraft(short, { ...quote, bid: 99.9, ask: 99.92 }, now)).toEqual({ ...short, quantity: 47, referenceEntry: 99.9 });
+  });
+  it("blocks proposals with stale, missing, delayed or mismatched quotes", () => {
+    for (const patch of [{ receivedAt: now - 5_001 }, { timestamp: "" }, { delayed: true }, { halted: true }, { ask: 0 }, { symbol: "AAPL" }]) {
+      expect(() => reducedEquityRiskDraft(draft, { ...quote, ...patch }, now)).toThrow(/quotes|quote/i);
+    }
+  });
+  it("blocks zero shares and manual-share orders", () => {
+    expect(() => reducedEquityRiskDraft({ ...draft, riskBudget: 1 }, quote, now)).toThrow("cannot cover one share");
+    expect(() => reducedEquityRiskDraft({ ...draft, sizingMode: "shares" }, quote, now)).toThrow("risk budget");
+  });
+  it("does not increase shares or submit an unnecessary reduction after the price recovers", () => {
+    expect(() => reducedEquityRiskDraft(draft, { ...quote, bid: 99.97, ask: 99.99 }, now)).toThrow("no share reduction is needed");
+  });
+  it("requires the existing stop and target to remain valid at the latest price", () => {
+    expect(() => reducedEquityRiskDraft(draft, { ...quote, bid: 103.08, ask: 103.1 }, now)).toThrow("outside the stop/target range");
+  });
+  it("recognizes the specific preflight budget rejection without treating other errors as safe retries", () => {
+    expect(isEquityRiskBudgetRejection("Price moved: the reviewed quantity exceeds your risk budget. Refresh the ticket")).toBe(true);
+    for (const message of ["Schwab outcome unknown", "Insufficient buying power", "Short sale unavailable", "Request interrupted"]) {
+      expect(isEquityRiskBudgetRejection(message)).toBe(false);
+    }
+  });
+});
 
 describe("Schwab equity sizing", () => {
   it("sizes longs at ask and shorts at bid with no futures point-value multiplier", () => {

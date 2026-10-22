@@ -48,3 +48,26 @@ export function hasEquityExposure(accountId: string, symbol: string, positions: 
 export function frozenEquityRisk(draft: SchwabEquityOrderDraft, quote: Quote): number {
   return Math.abs((draft.direction === "Long" ? quote.ask : quote.bid) - draft.stopLoss) * draft.quantity;
 }
+
+export function isEquityRiskBudgetRejection(reason: string): boolean {
+  return reason.includes("Price moved: the reviewed quantity exceeds your risk budget.");
+}
+
+export function reducedEquityRiskDraft(draft: SchwabEquityOrderDraft, quote: Quote, now = Date.now()): SchwabEquityOrderDraft {
+  if (draft.sizingMode !== "risk" || draft.riskBudget == null || !Number.isFinite(draft.riskBudget) || draft.riskBudget <= 0) {
+    throw new Error("A positive dollar risk budget is required to reduce shares.");
+  }
+  if (quote.symbol.toUpperCase() !== draft.symbol.toUpperCase() || !equityQuoteAvailable(quote, now)) {
+    throw new Error("Fresh Schwab bid/ask quotes are unavailable. Refresh the ticket before submitting.");
+  }
+  const side = draft.direction === "Long" ? "Buy" : "Sell";
+  const entry = side === "Buy" ? quote.ask : quote.bid;
+  if (!Number.isFinite(draft.stopLoss) || !Number.isFinite(draft.takeProfit)
+    || !(side === "Buy" ? draft.stopLoss < entry && draft.takeProfit > entry : draft.stopLoss > entry && draft.takeProfit < entry)) {
+    throw new Error("The current price is outside the stop/target range. Refresh the ticket.");
+  }
+  const quantity = sharesForRisk(draft.riskBudget, entry, draft.stopLoss, side);
+  if (quantity < 1) throw new Error("The risk budget cannot cover one share at the current price. Adjust the ticket.");
+  if (quantity >= draft.quantity) throw new Error("The price changed again and no share reduction is needed. Return to the ticket for a fresh order.");
+  return { ...draft, quantity, referenceEntry: entry };
+}
