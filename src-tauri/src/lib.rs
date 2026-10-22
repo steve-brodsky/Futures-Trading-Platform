@@ -5046,6 +5046,36 @@ fn reconcile_schwab_bootstrap_minutes(
     live_minutes.values().cloned().collect()
 }
 
+fn merge_schwab_bootstrap_history(
+    mut history: Vec<Bar>,
+    minutes: &[Bar],
+    timeframe: &str,
+    retained_limit: usize,
+) -> Vec<Bar> {
+    let intraday = !matches!(timeframe, "D" | "W" | "M");
+    let mut rebuilt = schwab::aggregate_session_minutes(minutes, timeframe);
+    if intraday {
+        // The first source minute can be in the middle of a chart bucket.
+        // Its partial OHLCV must not replace a complete coarser history bar.
+        if let Some(first) = minutes.iter().map(|bar| bar.time).min() {
+            if let Some(bucket) = schwab::bucket_start(first, timeframe) {
+                if first != bucket {
+                    rebuilt.retain(|bar| bar.time > bucket);
+                }
+            }
+        }
+        if let Some(first) = history.first() {
+            rebuilt.retain(|bar| bar.time >= first.time);
+        }
+    }
+    merge_retained_bars(
+        &mut history,
+        &rebuilt,
+        if intraday { schwab::HISTORY_PAGE_SIZE } else { retained_limit },
+    );
+    history
+}
+
 fn aggregate_schwab_live_minute(
     live_minutes: &mut BTreeMap<i64, Bar>,
     minute: Bar,
@@ -5070,6 +5100,29 @@ fn aggregate_schwab_live_minute(
     .find(|item| item.time == bucket_time)?;
     update.realtime = true;
     Some((update, previous))
+}
+
+fn preserve_schwab_live_baseline(
+    update: &mut Bar,
+    previous: Option<&Bar>,
+    source: &Bar,
+    live_minutes: &BTreeMap<i64, Bar>,
+    latest_bars: &Arc<RwLock<Vec<Bar>>>,
+    timeframe: &str,
+) {
+    let incomplete_intraday = !matches!(timeframe, "D" | "W" | "M")
+        && live_minutes.keys().next().is_some_and(|first| *first > update.time);
+    if timeframe != "M" && !incomplete_intraday {
+        return;
+    }
+    if let Ok(retained) = latest_bars.read() {
+        if let Some(existing) = retained.iter().find(|item| item.time == update.time) {
+            update.open = existing.open;
+            update.high = existing.high.max(update.high);
+            update.low = existing.low.min(update.low);
+            update.volume = (existing.volume + source.volume - previous.map_or(0.0, |bar| bar.volume)).max(0.0);
+        }
+    }
 }
 
 async fn run_schwab_bar_stream(
@@ -5112,17 +5165,8 @@ async fn run_schwab_bar_stream(
         let history = bootstrap_api
             .bars(&bootstrap_symbol, &bootstrap_timeframe)
             .await;
-        let mut source_minutes = if bootstrap_timeframe == "1m" {
-            history
-                .as_ref()
-                .map(|bars| bars.clone())
-                .unwrap_or_default()
-        } else {
-            bootstrap_api
-                .bars(&bootstrap_symbol, "1m")
-                .await
-                .unwrap_or_default()
-        };
+        let source_result = bootstrap_api.recent_minutes(&bootstrap_symbol).await;
+        let mut source_minutes = source_result.as_ref().cloned().unwrap_or_default();
         let session_error = if let Some((first, last)) =
             schwab::current_new_york_day_range(Utc::now().timestamp())
         {
@@ -5144,6 +5188,8 @@ async fn run_schwab_bar_stream(
         } else {
             Some("Could not determine the current New York trading day".into())
         };
+        let session_error = session_error.or_else(|| source_result.err()
+            .map(|error| format!("Schwab live minute history failed: {error}")));
         (history, source_minutes, session_error)
     };
     tokio::pin!(bootstrap);
@@ -5186,15 +5232,9 @@ async fn run_schwab_bar_stream(
                             &reconciled_minutes,
                         );
                     }
-                    snapshot = {
-                        let mut combined = snapshot;
-                        merge_retained_bars(
-                            &mut combined,
-                            &schwab::aggregate_session_minutes(&reconciled_minutes, &timeframe),
-                            retained_limit,
-                        );
-                        combined
-                    };
+                    snapshot = merge_schwab_bootstrap_history(
+                        snapshot, &reconciled_minutes, &timeframe, retained_limit,
+                    );
                 }
                 if !snapshot.is_empty() {
                     let _ = storage::replace_bar_tail(
@@ -5274,20 +5314,9 @@ async fn run_schwab_bar_stream(
                 else {
                     continue;
                 };
-                if timeframe == "M" {
-                    if let Ok(retained) = latest_bars.read() {
-                        if let Some(existing) =
-                            retained.iter().find(|item| item.time == update.time)
-                        {
-                            update.open = existing.open;
-                            update.high = existing.high.max(update.high);
-                            update.low = existing.low.min(update.low);
-                            let previous_volume = previous.map(|item| item.volume).unwrap_or(0.0);
-                            update.volume =
-                                (existing.volume + bar.volume - previous_volume).max(0.0);
-                        }
-                    }
-                }
+                preserve_schwab_live_baseline(
+                    &mut update, previous.as_ref(), &bar, &live_minutes, &latest_bars, &timeframe,
+                );
                 update.realtime = true;
                 let _ = storage::save_bars(
                     &db_path,
@@ -5339,19 +5368,9 @@ async fn run_schwab_bar_stream(
                 else {
                     continue;
                 };
-                if timeframe == "M" {
-                    if let Ok(retained) = latest_bars.read() {
-                        if let Some(existing) = retained.iter().find(|item| item.time == update.time)
-                        {
-                            update.open = existing.open;
-                            update.high = existing.high.max(update.high);
-                            update.low = existing.low.min(update.low);
-                            let previous_volume = previous.map(|item| item.volume).unwrap_or(0.0);
-                            update.volume =
-                                (existing.volume + source.volume - previous_volume).max(0.0);
-                        }
-                    }
-                }
+                preserve_schwab_live_baseline(
+                    &mut update, previous.as_ref(), &source, &live_minutes, &latest_bars, &timeframe,
+                );
                 let needs_streaming_state = status
                     .read()
                     .map(|current| current.state != "streaming")
@@ -6809,6 +6828,53 @@ mod stream_tests {
                 .collect::<Vec<_>>(),
             vec![(100, 1.0, false), (200, 20.0, true), (300, 3.0, false)]
         );
+    }
+
+    #[test]
+    fn schwab_deep_bootstrap_preserves_history_before_complete_minute_coverage() {
+        let epoch = |value: &str| DateTime::parse_from_rfc3339(value).unwrap().timestamp();
+        let bar = |time, close, volume| Bar {
+            time, open: close, high: close, low: close, close, volume, realtime: false,
+        };
+        let old = epoch("2026-06-01T08:00:00-04:00");
+        let boundary = epoch("2026-10-19T08:00:00-04:00");
+        let noon = epoch("2026-10-19T12:00:00-04:00");
+        let historical = vec![bar(old, 10.0, 1_000.0), bar(boundary, 20.0, 2_000.0), bar(noon, 30.0, 3_000.0)];
+        let minutes = vec![bar(boundary + 90 * 60, 999.0, 1.0), bar(noon, 31.0, 100.0), bar(noon + 60, 32.0, 200.0)];
+        let result = merge_schwab_bootstrap_history(historical, &minutes, "4h", 1_000);
+        assert_eq!(result.len(), 3);
+        assert_eq!((result[0].close, result[0].volume), (10.0, 1_000.0));
+        assert_eq!((result[1].close, result[1].volume), (20.0, 2_000.0));
+        assert_eq!((result[2].open, result[2].close, result[2].volume), (31.0, 32.0, 300.0));
+    }
+
+    #[test]
+    fn schwab_partial_live_coverage_preserves_baseline_and_replaces_minute_volume_once() {
+        let epoch = |value: &str| DateTime::parse_from_rfc3339(value).unwrap().timestamp();
+        let bucket = epoch("2026-10-19T08:00:00-04:00");
+        let existing = Bar { time: bucket, open: 10.0, high: 30.0, low: 5.0, close: 20.0, volume: 1_000.0, realtime: false };
+        let latest = Arc::new(RwLock::new(vec![existing]));
+        let minute = Bar { time: bucket + 90 * 60, open: 20.0, high: 22.0, low: 19.0, close: 21.0, volume: 100.0, realtime: true };
+        let mut live = BTreeMap::from([(minute.time, minute.clone())]);
+        let corrected = Bar { volume: 120.0, close: 22.0, ..minute };
+        let (mut update, previous) = aggregate_schwab_live_minute(&mut live, corrected.clone(), "4h").unwrap();
+        preserve_schwab_live_baseline(&mut update, previous.as_ref(), &corrected, &live, &latest, "4h");
+        assert_eq!((update.open, update.high, update.low, update.close, update.volume), (10.0, 30.0, 5.0, 22.0, 1_020.0));
+        retain_bar_snapshot(&latest, std::slice::from_ref(&update), 1_000);
+        let (mut update, previous) = aggregate_schwab_live_minute(&mut live, corrected.clone(), "4h").unwrap();
+        preserve_schwab_live_baseline(&mut update, previous.as_ref(), &corrected, &live, &latest, "4h");
+        assert_eq!(update.volume, 1_020.0);
+    }
+
+    #[test]
+    fn schwab_complete_live_coverage_can_correct_historical_extremes() {
+        let bucket = DateTime::parse_from_rfc3339("2026-10-19T08:00:00-04:00").unwrap().timestamp();
+        let minute = Bar { time: bucket, open: 10.0, high: 12.0, low: 9.0, close: 11.0, volume: 100.0, realtime: false };
+        let latest = Arc::new(RwLock::new(vec![Bar { high: 999.0, ..minute.clone() }]));
+        let mut live = BTreeMap::new();
+        let (mut update, previous) = aggregate_schwab_live_minute(&mut live, minute.clone(), "4h").unwrap();
+        preserve_schwab_live_baseline(&mut update, previous.as_ref(), &minute, &live, &latest, "4h");
+        assert_eq!((update.high, update.volume), (12.0, 100.0));
     }
 
     #[test]

@@ -28,6 +28,7 @@ import { mutationPresentation } from "./lib/mutationResults";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay, profileFromRecords } from "./lib/cloudPreferences";
 import { playAlertSound, prepareAlertAudio } from "./lib/alertAudio";
 import { mergeBars } from "./lib/barData";
+import { HistoryBackfillRequests, historyMarketKey, olderHistoryPage } from "./lib/historyBackfill";
 import { didBarCloseOnStreamUpdate, nextBarRolloverRefresh, type BarRolloverRefreshState } from "./lib/barRollover";
 import { demoOrders, demoPositions, demoSchwabAccounts, demoSchwabBalance, demoSchwabBodBalance, demoSchwabOrders, demoSchwabPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
@@ -128,6 +129,7 @@ interface TabMarketState {
   bars: Bar[];
   hasOlder: boolean;
   loadingOlder: boolean;
+  historyError?: string;
   streamState: StreamConnectionState;
   streamMessage?: string;
   generation?: number;
@@ -551,6 +553,7 @@ function TradingApp() {
   const customTimeframeEntries = useMemo<CustomTimeframeEntry[]>(() => normalizeCustomMinuteTimeframes([...workspace.customMinuteTimeframes, ...sessionCustomMinuteTimeframes]).map((minutes) => ({ minutes, saved: workspace.customMinuteTimeframes.includes(minutes) })), [workspace.customMinuteTimeframes, sessionCustomMinuteTimeframes]);
   const [tabMarkets, setTabMarkets] = useState<Record<string, TabMarketState>>({});
   const tabMarketsRef = useRef(tabMarkets);
+  const historyRequestsRef = useRef(new HistoryBackfillRequests());
   const [vwapMarkets, setVwapMarkets] = useState<Record<string, VwapMarketState>>({});
   const vwapMarketsRef = useRef(vwapMarkets);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -1364,7 +1367,11 @@ function TradingApp() {
             const base = isSameBarMarket(existing, payload.provider, payload.symbol, payload.timeframe)
               ? existing
               : emptyTabMarket(payload.provider, payload.symbol, payload.timeframe);
-            return { ...current, [payload.subscriptionId]: { ...base, bars: mergeBars(base.bars, payload.bars), generation: payload.generation } };
+            return { ...current, [payload.subscriptionId]: {
+              ...base,
+              ...(base.generation !== payload.generation ? { hasOlder: true, loadingOlder: false, historyError: undefined } : {}),
+              bars: mergeBars(base.bars, payload.bars), generation: payload.generation,
+            } };
           });
         }
         if ((payload.provider === "schwab" || payload.environment === environmentRef.current) && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
@@ -1382,7 +1389,11 @@ function TradingApp() {
             const base = isSameBarMarket(existing, payload.provider, payload.symbol, payload.timeframe)
               ? existing
               : emptyTabMarket(payload.provider, payload.symbol, payload.timeframe);
-            return { ...current, [payload.subscriptionId]: { ...base, bars: mergeBars(base.bars, [payload.bar]), generation: payload.generation } };
+            return { ...current, [payload.subscriptionId]: {
+              ...base,
+              ...(base.generation !== payload.generation ? { hasOlder: true, loadingOlder: false, historyError: undefined } : {}),
+              bars: mergeBars(base.bars, [payload.bar]), generation: payload.generation,
+            } };
           });
         }
         if ((payload.provider === "schwab" || payload.environment === environmentRef.current) && payload.timeframe === "1m" && vwapSymbolsRef.current.has(payload.symbol)) {
@@ -1646,7 +1657,10 @@ function TradingApp() {
           const liveStateIsNewer = matchingExisting?.generation != null && matchingExisting.generation === market.generation;
           next[tabId] = {
             ...market,
-            ...(liveStateIsNewer ? { streamState: matchingExisting.streamState, streamMessage: matchingExisting.streamMessage } : {}),
+            ...(liveStateIsNewer ? {
+              streamState: matchingExisting.streamState, streamMessage: matchingExisting.streamMessage,
+              hasOlder: matchingExisting.hasOlder, loadingOlder: matchingExisting.loadingOlder, historyError: matchingExisting.historyError,
+            } : { loadingOlder: false, historyError: undefined }),
             bars: mergeBars(matchingExisting?.bars ?? [], market.bars),
           };
         });
@@ -2220,6 +2234,7 @@ function TradingApp() {
     const environmentChanged = tabMarketEnvironmentRef.current !== environment;
     tabMarketEnvironmentRef.current = environment;
     const activeIds = new Set(workspace.tabs.map((tab) => tab.id));
+    historyRequestsRef.current.retainTabs(activeIds);
     setTabMarkets((current) => {
       let changed = Object.keys(current).some((tabId) => !activeIds.has(tabId));
       const next: Record<string, TabMarketState> = {};
@@ -2270,7 +2285,7 @@ function TradingApp() {
         const existing = isSameBarMarket(current[tab.id], tab.symbol.provider, tab.symbol.symbol, tab.timeframe)
           ? current[tab.id]
           : emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe, generation);
-        return { ...current, [tab.id]: { ...existing, streamState: api.isNative ? providerIsAuthenticated ? "connecting" : "disconnected" : "streaming", generation } };
+        return { ...current, [tab.id]: { ...existing, hasOlder: true, loadingOlder: false, historyError: undefined, streamState: api.isNative ? providerIsAuthenticated ? "connecting" : "disconnected" : "streaming", generation } };
       });
       if (!api.isNative) {
         api.bars(tab.symbol.provider, tab.symbol.symbol, tab.timeframe).then((nextBars) => {
@@ -2958,27 +2973,44 @@ function TradingApp() {
     });
   }, [visibleVwapKey]);
 
-  async function loadOlder(tabId: string) {
+  async function loadOlder(tabId: string, retry = false) {
     const tab = workspaceRef.current.tabs.find((item) => item.id === tabId);
     if (!tab) return;
     const tabMarket = tabMarketsRef.current[tabId] ?? emptyTabMarket(tab.symbol.provider, tab.symbol.symbol, tab.timeframe);
     const tabBars = tabMarket.bars;
+    if (!isSameBarMarket(tabMarket, tab.symbol.provider, tab.symbol.symbol, tab.timeframe)) return;
     if (!api.isNative || tabMarket.loadingOlder || !tabMarket.hasOlder || !tabBars.length) return;
     const symbol = tab.symbol.symbol;
     const timeframe = tab.timeframe;
     const before = tabBars[0].time;
-    setTabMarkets((current) => ({ ...current, [tabId]: { ...tabMarket, loadingOlder: true } }));
+    const requests = historyRequestsRef.current;
+    const token = requests.begin(tabId, tabMarket, retry);
+    if (!token) return;
+    const accepts = (market: TabMarketState | undefined) => market != null
+      && historyMarketKey(market) === historyMarketKey(tabMarket) && requests.current(tabId, market, token);
+    let failed = false;
+    setTabMarkets((current) => accepts(current[tabId])
+      ? { ...current, [tabId]: { ...current[tabId], loadingOlder: true, historyError: undefined } }
+      : current);
     try {
-      const older = await api.olderBars(tab.symbol.provider, symbol, timeframe, before);
+      const older = olderHistoryPage(await api.olderBars(tab.symbol.provider, symbol, timeframe, before), before);
       const currentTab = workspaceRef.current.tabs.find((tab) => tab.id === tabId);
-      if (!currentTab || currentTab.symbol.symbol !== symbol || currentTab.timeframe !== timeframe) return;
+      if (!currentTab || currentTab.symbol.provider !== tab.symbol.provider || currentTab.symbol.symbol !== symbol || currentTab.timeframe !== timeframe) return;
       setTabMarkets((current) => {
-        const existing = isSameBarMarket(current[tabId], tab.symbol.provider, symbol, timeframe) ? current[tabId] : emptyTabMarket(tab.symbol.provider, symbol, timeframe);
-        return { ...current, [tabId]: { ...existing, hasOlder: older.length > 0, bars: older.length ? mergeBars(older, existing.bars) : existing.bars } };
+        const existing = current[tabId];
+        if (!accepts(existing)) return current;
+        const addsOlder = olderHistoryPage(older, existing.bars[0]?.time ?? before).length > 0;
+        return { ...current, [tabId]: { ...existing, hasOlder: addsOlder, bars: older.length ? mergeBars(older, existing.bars) : existing.bars } };
       });
-    } catch (error) { showToast(String(error)); }
+    } catch (error) {
+      failed = true;
+      setTabMarkets((current) => accepts(current[tabId])
+        ? { ...current, [tabId]: { ...current[tabId], historyError: String(error) } }
+        : current);
+    }
     finally {
-      setTabMarkets((current) => isSameBarMarket(current[tabId], tab.symbol.provider, symbol, timeframe)
+      requests.finish(tabId, token, failed);
+      setTabMarkets((current) => accepts(current[tabId])
         ? { ...current, [tabId]: { ...current[tabId], loadingOlder: false } }
         : current);
     }
@@ -4985,6 +5017,8 @@ function TradingApp() {
       onTimezoneChange={(chartTimezone) => updateTab(tab.id, { chartTimezone })}
       onLoadOlder={() => loadOlder(tab.id)}
       loadingOlder={tabMarket.loadingOlder}
+      historyError={tabMarket.historyError}
+      onRetryHistory={() => loadOlder(tab.id, true)}
     />;
   }
 

@@ -811,6 +811,28 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn intraday_backfills_survive_reopen_and_a_500_bar_refresh() {
+        let path = std::env::temp_dir().join(format!("northstar-history-cache-{}.sqlite", uuid::Uuid::new_v4()));
+        for timeframe in ["30m", "1h", "4h"] {
+            let bars = (1..=1_000).map(|time| Bar {
+                time, open: 10.0, high: 12.0, low: 9.0, close: 11.0,
+                volume: 100.0, realtime: false,
+            }).collect::<Vec<_>>();
+            save_bars(&path, "schwab", "SPY", timeframe, &bars[..500]).unwrap();
+            save_bars(&path, "schwab", "SPY", timeframe, &bars[500..]).unwrap();
+            let refreshed = bars[500..].iter().cloned().map(|bar| Bar { close: 11.5, ..bar }).collect::<Vec<_>>();
+            replace_bar_tail(&path, "schwab", "SPY", timeframe, &refreshed).unwrap();
+            // Each storage call opens a fresh connection, including this reload.
+            let reopened = load_bars(&path, "schwab", "SPY", timeframe, 10_000).unwrap();
+            assert_eq!(reopened.len(), 1_000);
+            assert_eq!((reopened[0].time, reopened[0].close), (1, 11.0));
+            assert_eq!((reopened[999].time, reopened[999].close), (1_000, 11.5));
+            assert!(load_bars(&path, "live", "SPY", timeframe, 10_000).unwrap().is_empty());
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn profile(watchlist: &str) -> serde_json::Value {
         let categories = PREFERENCE_CATEGORIES
             .iter()

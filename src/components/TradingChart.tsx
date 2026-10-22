@@ -74,6 +74,8 @@ interface Props {
   onClosePosition: (position: Position) => void;
   onReplaceOrder: (order: OrderUpdate, newPrice: number) => void | Promise<void>;
   loadingOlder: boolean;
+  historyError?: string;
+  onRetryHistory: () => void;
   activeTool: ChartTool;
   drawings: Drawing[];
   onToolComplete: () => void;
@@ -136,7 +138,7 @@ function keepPositionPriceLinesOnTop(price: ISeriesApi<any>, lines: Map<string, 
   });
 }
 
-export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars: rawBars, vwapBars: rawVwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, schwabWickFilter, assetType, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, riskBaselines, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, crosshairSyncEnabled, onCrosshairSyncChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars: rawBars, vwapBars: rawVwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, schwabWickFilter, assetType, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, riskBaselines, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, historyError, onRetryHistory, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, crosshairSyncEnabled, onCrosshairSyncChange, onTimezoneChange, onLoadOlder }: Props, ref) {
   const bars = useMemo(() => filterSchwabWicks(rawBars, { provider, assetType }, timeframe, schwabWickFilter),
     [rawBars, provider, assetType, timeframe, schwabWickFilter.enabled, schwabWickFilter.maxWickPercent]);
   const vwapBars = useMemo(() => filterSchwabWicks(rawVwapBars, { provider, assetType }, "1m", schwabWickFilter),
@@ -175,6 +177,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const economicEventSettingsRef = useRef(economicEventSettings);
   const drawingCallbacksRef = useRef({ onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing });
   const loadOlderRef = useRef(onLoadOlder);
+  const historyDataUpdateRef = useRef(0);
+  const historyViewportSettledRef = useRef(0);
   const visibleRangeChangeRef = useRef(onVisibleRangeChange);
   const firstData = useRef(true);
   const [hovered, setHovered] = useState<DisplayItem | null>(null);
@@ -639,7 +643,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       setShowScrollToLatest(Number(range.to) < barsRef.current.length - 1);
       visibleRangeChangeRef.current?.({ from: Number(range.from), to: Number(range.to) });
       const info = priceSeries.barsInLogicalRange(range);
-      if (info && info.barsBefore < 100) loadOlderRef.current();
+      if (info && info.barsBefore < 100 && historyDataUpdateRef.current === historyViewportSettledRef.current) loadOlderRef.current();
     });
 
     previousBars.current = [];
@@ -717,7 +721,6 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       if (!visibleIds.has(item.config.id)) chart.removeSeries(item.series);
     });
 
-    const closes = displayCloses;
     indicatorRefs.current = visible.map((config) => {
       const current = existing.get(config.id);
       const series = current?.series ?? chart.addSeries(LineSeries, {
@@ -729,11 +732,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
         priceFormat,
       });
       series.applyOptions({ color: config.color });
-      const values = config.kind === "SMA" ? sma(closes, config.period) : ema(closes, config.period);
-      series.setData(values.flatMap((value, index) => value == null ? [] : [{ time: asTime(displayTimes[index]), value }]));
       return { config, series };
     });
-  }, [indicators, chartGeneration, minMove, displayItems]);
+  }, [indicators, chartGeneration, minMove]);
 
   useEffect(() => {
     vwapPrimitiveRef.current?.setData(
@@ -853,6 +854,9 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       else price.update({ time: asTime(latestBar.time), value: latestBar.close });
       volume?.update({ time: asTime(latestBar.time), value: latestBar.volume, color: latestBar.close >= latestBar.open ? "rgba(22,199,154,.35)" : "rgba(239,70,111,.35)" });
     } else {
+      // setData can report an intermediate range before the prepended bars'
+      // scroll anchor is restored. Do not interpret that range as user scrolling.
+      historyDataUpdateRef.current += 1;
       const range = chart.timeScale().getVisibleLogicalRange();
       const priorAnchorIndex = range ? Math.max(0, Math.min(previousPlotPoints.current.length - 1, Math.floor(Number(range.from)))) : -1;
       const priorAnchor = priorAnchorIndex >= 0 ? previousPlotPoints.current[priorAnchorIndex]?.sourceTime : undefined;
@@ -894,8 +898,18 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     previousPlotPoints.current = plotPoints;
     installedPlotTimesRef.current = new Set(plotPoints.map((item) => item.plotTime));
     applySyncedCrosshairRef.current();
+    if (!realtimeOnly) {
+      const update = historyDataUpdateRef.current;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (chartRef.current !== chart || historyDataUpdateRef.current !== update) return;
+        historyViewportSettledRef.current = update;
+        const range = chart.timeScale().getVisibleLogicalRange();
+        const info = range && price.barsInLogicalRange(range);
+        if (info && info.barsBefore < 100) loadOlderRef.current();
+      }));
+    }
     requestAnimationFrame(() => syncTradeLabelsRef.current());
-  }, [bars, kind, chartGeneration, displayItems, renkoBricks, pointAndFigureColumns, pointAndFigureSettings.boxSizeTicks, minMove]);
+  }, [bars, kind, chartGeneration, displayItems, renkoBricks, pointAndFigureColumns, pointAndFigureSettings.boxSizeTicks, minMove, indicators]);
 
   useEffect(() => {
     const price = priceRef.current;
@@ -1146,6 +1160,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
           : <b>{hoveredGex.strike.toFixed(pricePrecision(minMove))} · C {formatGex(hoveredGex.callGex)} · P {formatGex(-hoveredGex.putGex)} · N {formatGex(hoveredGex.netGex)}</b>)}</div>}
       </div>
       {loadingOlder && <div className="history-loading"><span />Loading history</div>}
+      {!loadingOlder && historyError && <div className="history-loading history-error" role="status" title={historyError}>History unavailable<button type="button" onClick={onRetryHistory}>Retry</button></div>}
       <div ref={host} className="chart-host" />
       {economicEventClusters.length > 0 && <div className="economic-event-axis-layer">
         {activeEconomicEvent && <div className={`economic-event-guide impact-${activeEconomicEvent.impact}`} style={{ left: activeEconomicEvent.x }} />}

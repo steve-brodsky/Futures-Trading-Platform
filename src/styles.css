@@ -317,6 +317,8 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 1px s
 .timezone-select:hover, .timezone-select:focus-visible { color: #e5ebf2; background: #18202a; outline: none; }
 .history-loading { position: absolute; z-index: 8; top: 40px; left: 14px; display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 4px; color: #8995a6; background: rgba(18,24,33,.86); font-size: 8px; pointer-events: none; }
 .history-loading span { width: 8px; height: 8px; border: 1px solid #39485a; border-top-color: var(--cyan); border-radius: 50%; animation: history-spin .75s linear infinite; }
+.history-error { pointer-events: auto; }
+.history-error button { border: 0; padding: 2px 5px; border-radius: 3px; background: var(--surface-3); color: var(--cyan); font: inherit; cursor: pointer; }
 @keyframes history-spin { to { transform: rotate(360deg); } }
 
 .right-panel { grid-column: 3; grid-row: 1 / -1; background: #0d1117; border-left: 1px solid var(--line); min-width: 0; min-height: 0; overflow: auto; z-index: 5; }

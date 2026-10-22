@@ -26,6 +26,30 @@ const MARKET_URL: &str = "https://api.schwabapi.com/marketdata/v1";
 const TRADER_URL: &str = "https://api.schwabapi.com/trader/v1";
 pub const AUTHORIZE_URL: &str = "https://api.schwabapi.com/v1/oauth/authorize";
 pub const REDIRECT_URI: &str = "https://127.0.0.1:8182/callback";
+pub const HISTORY_PAGE_SIZE: usize = 500;
+
+#[derive(Clone, Copy, Debug)]
+struct IntradayHistoryPolicy {
+    source_minutes: u32,
+    window_seconds: i64,
+}
+
+impl IntradayHistoryPolicy {
+    fn for_timeframe(timeframe: &str) -> Option<Self> {
+        let minutes = minute_interval(timeframe)?;
+        let source_minutes = [30, 15, 10, 5, 1]
+            .into_iter()
+            .find(|source| minutes % *source as usize == 0)?;
+        // Estimate 16 extended-hours hours per weekday, plus a week of slack.
+        let days = ((HISTORY_PAGE_SIZE * minutes * 7).div_ceil(960 * 5) + 7) as i64;
+        Some(Self { source_minutes, window_seconds: days * 86_400 })
+    }
+
+    fn range(&self, timeframe: &str, end: i64, expansion: u32) -> (i64, i64) {
+        let first = end.saturating_sub(self.window_seconds.saturating_mul(1_i64 << expansion));
+        (bucket_start(first, timeframe).unwrap_or(first).max(0), end)
+    }
+}
 
 #[derive(Clone, Debug)]
 struct AccessToken {
@@ -60,6 +84,8 @@ struct UserPreference {
 pub struct Schwab {
     #[cfg(test)]
     trading_base: Option<String>,
+    #[cfg(test)]
+    market_base: Option<String>,
     http: reqwest::Client,
     access_token: Arc<RwLock<Option<AccessToken>>>,
     refresh_lock: Arc<Mutex<()>>,
@@ -80,6 +106,7 @@ impl Schwab {
     #[cfg(test)]
     pub(crate) async fn test_client(base: String) -> Self {
         let mut client = Self::new().unwrap();
+        client.market_base = Some(base.clone());
         client.trading_base = Some(base);
         *client.access_token.write().await = Some(AccessToken {
             value: "fixture-token".into(),
@@ -239,6 +266,8 @@ impl Schwab {
         Ok(Self {
             #[cfg(test)]
             trading_base: None,
+            #[cfg(test)]
+            market_base: None,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .user_agent("Northstar-Trader/0.1")
@@ -389,6 +418,11 @@ impl Schwab {
 
     async fn get_json(&self, url: &str) -> Result<Value, AppError> {
         let request_url = if url.starts_with(TRADER_URL) { url.replacen(TRADER_URL, self.trading_base(), 1) } else { url.to_owned() };
+        #[cfg(test)]
+        let request_url = match &self.market_base {
+            Some(base) if url.starts_with(MARKET_URL) => url.replacen(MARKET_URL, base, 1),
+            _ => request_url,
+        };
         let mut token = self.access_token(false).await?;
         let correlation_id = uuid::Uuid::new_v4().to_string();
         let trader_request = url.starts_with(TRADER_URL);
@@ -774,11 +808,46 @@ impl Schwab {
         timeframe: &str,
         before: Option<i64>,
     ) -> Result<Vec<Bar>, AppError> {
-        if minute_interval(timeframe).is_some() {
-            let source = self
-                .price_history(symbol, "day", 10, "minute", 1, before, None)
-                .await?;
-            return Ok(aggregate_bars(&source, timeframe));
+        if let Some(policy) = IntradayHistoryPolicy::for_timeframe(timeframe) {
+            let end = match before {
+                Some(before) => bucket_start(before, timeframe).unwrap_or(before),
+                None => Utc::now().timestamp().saturating_add(1),
+            };
+            let mut result = Vec::new();
+            for expansion in 0..4 {
+                let (first, last) = policy.range(timeframe, end, expansion);
+                let source = self.price_history(
+                    symbol, "day", 10, "minute", policy.source_minutes, None, Some((first, last)),
+                ).await?;
+                let source = source.into_iter()
+                    .filter(|bar| bar.time >= first && bar.time < last)
+                    .collect::<Vec<_>>();
+                let mut page = aggregate_bars(&source, timeframe);
+                page.retain(|bar| bar.time >= first && before.is_none_or(|before| bar.time < before));
+                if let Some(source_first) = source.first() {
+                    let boundary = bucket_start(source_first.time, timeframe);
+                    let current_bucket = bucket_start(end.saturating_sub(1), timeframe);
+                    if boundary != Some(source_first.time) && (before.is_some() || boundary != current_bucket) {
+                        page.retain(|bar| Some(bar.time) != boundary);
+                    }
+                }
+                // Expansion probes availability without repeatedly requesting a
+                // provider-capped range that can no longer extend this page.
+                let previous_first = result.first().map(|bar: &Bar| bar.time);
+                let mut combined: BTreeMap<_, _> = result.into_iter().map(|bar| (bar.time, bar)).collect();
+                combined.extend(page.into_iter().map(|bar| (bar.time, bar)));
+                result = combined.into_values().collect();
+                let advanced = match (previous_first, result.first()) {
+                    (Some(previous), Some(first)) => first.time < previous,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                if result.len() >= HISTORY_PAGE_SIZE || (expansion > 0 && !advanced) || first == 0 {
+                    break;
+                }
+            }
+            let keep_from = result.len().saturating_sub(HISTORY_PAGE_SIZE);
+            return Ok(result.split_off(keep_from));
         }
         match timeframe {
             "D" | "W" | "M" => {
@@ -826,6 +895,11 @@ impl Schwab {
         Ok(bars)
     }
 
+    /// Keep the live bootstrap's minute coverage independent of chart paging.
+    pub async fn recent_minutes(&self, symbol: &str) -> Result<Vec<Bar>, AppError> {
+        self.price_history(symbol, "day", 10, "minute", 1, None, None).await
+    }
+
     async fn price_history(
         &self,
         symbol: &str,
@@ -842,11 +916,13 @@ impl Schwab {
             query
                 .append_pair("symbol", symbol)
                 .append_pair("periodType", period_type)
-                .append_pair("period", &period.to_string())
                 .append_pair("frequencyType", frequency_type)
                 .append_pair("frequency", &frequency.to_string())
                 .append_pair("needExtendedHoursData", "true")
                 .append_pair("needPreviousClose", "true");
+            if range.is_none() {
+                query.append_pair("period", &period.to_string());
+            }
             if let Some(before) = before {
                 query.append_pair("endDate", &(before.saturating_mul(1_000) - 1).to_string());
             }
@@ -857,11 +933,10 @@ impl Schwab {
             }
         }
         let body = self.get_json(url.as_str()).await?;
-        let mut bars: Vec<_> = body
-            .get("candles")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+        let candles = body.get("candles").and_then(Value::as_array)
+            .ok_or_else(|| AppError::Api("Schwab returned invalid price history".into()))?;
+        let mut bars: Vec<_> = candles
+            .iter()
             .filter_map(history_bar_from_value)
             .collect();
         bars.sort_by_key(|bar| bar.time);
@@ -1870,6 +1945,141 @@ fn truncate(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn history_server(replies: Vec<(u16, Value)>) -> (Schwab, tokio::task::JoinHandle<Vec<url::Url>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in replies {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 4096];
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if count == 0 || bytes.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                let path = request.split_whitespace().nth(1).unwrap();
+                requests.push(url::Url::parse(&format!("http://{address}{path}")).unwrap());
+                let body = body.to_string();
+                stream.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+                // Let the client consume large bodies before Windows closes
+                // the socket; otherwise it may reset an unread response.
+                let mut tail = [0; 1];
+                let _ = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut tail)).await;
+            }
+            requests
+        });
+        (Schwab::test_client(format!("http://{address}")).await, task)
+    }
+
+    fn candles(times: impl IntoIterator<Item = i64>) -> Value {
+        serde_json::json!({"candles": times.into_iter().map(|time| serde_json::json!({
+            "datetime": time * 1_000, "open": 10.0, "high": 12.0,
+            "low": 9.0, "close": 11.0, "volume": 100.0,
+        })).collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn intraday_history_sources_use_the_largest_divisor() {
+        for (timeframe, source) in [
+            ("1m", 1), ("2m", 1), ("5m", 5), ("7m", 1), ("10m", 10),
+            ("15m", 15), ("30m", 30), ("45m", 15), ("1h", 30),
+            ("90m", 30), ("4h", 30), ("1440m", 30),
+        ] {
+            assert_eq!(IntradayHistoryPolicy::for_timeframe(timeframe).unwrap().source_minutes, source);
+        }
+        assert!(IntradayHistoryPolicy::for_timeframe("D").is_none());
+        assert!(IntradayHistoryPolicy::for_timeframe("0m").is_none());
+    }
+
+    #[test]
+    fn history_windows_align_across_dst_and_include_weekend_slack() {
+        for date in ["2026-03-09T13:00:00-04:00", "2026-11-02T13:00:00-05:00"] {
+            let end = chrono::DateTime::parse_from_rfc3339(date).unwrap().timestamp();
+            let policy = IntradayHistoryPolicy::for_timeframe("4h").unwrap();
+            let (first, last) = policy.range("4h", end, 0);
+            assert_eq!(bucket_start(first, "4h"), Some(first));
+            assert_eq!(last, end);
+            assert!(end - first >= 180 * 86_400);
+            assert!(policy.range("4h", end, 1).0 < first);
+        }
+    }
+
+    #[tokio::test]
+    async fn intraday_cold_start_uses_explicit_bounds_and_returns_latest_500() {
+        let end = bucket_start(Utc::now().timestamp(), "30m").unwrap();
+        let body = candles((0..600).rev().map(|index| end - index * 1_800));
+        let (client, server) = history_server(vec![(200, body)]).await;
+        let bars = client.bars("SPY", "30m").await.unwrap();
+        assert_eq!(bars.len(), HISTORY_PAGE_SIZE);
+        assert!(bars.windows(2).all(|pair| pair[0].time < pair[1].time));
+        assert_eq!(bars.last().unwrap().time, end);
+        let requests = server.await.unwrap();
+        let query = requests[0].query_pairs().collect::<BTreeMap<_, _>>();
+        assert_eq!(query["frequency"], "30");
+        assert!(query.contains_key("startDate") && query.contains_key("endDate"));
+        assert!(!query.contains_key("period"));
+        assert_eq!(bucket_start(query["startDate"].parse::<i64>().unwrap() / 1_000, "30m"), Some(query["startDate"].parse::<i64>().unwrap() / 1_000));
+    }
+
+    #[tokio::test]
+    async fn hourly_backfill_aggregates_coarse_bars_and_excludes_the_cursor() {
+        let before = chrono::DateTime::parse_from_rfc3339("2026-10-20T16:00:00-04:00").unwrap().timestamp();
+        let mut times = (0..1_201).rev().map(|index| before - index * 1_800).collect::<Vec<_>>();
+        times.extend([before, before - 1_800]);
+        let (client, server) = history_server(vec![(200, candles(times))]).await;
+        let bars = client.older_bars("SPY", "1h", before).await.unwrap();
+        assert_eq!(bars.len(), HISTORY_PAGE_SIZE);
+        assert!(bars.iter().all(|bar| bar.time < before && bar.volume == 200.0));
+        assert_eq!(bars.last().unwrap().time, before - 3_600);
+        let requests = server.await.unwrap();
+        let query = requests[0].query_pairs().collect::<BTreeMap<_, _>>();
+        assert_eq!(query["frequency"], "30");
+        assert_eq!(query["endDate"].parse::<i64>().unwrap(), before * 1_000 - 1);
+    }
+
+    #[tokio::test]
+    async fn empty_and_sparse_pages_expand_then_stop_on_repeated_history() {
+        let before = chrono::DateTime::parse_from_rfc3339("2026-10-19T04:00:00-04:00").unwrap().timestamp();
+        let sparse = candles([before - 20 * 86_400]);
+        let (client, server) = history_server(vec![(200, candles([])), (200, sparse.clone()), (200, sparse)]).await;
+        let bars = client.older_bars("SPY", "30m", before).await.unwrap();
+        assert_eq!(bars.len(), 1);
+        let requests = server.await.unwrap();
+        let starts = requests.iter().map(|url| url.query_pairs().find(|(key, _)| key == "startDate").unwrap().1.parse::<i64>().unwrap()).collect::<Vec<_>>();
+        assert!(starts.windows(2).all(|pair| pair[1] < pair[0]));
+    }
+
+    #[tokio::test]
+    async fn backfill_exhaustion_requires_an_expanded_successful_probe() {
+        let before = Utc::now().timestamp();
+        let (client, server) = history_server(vec![(200, candles([before])), (200, candles([before]))]).await;
+        assert!(client.older_bars("SPY", "30m", before).await.unwrap().is_empty());
+        assert_eq!(server.await.unwrap().len(), 2);
+        for reply in [(500, serde_json::json!({"error":"unavailable"})), (200, serde_json::json!({"unexpected":true}))] {
+            let (client, server) = history_server(vec![reply]).await;
+            assert!(client.older_bars("SPY", "30m", before).await.is_err());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn coarse_history_drops_an_incomplete_leading_chart_bucket() {
+        let first = chrono::DateTime::parse_from_rfc3339("2026-10-19T09:30:00-04:00").unwrap().timestamp();
+        let noon = first + 150 * 60;
+        let body = candles([first, noon, noon + 1_800]);
+        let (client, server) = history_server(vec![(200, body.clone()), (200, body)]).await;
+        let bars = client.older_bars("SPY", "4h", noon + 4 * 3_600).await.unwrap();
+        assert_eq!(bars.len(), 1);
+        assert_eq!(bars[0].time, noon);
+        assert_eq!(bars[0].volume, 200.0);
+        server.await.unwrap();
+    }
 
     #[test]
     fn arbitrary_minute_intervals_align_to_new_york_midnight() {
