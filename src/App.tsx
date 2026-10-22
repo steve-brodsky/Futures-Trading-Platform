@@ -10,6 +10,9 @@ import {
   Search, Settings2, SlidersHorizontal, SquareStack, TrendingDown, TrendingUp,
   ExternalLink, Table2, Wifi, X, Zap,
 } from "lucide-react";
+import { useSchwabEquityTrading } from "./components/SchwabEquityTrading";
+import { defaultEquityTicketSettings, hasEquityExposure, isEquity } from "./lib/equityTrading";
+import { OrderTicket } from "./components/OrderTicket";
 import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
 import { SchwabWickFilterControls } from "./components/SchwabWickFilterControls";
 import { ChartPaneGrid } from "./components/ChartPaneGrid";
@@ -28,7 +31,6 @@ import { mergeBars } from "./lib/barData";
 import { didBarCloseOnStreamUpdate, nextBarRolloverRefresh, type BarRolloverRefreshState } from "./lib/barRollover";
 import { demoOrders, demoPositions, demoSchwabAccounts, demoSchwabBalance, demoSchwabBodBalance, demoSchwabOrders, demoSchwabPositions, futures, quoteFor } from "./lib/demo";
 import { ALERT_DURATIONS, ALERT_SOUNDS, ALERT_TIMEFRAMES, alertMarketKey, defaultEma200Alert, deriveEma200TabPositions, desiredAlertMarkets, evaluateEma200Cross, uncoveredAlertMarkets, type Ema200TabPositionCacheEntry, type EmaCrossSide } from "./lib/emaAlerts";
-import { calculateContractsForRisk, calculateTakeProfitAtR, estimateOrderRisk, validateTick } from "./lib/indicators";
 import { defaultEntryRules, evaluateEntryRules, hasConfiguredEntryRules } from "./lib/entryRules";
 import { ENTRY_RULE_UNLOCK_STEPS, generateEntryRuleUnlockCode } from "./lib/entryRuleLock";
 import {
@@ -38,11 +40,9 @@ import {
 import { canAddWatchlistSymbol, formatContractExpiration, hasOpenFuturesPosition, isContinuousFuture, quoteSubscriptionInstruments, resolveTradeSymbol, sameSymbolMeta } from "./lib/futuresContracts";
 import { quoteDayChangePercent } from "./lib/quotes";
 import { brokerageDisplayState, brokeragePollInterval, brokerageStreamsHealthy as areBrokerageStreamsHealthy, isCompletedCloseFill, isManagedThrottle, isNewOpenPosition, orderFillNeedsPositionReconciliation, reconcileOrderSnapshot, reconcilePositionSnapshot, upsertStreamOrder, upsertStreamPosition } from "./lib/brokerage";
-import { calculateSwingStop } from "./lib/swingStop";
 import { canArmEntryScreenshot, entryScreenshotLinesReady, entryScreenshotRetryDelay, hasOpenPosition, shouldRetryEntryScreenshots, ENTRY_SCREENSHOT_QUEUE_LIMIT } from "./lib/entryScreenshot";
-import { applyProjectedExitEdit, flattenOrderDraft, orderRMultiples, recalculateOrderProjectionAtR, tradeLinePriceChanged, withOrderPrice, type OrderProjection, type OrderRMultiple, type ProjectedExitField } from "./lib/tradeLines";
+import { applyProjectedExitEdit, flattenOrderDraft, orderProjectionScope, recalculateOrderProjectionAtR, tradeLinePriceChanged, withOrderPrice, type OrderProjection, type ProjectedExitField } from "./lib/tradeLines";
 import { autoBreakEvenRuleKey, autoTrailStopRuleKey, breakEvenPrice, currentRMultiple, evaluateAutoBreakEven, evaluateAutoTrailStop, findManagedPosition, isMoreProtectiveStop, managedProtectiveOrders, originalRiskBaseline, removeClosedAutoBreakEvenRules, removeClosedAutoTrailStopRules, stopProtectsBreakEven, takeProfitAtOriginalR } from "./lib/tradeManagement";
-import { isTargetOutside } from "./lib/menuFocus";
 import { autocompleteKeyAction, useSymbolSuggestions } from "./lib/symbolSearch";
 import { defaultIndicators } from "./lib/workspace";
 import { allocateGexStreamBudgets, calculateGexLevels, defaultGexSelection, gexExpirationDisplayGroups, normalizeGexSelection, prioritizeOptionContracts, resolveGexExpirations } from "./lib/gex";
@@ -116,7 +116,7 @@ const defaultWorkspace: WorkspaceState = {
   drawings: {}, gexSelections: {},
   activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, rightPanelMode: "order-entry", autoBreakEvenRules: {}, autoTrailStopRules: {}, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, schwabWickFilter: DEFAULT_SCHWAB_WICK_FILTER, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, trailStop: { timeframe: "1m", pivotBars: 2, offsetTicks: 1 }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, schwabWickFilter: DEFAULT_SCHWAB_WICK_FILTER, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, equityOrderTicket: { ...defaultEquityTicketSettings }, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, trailStop: { timeframe: "1m", pivotBars: 2, offsetTicks: 1 }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -591,7 +591,7 @@ function TradingApp() {
   const optionChainBudgetOwnerRef = useRef<string | undefined>(undefined);
   const optionChainBudgetEpochRef = useRef(0);
   const pendingOptionTransferRef = useRef<OptionChainTransferState | undefined>(undefined);
-  const [orderProjection, setOrderProjection] = useState<(OrderProjection & { tradeSymbol?: string }) | null>(null);
+  const [orderProjection, setOrderProjection] = useState<(OrderProjection & { tradeSymbol?: string; scope?: string }) | null>(null);
   const [orderTicketResetEpochs, setOrderTicketResetEpochs] = useState<Record<string, number>>({});
   const [tradeDetails, setTradeDetails] = useState<Record<string, SymbolMeta>>({});
   const [tradeDetailErrors, setTradeDetailErrors] = useState<Record<string, string>>({});
@@ -769,7 +769,7 @@ function TradingApp() {
     : emptyTabMarket(activeTab.symbol.provider, activeTab.symbol.symbol, activeTab.timeframe);
   const bars = market.bars;
   const activeContinuous = isContinuousFuture(activeTab.symbol);
-  const activeTradeSymbol = resolveTradeSymbol(activeTab);
+  const activeTradeSymbol = activeTab.symbol.provider === "schwab" ? activeTab.symbol.symbol : resolveTradeSymbol(activeTab);
   const activeTradeMeta = activeContinuous
     ? activeTradeSymbol ? tradeDetails[activeTradeSymbol] : undefined
     : activeTab.symbol;
@@ -999,9 +999,9 @@ function TradingApp() {
     return true;
   }
   const activeTradeQuote: Quote = activeTradeSymbol
-    ? quotes[`tradestation:${activeTradeSymbol}`] ?? (api.isNative
-      ? { provider: "tradestation", symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
-      : quoteFor(activeTradeSymbol, 0, "tradestation"))
+    ? quotes[`${activeTab.symbol.provider}:${activeTradeSymbol}`] ?? (api.isNative
+      ? { provider: activeTab.symbol.provider, symbol: activeTradeSymbol, last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" }
+      : quoteFor(activeTradeSymbol, 0, activeTab.symbol.provider))
     : { provider: "tradestation", symbol: "", last: 0, bid: 0, ask: 0, change: 0, changePct: 0, delayed: true, halted: false, timestamp: "" };
   const trailStopTimeframes = orderedToolbarTimeframes(workspace.customMinuteTimeframes);
   const activeTrailBars = autoTrailBarsEpoch >= 0 && activeTradeSymbol
@@ -1019,7 +1019,7 @@ function TradingApp() {
       if (!current || current.tradeSymbol !== activeTradeSymbol || current.rMultiple == null) return current;
       const entryPrice = (current.side ?? "Buy") === "Buy" ? activeTradeQuote.ask : activeTradeQuote.bid;
       const next = recalculateOrderProjectionAtR(current, entryPrice, activeOrderMinMove);
-      return next === current ? current : { ...next, tradeSymbol: current.tradeSymbol };
+      return next === current ? current : { ...next, tradeSymbol: current.tradeSymbol, scope: current.scope };
     });
   }, [isDetached, workspace.rightPanelOpen, activeTradeSymbol, activeTradeQuote.ask, activeTradeQuote.bid, activeOrderMinMove]);
 
@@ -1391,7 +1391,7 @@ function TradingApp() {
         handleAlertBarUpdate(payload);
       }).then((unlisten) => cleanups.push(unlisten));
       listen<QuoteUpdateEvent>("quote-update", ({ payload }) => {
-        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider !== "schwab" && !acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "tradestation" && payload.environment !== environmentRef.current) return;
         const receivedAt = Date.now();
         handleTruthSocialQuote(payload.quote, receivedAt);
@@ -1404,7 +1404,7 @@ function TradingApp() {
         }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OptionUpdateEvent>("option-update", ({ payload }) => {
-        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+
         setSchwabPositions((current) => applySchwabOptionQuote(current, payload.contract));
         setGexMarkets((current) => {
           let changed = false;
@@ -1423,7 +1423,7 @@ function TradingApp() {
         });
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OptionStreamStateEvent>("option-stream-state", ({ payload }) => {
-        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+
         if (!payload.subscriptionId.startsWith("gex:")) return;
         setGexMarkets((current) => {
           const market = current[payload.symbol];
@@ -1454,7 +1454,7 @@ function TradingApp() {
         }));
       }).then((unlisten) => cleanups.push(unlisten));
       listen<PositionsSnapshotEvent>("positions-snapshot", ({ payload }) => {
-        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider !== "schwab" && !acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "schwab") {
           if (payload.accountId === selectedSchwabAccountIdRef.current) {
             setSchwabPositions(payload.positions);
@@ -1470,7 +1470,7 @@ function TradingApp() {
         brokerageBalanceRefreshRef.current();
       }).then((unlisten) => cleanups.push(unlisten));
       listen<PositionUpdateEvent>("position-update", ({ payload }) => {
-        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider !== "schwab" && !acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "schwab") {
           if (payload.accountId === selectedSchwabAccountIdRef.current) setSchwabPositions((current) => upsertStreamPosition(current, payload.position));
           return;
@@ -1485,7 +1485,7 @@ function TradingApp() {
         brokerageBalanceRefreshRef.current();
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OrdersSnapshotEvent>("orders-snapshot", ({ payload }) => {
-        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider !== "schwab" && !acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "schwab") {
           if (payload.accountId === selectedSchwabAccountIdRef.current) {
             setSchwabOrders(payload.orders);
@@ -1501,7 +1501,7 @@ function TradingApp() {
         brokerageBalanceRefreshRef.current();
       }).then((unlisten) => cleanups.push(unlisten));
       listen<OrderStreamUpdateEvent>("order-stream-update", ({ payload }) => {
-        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider !== "schwab" && !acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "schwab") {
           if (payload.accountId === selectedSchwabAccountIdRef.current) setSchwabOrders((current) => upsertStreamOrder(current, payload.order));
           return;
@@ -1527,7 +1527,7 @@ function TradingApp() {
         }
       }).then((unlisten) => cleanups.push(unlisten));
       listen<BrokerageStreamStateEvent>("brokerage-stream-state", ({ payload }) => {
-        if (!acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
+        if (payload.provider !== "schwab" && !acceptsEnvironmentGeneration(payload.environmentGeneration)) return;
         if (payload.provider === "schwab") {
           if (payload.accountId === selectedSchwabAccountIdRef.current) {
             setSchwabBrokerageStreamStates((current) => ({ ...current, [payload.channel]: payload.state }));
@@ -1795,6 +1795,25 @@ function TradingApp() {
   selectedAccountIdRef.current = selectedAccount?.id;
   const selectedSchwabAccount = schwabAccounts.find((account) => account.id === workspace.selectedSchwabAccountId) ?? schwabAccounts[0];
   selectedSchwabAccountIdRef.current = selectedSchwabAccount?.id;
+  const schwabTrading = useSchwabEquityTrading({
+    account: selectedSchwabAccount, connected: schwabAuthenticated && !isDetached,
+    confirmOrders: workspace.confirmOrders,
+    onSnapshot: (snapshot) => { setSchwabPositions(snapshot.positions); setSchwabOrders(snapshot.orders); },
+    onAccepted: (symbol) => clearSubmittedEntry(symbol),
+    onNotify: (message) => {
+      showToast(message);
+      setNotifications((current) => [{ provider: "schwab" as const, id: crypto.randomUUID(), time: new Date().toISOString(), title: "Schwab equity trading", text: message }, ...current].slice(0,250));
+    },
+    validateEntry: (draft, sourceTabId, chartSymbol) => {
+      if (draft.accountId !== selectedSchwabAccountIdRef.current) return "The Schwab account changed. Submit a fresh order.";
+      const tab = workspaceRef.current.tabs.find((item) => item.id === sourceTabId);
+      if (!tab || tab.symbol.provider !== "schwab" || tab.symbol.symbol !== chartSymbol || draft.symbol !== chartSymbol) return "The originating Schwab chart changed. Submit a fresh order.";
+      const quote = quotesRef.current[`schwab:${draft.symbol}`];
+      if (!quote) return "Live Schwab quotes are unavailable.";
+      const result = evaluateEntryRules(workspaceRef.current.entryRules, tabMarketsRef.current[sourceTabId]?.bars ?? [], quote, Date.now(), tab.timeframe)[draft.direction === "Long" ? "long" : "short"];
+      return result.allowed ? undefined : result.reason;
+    },
+  });
   const entryRuleAccountId = selectedAccount?.id ?? (api.isNative ? undefined : "demo");
   const journalRiskScope = selectedAccount ? `${environment}:${selectedAccount.id}` : "";
   const journalRiskPositionKey = positions
@@ -2049,7 +2068,7 @@ function TradingApp() {
       if (api.isNative) void api.stopSchwabBrokerageStream();
       setSchwabBrokerageStreamStates({ positions: "disconnected", orders: "disconnected" });
     };
-  }, [selectedSchwabAccount?.id, schwabAuthenticated, schwabAuthEpoch, workspace.environment]);
+  }, [selectedSchwabAccount?.id, schwabAuthenticated, schwabAuthEpoch]);
 
   const schwabHeldEquitySymbols = schwabPositions.filter((position) => !(position.assetType ?? "").toUpperCase().includes("OPTION")).map((position) => position.symbol.trim().toUpperCase()).sort().join("|");
   const schwabHeldOptionSymbols = schwabPositions.filter((position) => (position.assetType ?? "").toUpperCase().includes("OPTION")).map((position) => position.symbol).sort().join("|");
@@ -4336,6 +4355,7 @@ function TradingApp() {
   }
 
   async function requestClosePosition(position: Position) {
+    if (position.provider === "schwab") return schwabTrading.close(position);
     if (!selectedAccount) return showToast("Select an account before closing a position.");
     if (!api.isNative) return showToast("Position closing is disabled in browser demo mode.");
     if (!workspace.confirmOrders) return executeClosePosition(position.id);
@@ -4715,6 +4735,7 @@ function TradingApp() {
   }
 
   async function replaceChartOrder(order: OrderUpdate, newPrice: number) {
+    if (order.provider === "schwab") return schwabTrading.replace(order, newPrice);
     if (!selectedAccount || replacingOrderIds.has(order.id)) return;
     const original = order.price ?? order.stopPrice;
     setReplacingOrderIds((current) => new Set(current).add(order.id));
@@ -4740,6 +4761,8 @@ function TradingApp() {
   }
 
   async function cancelWorkingOrder(id: string) {
+    const schwabOrder = schwabOrders.find((order) => order.id === id && order.provider === "schwab");
+    if (schwabOrder) return schwabTrading.cancel(schwabOrder);
     if (!selectedAccount) return;
     try {
       const result = await api.cancelOrder(selectedAccount.id, id);
@@ -4857,8 +4880,12 @@ function TradingApp() {
     : !activeTradeMeta ? `Loading contract details for ${activeTradeSymbol}…`
     : undefined;
 
+  const activeOrderScope = orderProjectionScope(activeTab.symbol.provider, activeTab.symbol.provider === "schwab" ? selectedSchwabAccount?.id : selectedAccount?.id, activeTradeSymbol ?? activeTab.symbol.symbol);
+  useEffect(() => {
+    setOrderProjection((current) => current?.scope === activeOrderScope ? current : null);
+  }, [activeOrderScope]);
   const activeOrderProjection = !isDetached && workspace.rightPanelOpen
-    && orderProjection && orderProjection.tradeSymbol === activeTradeSymbol ? orderProjection : undefined;
+    && orderProjection && orderProjection.scope === activeOrderScope && orderProjection.tradeSymbol === activeTradeSymbol ? orderProjection : undefined;
   const activeOrderTicketResetEpoch = activeTradeSymbol ? orderTicketResetEpochs[activeTradeSymbol] ?? 0 : 0;
   const useNextActiveContract = () => {
     const next = activeRollStatus?.nextContract;
@@ -4873,14 +4900,14 @@ function TradingApp() {
   };
   const projectedEntryPrice = (projection: OrderProjection) => (projection.side ?? "Buy") === "Buy" ? activeTradeQuote.ask : activeTradeQuote.bid;
   const editProjectedExit = (field: ProjectedExitField, price: number) => setOrderProjection((current) => {
-    if (!current || current.tradeSymbol !== activeTradeSymbol) return current;
+    if (!current || current.scope !== activeOrderScope || current.tradeSymbol !== activeTradeSymbol) return current;
     const next = applyProjectedExitEdit(current, field, price, projectedEntryPrice(current), activeOrderMinMove);
-    return { ...next, tradeSymbol: current.tradeSymbol };
+    return { ...next, tradeSymbol: current.tradeSymbol, scope: activeOrderScope };
   });
-  const restoreOrderProjection = (projection: OrderProjection) => setOrderProjection({ ...projection, tradeSymbol: activeTradeSymbol });
+  const restoreOrderProjection = (projection: OrderProjection) => setOrderProjection({ ...projection, tradeSymbol: activeTradeSymbol, scope: activeOrderScope });
   const replaceOrderProjection = (projection: OrderProjection) => {
     const next = recalculateOrderProjectionAtR(projection, projectedEntryPrice(projection), activeOrderMinMove);
-    setOrderProjection({ ...next, tradeSymbol: activeTradeSymbol });
+    setOrderProjection({ ...next, tradeSymbol: activeTradeSymbol, scope: activeOrderScope });
   };
 
   function renderChartPane(tab: ChartTabState) {
@@ -4917,7 +4944,7 @@ function TradingApp() {
       description={tab.symbol.description}
       exchange={tab.symbol.exchange}
       minMove={tab.symbol.minMove}
-      pointValue={tabTradeMeta?.pointValue ?? tab.symbol.pointValue}
+      pointValue={tab.symbol.provider === "schwab" ? 1 : tabTradeMeta?.pointValue ?? tab.symbol.pointValue}
       currentPrice={tabTradeQuote.last}
       projectedEntryPrice={focused && activeOrderProjection ? projectedEntryPrice(activeOrderProjection) : undefined}
       chartLabelSettings={workspace.settings.chartLabels}
@@ -4934,14 +4961,14 @@ function TradingApp() {
       gexExpirationDates={gexMarket?.selectedDates ?? []}
       gexStatus={gexDisplayStatus}
       gexExpirationCount={gexMarket?.selectedDates.length ?? 0}
-      orders={tab.symbol.provider === "schwab" ? [] : orders}
-      positions={tab.symbol.provider === "schwab" ? schwabPositions : positions}
-      riskBaselines={tab.symbol.provider === "schwab" ? [] : activeJournalRiskBaselines}
+      orders={tab.symbol.provider === "schwab" ? schwabOrders.filter((order) => order.accountId === selectedSchwabAccount?.id && isEquity(order.assetType)) : orders}
+      positions={tab.symbol.provider === "schwab" ? schwabPositions.filter((position) => position.accountId === selectedSchwabAccount?.id) : positions}
+      riskBaselines={tab.symbol.provider === "schwab" ? schwabTrading.snapshot?.riskBaselines ?? [] : activeJournalRiskBaselines}
       orderProjection={focused ? activeOrderProjection : undefined}
       onOrderProjectionChange={editProjectedExit}
       onOrderProjectionRestore={restoreOrderProjection}
-      closingPositionIds={closingPositionIds}
-      replacingOrderIds={replacingOrderIds}
+      closingPositionIds={new Set([...closingPositionIds, ...schwabTrading.pendingIds])}
+      replacingOrderIds={new Set([...replacingOrderIds, ...schwabTrading.pendingIds])}
       onClosePosition={requestClosePosition}
       onReplaceOrder={replaceChartOrder}
       timezone={tab.chartTimezone}
@@ -4962,6 +4989,7 @@ function TradingApp() {
   }
 
   return <main className={`app-shell ${isDetached ? "detached-shell" : ""}`}>
+    {schwabTrading.review}
     <header className="titlebar">
       <div className="brand"><div className="brand-glyph"><TrendingUp size={16} strokeWidth={2.4} /></div><span>NORTHSTAR</span><small>TRADER</small></div>
       {!isDetached && <nav className="workspace-mode-switch" aria-label="Workspace">
@@ -5145,7 +5173,19 @@ function TradingApp() {
             <button id="trade-management-mode-tab" type="button" role="tab" aria-selected={workspace.rightPanelMode === "trade-management"} aria-controls="trade-management-mode-panel" className={workspace.rightPanelMode === "trade-management" ? "active" : ""} onClick={() => updateWorkspace({ rightPanelMode: "trade-management" })}>Trade Management</button>
           </nav>
           {workspace.rightPanelMode === "order-entry" ? <div id="order-entry-mode-panel" role="tabpanel" aria-labelledby="order-entry-mode-tab">{activeTab.symbol.provider === "schwab"
-            ? <div className={`equity-order-disabled ${activeSchwabOptionPositions.length ? "has-option-pnl" : ""}`}>
+            ? isEquity(activeTab.symbol.assetType) ? <>
+              {activeSchwabOptionPnl != null && <div className="schwab-option-pnl"><span>Live option P&amp;L</span><strong>{formatSignedUsd(activeSchwabOptionPnl)}</strong></div>}
+              {schwabTrading.alerts}
+              <OrderTicket key={activeOrderScope} equity chartSymbol={activeTab.symbol} tradeSymbol={{ ...activeTab.symbol, pointValue: 1 }} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe}
+                settings={{ ...defaultEquityTicketSettings, ...workspace.settings.equityOrderTicket, riskSizingPolicy: "strict" }} contracts={[]} account={selectedSchwabAccount} environment="live"
+                busy={schwabTrading.busy} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)}
+                orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch}
+                equityBlockReason={!schwabAuthenticated ? "Connect Schwab to trade" : !schwabTrading.ready ? "Waiting for Schwab account data" : !schwabTrading.snapshot?.sessionOpen ? schwabTrading.snapshot?.sessionMessage ?? "Checking equity session" : schwabTrading.snapshot.issues.length ? "Resolve Schwab trading alerts" : selectedSchwabAccount && hasEquityExposure(selectedSchwabAccount.id, activeTab.symbol.symbol, schwabPositions, schwabOrders) ? "Shares or an equity order already exist" : undefined}
+                onTradeContractChange={() => {}} onUseNextContract={() => {}}
+                onSettingsChange={(patch) => setWorkspace((current) => ({ ...current, settings: { ...current.settings, equityOrderTicket: { ...defaultEquityTicketSettings, ...current.settings.equityOrderTicket, ...patch, riskSizingPolicy: "strict" } } }))}
+                onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={() => {}}
+                onEquitySubmit={(draft) => void schwabTrading.submit(draft, activeTab.id, activeTab.symbol.symbol)} />
+            </> : <div className={`equity-order-disabled ${activeSchwabOptionPositions.length ? "has-option-pnl" : ""}`}>
               {activeSchwabOptionPnl != null && <div className="schwab-option-pnl">
                 <span>Live option P&amp;L</span>
                 <strong className={activeSchwabOptionPnl >= 0 ? "positive" : "negative"}>{formatSignedUsd(activeSchwabOptionPnl)}</strong>
@@ -5153,8 +5193,8 @@ function TradingApp() {
               </div>}
               <span>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Schwab Index" : "Schwab"}</span><strong>Chart data only</strong><p>{activeTab.symbol.assetType.toUpperCase() === "INDEX" ? "Indexes are not tradable. Quotes, history, indicators, and live candles remain available." : "Equity trading is not enabled yet. Quotes, history, indicators, and live candles remain available."}</p>
             </div>
-            : <OrderTicket chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} rollStatus={activeRollStatus} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onUseNextContract={useNextActiveContract} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}</div>
-            : <div id="trade-management-mode-panel" role="tabpanel" aria-labelledby="trade-management-mode-tab"><TradeManagementPanel provider={activeTab.symbol.provider} tradeSymbol={activeTradeSymbol} minMove={activeTradeMeta?.minMove ?? activeTab.symbol.minMove} quote={activeTradeQuote} account={selectedAccount} environment={environment} positions={positions} orders={orders} riskBaselines={activeJournalRiskBaselines} autoBreakEvenRules={workspace.autoBreakEvenRules} autoTrailStopRules={workspace.autoTrailStopRules} trailStopSettings={workspace.settings.trailStop} trailStopTimeframes={trailStopTimeframes} trailBars={activeTrailBars} brokerageReady={!api.isNative || Boolean(selectedAccount && authenticated && positionsReadyScope === positionSnapshotScope(environment, selectedAccount.id) && ordersReadyScope === positionSnapshotScope(environment, selectedAccount.id) && !brokerageLoading && !brokerageError && !environmentTransitioning)} nativeTrading={api.isNative} busy={busy || environmentTransitioning} replacingOrderIds={replacingOrderIds} closingPositionIds={closingPositionIds} onReplaceOrder={replaceChartOrder} onCloseTrade={requestClosePosition} onArmAutoBreakEven={armAutoBreakEven} onUpdateAutoBreakEven={updateAutoBreakEvenThreshold} onDisableAutoBreakEven={disableAutoBreakEven} onArmAutoTrailStop={armAutoTrailStop} onDisableAutoTrailStop={disableAutoTrailStop} onTrailStopSettingsChange={updateTrailStopSettings} /></div>}
+            : <OrderTicket key={`tradestation:${selectedAccount?.id}`} chartSymbol={activeTab.symbol} tradeSymbol={activeTradeMeta} quote={activeTradeQuote} bars={bars} timeframe={activeTab.timeframe} settings={workspace.settings.orderTicket} contracts={activeContracts} tradeContract={activeTab.tradeContract} contractStatus={tradeContractStatus} contractLookupError={activeRoot ? contractLookupErrors[activeRoot] : undefined} rollStatus={activeRollStatus} account={selectedAccount} environment={environment} busy={busy || environmentTransitioning} confirmOrders={workspace.confirmOrders} entryEligibility={activeEntryEligibility} rulesConfigured={hasConfiguredEntryRules(workspace.entryRules)} orderProjection={activeOrderProjection} resetEpoch={activeOrderTicketResetEpoch} onTradeContractChange={(tradeContract) => updateActiveTab({ tradeContract })} onUseNextContract={useNextActiveContract} onSettingsChange={updateOrderTicketSettings} onConfirmOrdersChange={(confirmOrders) => updateWorkspace({ confirmOrders })} onProjectionChange={replaceOrderProjection} onSubmit={(draft) => submitOrder(draft, activeTab.id, activeTab.symbol.symbol)} />}</div>
+            : <div id="trade-management-mode-panel" role="tabpanel" aria-labelledby="trade-management-mode-tab">{activeTab.symbol.provider === "schwab" ? <div className="equity-order-disabled"><strong>Schwab equity management</strong><p>Drag active stop and target lines to replace linked orders. Use the position line to close, or the Orders table to cancel a bracket.</p>{schwabTrading.alerts}</div> : <TradeManagementPanel provider={activeTab.symbol.provider} tradeSymbol={activeTradeSymbol} minMove={activeTradeMeta?.minMove ?? activeTab.symbol.minMove} quote={activeTradeQuote} account={selectedAccount} environment={environment} positions={positions} orders={orders} riskBaselines={activeJournalRiskBaselines} autoBreakEvenRules={workspace.autoBreakEvenRules} autoTrailStopRules={workspace.autoTrailStopRules} trailStopSettings={workspace.settings.trailStop} trailStopTimeframes={trailStopTimeframes} trailBars={activeTrailBars} brokerageReady={!api.isNative || Boolean(selectedAccount && authenticated && positionsReadyScope === positionSnapshotScope(environment, selectedAccount.id) && ordersReadyScope === positionSnapshotScope(environment, selectedAccount.id) && !brokerageLoading && !brokerageError && !environmentTransitioning)} nativeTrading={api.isNative} busy={busy || environmentTransitioning} replacingOrderIds={replacingOrderIds} closingPositionIds={closingPositionIds} onReplaceOrder={replaceChartOrder} onCloseTrade={requestClosePosition} onArmAutoBreakEven={armAutoBreakEven} onUpdateAutoBreakEven={updateAutoBreakEvenThreshold} onDisableAutoBreakEven={disableAutoBreakEven} onArmAutoTrailStop={armAutoTrailStop} onDisableAutoTrailStop={disableAutoTrailStop} onTrailStopSettingsChange={updateTrailStopSettings} />}</div>}
         </div>}
       </aside>}
 
@@ -5973,268 +6013,6 @@ function TradeManagementPanel({ provider, tradeSymbol, minMove, quote, account, 
   </div>;
 }
 
-function OrderTicket({ chartSymbol, tradeSymbol, quote, bars, timeframe, settings, contracts, tradeContract, contractStatus, contractLookupError, rollStatus, account, environment, busy, confirmOrders, entryEligibility, rulesConfigured, orderProjection, resetEpoch, onTradeContractChange, onUseNextContract, onSettingsChange, onConfirmOrdersChange, onProjectionChange, onSubmit }: { chartSymbol: SymbolMeta; tradeSymbol?: SymbolMeta; quote: Quote; bars: Bar[]; timeframe: Timeframe; settings: OrderTicketSettings; contracts: SymbolMeta[]; tradeContract?: string; contractStatus?: string; contractLookupError?: string; rollStatus?: ContractRollStatus; account?: Account; environment: TradingEnvironment; busy: boolean; confirmOrders: boolean; entryEligibility: Record<EntryRuleSide, EntryRuleResult>; rulesConfigured: boolean; orderProjection?: OrderProjection; resetEpoch: number; onTradeContractChange: (symbol?: string) => void; onUseNextContract: () => void; onSettingsChange: (patch: Partial<OrderTicketSettings>) => void; onConfirmOrdersChange: (enabled: boolean) => void; onProjectionChange: (projection: OrderProjection) => void; onSubmit: (draft: OrderDraft) => void }) {
-  const symbol = tradeSymbol ?? chartSymbol;
-  const continuous = isContinuousFuture(chartSymbol);
-  const [side, setSide] = useState<"Buy" | "Sell">("Buy");
-  const [quantity, setQuantity] = useState(1);
-  const [riskInput, setRiskInput] = useState(settings.riskAmount == null ? "" : String(settings.riskAmount));
-  const [takeProfit, setTakeProfit] = useState("");
-  const [stopLoss, setStopLoss] = useState("");
-  const [rMenuOpen, setRMenuOpen] = useState(false);
-  const ticketSymbolRef = useRef(symbol.symbol);
-  const handledResetRef = useRef(`${symbol.symbol}:${resetEpoch}`);
-  const rSelectorRef = useRef<HTMLDivElement>(null);
-  const rMenuRef = useRef<HTMLDivElement>(null);
-  const rButtonRef = useRef<HTMLButtonElement>(null);
-  const riskInputFocusedRef = useRef(false);
-  const selectedR = orderProjection?.rMultiple;
-
-  const projectionPrice = (value: string) => {
-    if (!value.trim()) return undefined;
-    const price = Number(value);
-    return Number.isFinite(price) && price > 0 ? price : undefined;
-  };
-  const parsedRiskAmount = riskInput.trim() === "" ? undefined : Number(riskInput);
-  const riskAmount = parsedRiskAmount != null && Number.isFinite(parsedRiskAmount) && parsedRiskAmount > 0 ? parsedRiskAmount : undefined;
-  const takeProfitPrice = Number(takeProfit);
-  const stopLossPrice = Number(stopLoss);
-  const entryPrice = side === "Buy" ? quote.ask : quote.bid;
-  const tickValue = symbol.minMove * symbol.pointValue;
-  const minimumRiskQuantity = settings.riskSizingPolicy === "minimum-one" ? 1 : 0;
-  function resolvedQuantity(nextSide = side, nextStopLoss = stopLoss, mode = settings.sizingMode, nextRiskAmount = riskAmount) {
-    if (mode === "contracts") return quantity;
-    const nextEntryPrice = nextSide === "Buy" ? quote.ask : quote.bid;
-    return calculateContractsForRisk(nextRiskAmount, nextEntryPrice, Number(nextStopLoss), nextSide, symbol.minMove, tickValue, minimumRiskQuantity) ?? 0;
-  }
-
-  const strictRiskQuantity = calculateContractsForRisk(riskAmount, entryPrice, stopLossPrice, side, symbol.minMove, tickValue);
-  const calculatedRiskQuantity = minimumRiskQuantity === 0
-    ? strictRiskQuantity
-    : calculateContractsForRisk(riskAmount, entryPrice, stopLossPrice, side, symbol.minMove, tickValue, minimumRiskQuantity);
-  const riskQuantity = calculatedRiskQuantity ?? 0;
-  const effectiveQuantity = settings.sizingMode === "risk" ? riskQuantity : quantity;
-  const publishProjection = (nextTakeProfit: string, nextStopLoss: string, nextSide = side, nextQuantity = resolvedQuantity(nextSide, nextStopLoss), nextR: OrderRMultiple | null = selectedR ?? null) => onProjectionChange({
-    takeProfit: projectionPrice(nextTakeProfit),
-    stopLoss: projectionPrice(nextStopLoss),
-    side: nextSide,
-    quantity: nextQuantity,
-    rMultiple: nextR ?? undefined,
-  });
-
-  useEffect(() => {
-    if (ticketSymbolRef.current === symbol.symbol) return;
-    ticketSymbolRef.current = symbol.symbol;
-    setTakeProfit("");
-    setStopLoss("");
-    setRMenuOpen(false);
-    onProjectionChange({});
-  }, [symbol.symbol]);
-
-  useEffect(() => {
-    const resetKey = `${symbol.symbol}:${resetEpoch}`;
-    if (handledResetRef.current === resetKey) return;
-    handledResetRef.current = resetKey;
-    if (resetEpoch <= 0) return;
-    setTakeProfit("");
-    setStopLoss("");
-    setRMenuOpen(false);
-    onProjectionChange({});
-  }, [symbol.symbol, side, resetEpoch]);
-
-  useEffect(() => {
-    if (riskInputFocusedRef.current) return;
-    setRiskInput(settings.riskAmount == null ? "" : String(settings.riskAmount));
-  }, [settings.riskAmount]);
-
-  useEffect(() => {
-    if (orderProjection?.takeProfit != null && orderProjection.takeProfit !== projectionPrice(takeProfit)) {
-      setTakeProfit(String(orderProjection.takeProfit));
-    }
-    if (orderProjection?.stopLoss != null && orderProjection.stopLoss !== projectionPrice(stopLoss)) {
-      setStopLoss(String(orderProjection.stopLoss));
-    }
-  }, [orderProjection?.takeProfit, orderProjection?.stopLoss]);
-
-  useEffect(() => {
-    if (!orderProjection || orderProjection.quantity === effectiveQuantity) return;
-    onProjectionChange({
-      takeProfit: orderProjection.takeProfit,
-      stopLoss: orderProjection.stopLoss,
-      side: orderProjection.side,
-      quantity: effectiveQuantity,
-      rMultiple: orderProjection.rMultiple,
-    });
-  }, [effectiveQuantity, orderProjection?.quantity]);
-
-  const swingStopPrice = calculateSwingStop({
-    bars,
-    side,
-    entryPrice,
-    minMove: symbol.minMove,
-    pivotBars: settings.swingStopPivotBars,
-    offsetTicks: settings.swingStopOffsetTicks,
-  });
-  const takeProfitValid = takeProfit.trim() !== "" && takeProfitPrice > 0 && validateTick(takeProfitPrice, symbol.minMove)
-    && (side === "Buy" ? takeProfitPrice > entryPrice : takeProfitPrice < entryPrice);
-  const stopLossValid = stopLoss.trim() !== "" && stopLossPrice > 0 && validateTick(stopLossPrice, symbol.minMove)
-    && (side === "Buy" ? stopLossPrice < entryPrice : stopLossPrice > entryPrice);
-  const rSelectorEnabled = stopLossValid && Number.isFinite(entryPrice) && entryPrice > 0;
-
-  useEffect(() => {
-    if (!rMenuOpen) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (isTargetOutside<Node>(rSelectorRef.current, event.target as Node)) setRMenuOpen(false);
-    };
-    const onFocusIn = (event: FocusEvent) => {
-      if (isTargetOutside<Node>(rSelectorRef.current, event.target as Node)) setRMenuOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setRMenuOpen(false);
-      rButtonRef.current?.focus();
-    };
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("focusin", onFocusIn);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("focusin", onFocusIn);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [rMenuOpen]);
-
-  useEffect(() => {
-    if (!rMenuOpen) return;
-    const frame = requestAnimationFrame(() => {
-      const selected = rMenuRef.current?.querySelector<HTMLButtonElement>('[aria-checked="true"]');
-      (selected ?? rMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"]'))?.focus();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [rMenuOpen]);
-
-  useEffect(() => {
-    if (rSelectorEnabled) return;
-    setRMenuOpen(false);
-  }, [rSelectorEnabled]);
-
-  useEffect(() => {
-    if (selectedR == null) setRMenuOpen(false);
-  }, [selectedR]);
-
-  const selectRMultiple = (rMultiple: OrderRMultiple) => {
-    const target = calculateTakeProfitAtR(entryPrice, stopLossPrice, side, rMultiple, symbol.minMove);
-    if (target == null) return;
-    const nextTakeProfit = String(target);
-    setRMenuOpen(false);
-    setTakeProfit(nextTakeProfit);
-    publishProjection(nextTakeProfit, stopLoss, side, effectiveQuantity, rMultiple);
-  };
-
-  const handleRMenuKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
-    if (!items.length) return;
-    event.preventDefault();
-    const currentIndex = items.indexOf(document.activeElement as HTMLButtonElement);
-    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
-      : event.key === "ArrowDown" ? (currentIndex + 1 + items.length) % items.length
-        : (currentIndex - 1 + items.length) % items.length;
-    items[nextIndex].focus();
-  };
-
-  const updateProjectedStop = (value: string) => {
-    setStopLoss(value);
-    const nextStopLoss = Number(value);
-    const target = selectedR == null ? null : calculateTakeProfitAtR(entryPrice, nextStopLoss, side, selectedR, symbol.minMove);
-    if (target == null) {
-      publishProjection(takeProfit, value);
-      return;
-    }
-    const nextTakeProfit = String(target);
-    setTakeProfit(nextTakeProfit);
-    publishProjection(nextTakeProfit, value);
-  };
-
-  const clearTakeProfit = () => {
-    setRMenuOpen(false);
-    setTakeProfit("");
-    publishProjection("", stopLoss, side, effectiveQuantity, null);
-  };
-
-  const clearStopLoss = () => updateProjectedStop("");
-
-  function draft(): OrderDraft {
-    return { accountId: account?.id ?? "", symbol: tradeSymbol?.symbol ?? "", side, type: "Market", quantity: effectiveQuantity, duration: settings.timeInForce, takeProfit: takeProfitPrice, stopLoss: stopLossPrice };
-  }
-
-  const marketUnavailable = !tradeSymbol || quote.last <= 0 || quote.halted || quote.delayed || !quote.receivedAt || Date.now() - quote.receivedAt > 5_000;
-  const perContractRisk = stopLossValid ? estimateOrderRisk(entryPrice, stopLossPrice, side, 1, symbol.minMove, tickValue) : null;
-  const estimatedRisk = stopLossValid && effectiveQuantity > 0 ? estimateOrderRisk(entryPrice, stopLossPrice, side, effectiveQuantity, symbol.minMove, tickValue) : null;
-  const riskExceedsBudget = settings.sizingMode === "risk" && strictRiskQuantity === 0 && calculatedRiskQuantity === 1;
-  const selectedEligibility = entryEligibility[side === "Buy" ? "long" : "short"];
-  const orderDisabled = busy || !account || Boolean(contractStatus) || marketUnavailable || effectiveQuantity < 1 || !takeProfitValid || !stopLossValid || estimatedRisk == null || !selectedEligibility.allowed;
-  const orderLabel = contractStatus ?? (marketUnavailable ? "Contract market data unavailable"
-    : !selectedEligibility.allowed ? `${side === "Buy" ? "Long" : "Short"} entry blocked`
-    : `${confirmOrders ? "Review" : "Place"} ${side} market order`);
-  const manualMissing = tradeContract && !contracts.some((contract) => contract.symbol === tradeContract);
-  const riskSizingStatus = riskInput.trim() === "" ? "Enter risk amount"
-    : riskAmount == null ? "Enter a positive amount"
-    : !stopLoss.trim() ? "Set stop loss"
-    : !Number.isFinite(entryPrice) || entryPrice <= 0 ? "Waiting for live price"
-    : !stopLossValid ? `Stop must be ${side === "Buy" ? "below ask" : "above bid"}`
-    : calculatedRiskQuantity == null ? "Unable to calculate"
-    : calculatedRiskQuantity === 0 && perContractRisk != null ? `1 contract risks $${perContractRisk.toFixed(2)}`
-    : riskExceedsBudget && estimatedRisk != null ? `1 contract · $${estimatedRisk.toFixed(2)} risk`
-    : `${calculatedRiskQuantity} contract${calculatedRiskQuantity === 1 ? "" : "s"}`;
-  const selectSizingMode = (sizingMode: OrderTicketSettings["sizingMode"]) => {
-    if (sizingMode === settings.sizingMode) return;
-    onSettingsChange({ sizingMode });
-    publishProjection(takeProfit, stopLoss, side, resolvedQuantity(side, stopLoss, sizingMode));
-  };
-  const updateRiskAmount = (value: string) => {
-    setRiskInput(value);
-    const parsed = value.trim() === "" ? undefined : Number(value);
-    const nextRiskAmount = parsed != null && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-    onSettingsChange({ riskAmount: nextRiskAmount });
-    if (settings.sizingMode === "risk") {
-      publishProjection(takeProfit, stopLoss, side, resolvedQuantity(side, stopLoss, "risk", nextRiskAmount));
-    }
-  };
-  return <div className="order-ticket">
-    <div className="account-line"><span>{account?.displayId ?? "No account"}</span><span className={environment}>{environment.toUpperCase()}</span></div>
-    {continuous && <label className="trade-contract-field"><span><strong>Trade contract</strong><small>Chart {chartSymbol.symbol}</small></span><select aria-label="Trade contract" value={tradeContract ?? "__auto__"} onChange={(event) => onTradeContractChange(event.target.value === "__auto__" ? undefined : event.target.value)}><option value="__auto__">Auto · {chartSymbol.underlying ?? "Unavailable"}</option>{manualMissing && <option value={tradeContract}>{tradeContract} · Saved selection</option>}{contracts.map((contract) => <option key={contract.symbol} value={contract.symbol}>{contract.symbol} · {formatContractExpiration(contract.expiration)}</option>)}</select>{contractStatus && <small className="negative">{contractStatus}</small>}{!contractStatus && contractLookupError && <small className="negative">Contract list unavailable; the current selection is unchanged.</small>}</label>}
-    {rollStatus && rollStatus.phase !== "clear" && <div className={`contract-roll-warning ${rollStatus.phase}`} role={rollStatus.phase === "roll-due" ? "alert" : "status"}>
-      <CalendarDays size={15} />
-      <span>
-        <strong>{rollStatus.phase === "roll-due" ? "Contract roll date reached" : `Roll in ${rollStatus.sessionsUntilRoll} session${rollStatus.sessionsUntilRoll === 1 ? "" : "s"}`}</strong>
-        <small>{rollStatus.phase === "roll-due"
-          ? `${rollStatus.symbol} is no longer the customary lead month as of ${formatRollDate(rollStatus.rollDate)}.`
-          : `${rollStatus.symbol} rolls ${formatRollDate(rollStatus.rollDate)}.${rollStatus.nextContract ? ` Next: ${rollStatus.nextContract.symbol}.` : ""}`}</small>
-      </span>
-      {rollStatus.nextContract && <button type="button" onClick={onUseNextContract}>{continuous ? "Trade" : "Switch chart"} {rollStatus.nextContract.symbol}</button>}
-    </div>}
-    <div className="market-buttons"><button className={side === "Sell" ? "selected" : ""} onClick={() => { setSide("Sell"); publishProjection(takeProfit, stopLoss, "Sell"); }}><small>SELL</small><strong>{quote.bid.toFixed(2)}</strong></button><div><span>{(quote.ask - quote.bid).toFixed(2)}</span></div><button className={side === "Buy" ? "selected" : ""} onClick={() => { setSide("Buy"); publishProjection(takeProfit, stopLoss, "Buy"); }}><small>BUY</small><strong>{quote.ask.toFixed(2)}</strong></button></div>
-    <div className="field compact sizing-field">
-      <div className="sizing-mode" role="group" aria-label="Position sizing method">
-        <button type="button" className={settings.sizingMode === "contracts" ? "active" : ""} aria-pressed={settings.sizingMode === "contracts"} onClick={() => selectSizingMode("contracts")}>Contracts</button>
-        <button type="button" className={settings.sizingMode === "risk" ? "active" : ""} aria-pressed={settings.sizingMode === "risk"} onClick={() => selectSizingMode("risk")}>Risk $</button>
-      </div>
-      {settings.sizingMode === "contracts"
-        ? <div className="stepper"><button type="button" aria-label="Decrease contracts" onClick={() => { const next = Math.max(1, quantity - 1); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Minus size={14} /></button><input aria-label="Contracts" type="number" min="1" step="1" value={quantity} onChange={(event) => { const next = Math.max(1, Math.floor(Number(event.target.value) || 1)); setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }} /><button type="button" aria-label="Increase contracts" onClick={() => { const next = quantity + 1; setQuantity(next); publishProjection(takeProfit, stopLoss, side, next); }}><Plus size={14} /></button></div>
-        : <div className="risk-sizing-control"><label><span>$</span><input aria-label="Risk amount in dollars" type="number" min="0.01" step="0.01" inputMode="decimal" placeholder="0.00" value={riskInput} onFocus={() => { riskInputFocusedRef.current = true; }} onBlur={() => { riskInputFocusedRef.current = false; setRiskInput(riskAmount == null ? "" : String(riskAmount)); }} onChange={(event) => updateRiskAmount(event.target.value)} /></label><output className={riskExceedsBudget ? "over-risk" : calculatedRiskQuantity === 0 ? "insufficient" : ""} aria-live="polite">{riskSizingStatus}</output></div>}
-    </div>
-    <div className="section-label"><span>Exits</span><small>Server-side bracket</small></div>
-    <div className="field compact"><span>Take profit price</span><div className="take-profit-control"><input aria-label="Take profit price" className={takeProfitValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={takeProfit} onChange={(event) => { const value = event.target.value; setRMenuOpen(false); setTakeProfit(value); publishProjection(value, stopLoss, side, effectiveQuantity, null); }} /><button type="button" className={`exit-price-clear ${takeProfit.trim() ? "visible" : ""}`} aria-label="Clear take profit price" title="Clear take profit price" disabled={!takeProfit.trim()} onClick={clearTakeProfit}><X size={10} /></button><div ref={rSelectorRef} className="r-selector"><button ref={rButtonRef} type="button" className={selectedR == null ? "r-selector-button" : "r-selector-button active"} aria-label="Set take profit by risk multiple" aria-haspopup="menu" aria-expanded={rMenuOpen} aria-controls="r-multiple-menu" disabled={!rSelectorEnabled} onClick={() => setRMenuOpen((open) => !open)} onKeyDown={(event) => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setRMenuOpen(true); } }}>{selectedR == null ? "R" : `${selectedR}R`}<ChevronDown size={11} /></button>{rMenuOpen && <div ref={rMenuRef} id="r-multiple-menu" className="r-multiple-menu" role="menu" aria-label="Take profit risk multiple" onKeyDown={handleRMenuKeyDown}>{orderRMultiples.map((rMultiple) => <button key={rMultiple} type="button" role="menuitemradio" aria-checked={selectedR === rMultiple} className={selectedR === rMultiple ? "selected" : ""} onClick={() => selectRMultiple(rMultiple)}>{rMultiple}R</button>)}</div>}</div></div></div>
-    <div className="field compact"><span>Stop loss price</span><div className="stop-loss-control"><input aria-label="Stop loss price" className={stopLossValid ? "" : "invalid"} type="number" min={symbol.minMove} step={symbol.minMove} value={stopLoss} onChange={(event) => updateProjectedStop(event.target.value)} /><button type="button" className={`exit-price-clear ${stopLoss.trim() ? "visible" : ""}`} aria-label="Clear stop loss price" title="Clear stop loss price" disabled={!stopLoss.trim()} onClick={clearStopLoss}><X size={10} /></button><button type="button" disabled={swingStopPrice == null} aria-label={`Set stop ${side === "Buy" ? "below the latest swing low" : "above the latest swing high"}`} title={swingStopPrice == null ? `No confirmed ${settings.swingStopPivotBars}-bar swing is available on the ${timeframe} chart` : `Set ${settings.swingStopOffsetTicks} tick${settings.swingStopOffsetTicks === 1 ? "" : "s"} beyond the latest confirmed ${timeframe} swing`} onClick={() => { if (swingStopPrice != null) updateProjectedStop(String(swingStopPrice)); }}>Swing</button></div></div>
-    <div className="section-label"><span>Time in force</span></div>
-    <select value={settings.timeInForce} onChange={(event) => onSettingsChange({ timeInForce: event.target.value as OrderTicketSettings["timeInForce"] })}><option value="DAY">DAY</option><option value="GTC">GTC</option></select>
-    <dl className="ticket-info"><div><dt>Tick value</dt><dd>{tickValue.toFixed(2)} USD</dd></div><div><dt>Data</dt><dd className={quote.delayed ? "negative" : "positive"}>{quote.delayed ? "Delayed" : "Real-time"}</dd></div><div><dt>Estimated risk</dt><dd className={estimatedRisk == null ? "" : "negative"}>{estimatedRisk == null ? "—" : `${estimatedRisk.toFixed(2)} USD`}</dd></div></dl>
-    {rulesConfigured && <div className={`ticket-rule-status ${selectedEligibility.status}`}><span /> <strong>{side === "Buy" ? "Long" : "Short"} entry</strong><small>{selectedEligibility.reason}</small></div>}
-    <label className="confirm-orders-toggle"><input type="checkbox" checked={confirmOrders} onChange={(event) => onConfirmOrdersChange(event.target.checked)} /><span><strong>Confirm orders</strong><small>Review buy, sell, and close actions</small></span></label>
-    <button className={side === "Buy" ? "buy-button" : "sell-button"} disabled={orderDisabled} onClick={() => onSubmit(draft())}>{orderLabel}</button>
-  </div>;
-}
 
 function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange, accounts, account, positions, positionRollStatuses, orders, balances, bodBalances, history, setHistory, loading, error, streamState, notifications, closingPositionIds, onClosePosition, onNotify, onCancel, schwabAccounts, schwabAccount, schwabPositions, schwabOrders, schwabBalances, schwabBodBalances, schwabHistory, setSchwabHistory, schwabLoading, schwabError, schwabStreamState }: {
   workspace: WorkspaceState; updateWorkspace: (patch: Partial<WorkspaceState>) => void; maximized: boolean; onMaximizedChange: (maximized: boolean) => void; accounts: Account[]; account?: Account; positions: Position[]; positionRollStatuses: Record<string, ContractRollStatus>; orders: OrderUpdate[]; balances: AccountBalance[]; bodBalances: AccountBalance[]; history: HistoricalOrderPage; setHistory: React.Dispatch<React.SetStateAction<HistoricalOrderPage>>; loading: boolean; error?: string; streamState: StreamConnectionState; notifications: ActivityNotification[]; closingPositionIds: Set<string>; onClosePosition: (position: Position) => void; onNotify: (item: ActivityNotification) => void; onCancel: (id: string) => void;
@@ -6338,7 +6116,7 @@ function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange,
     const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); link.download = `${activeAccount?.displayId ?? "account"}-${workspace.bottomTab}.csv`; link.click(); URL.revokeObjectURL(link.href);
   };
   const Empty = ({ label }: { label: string }) => <div className="empty-table"><BookOpen size={20} /><span>{label}</span></div>;
-  const OrderTable = ({ rows, readOnly = false }: { rows: OrderUpdate[]; readOnly?: boolean }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Strategy</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong title={o.symbol}>{readableBrokerOrderSymbol(o)}</strong>{o.assetType && <small className="asset-tag">{o.assetType}</small>}</td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{o.groupName ?? "—"}</td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{!readOnly && o.status === "Working" && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
+  const OrderTable = ({ rows, readOnly = false }: { rows: OrderUpdate[]; readOnly?: boolean }) => rows.length ? <table><thead><tr><th>Symbol</th><th>Side</th><th>Type</th><th>Quantity</th><th>Filled quantity</th><th>Limit price</th><th>Stop price</th><th>Avg fill price</th><th>Take profit</th><th>Stop loss</th><th>Status</th><th>Strategy</th><th>Open time</th><th>Close time</th><th>Duration</th><th /></tr></thead><tbody>{rows.map((o) => <tr key={o.id}><td><strong title={o.symbol}>{readableBrokerOrderSymbol(o)}</strong>{o.assetType && <small className="asset-tag">{o.assetType}</small>}</td><td className={o.side === "Buy" ? "buy-text" : "negative"}>{o.side}</td><td>{o.type}</td><td>{o.quantity}</td><td>{o.filledQuantity ?? "—"}</td><td>{money(o.price)}</td><td>{money(o.stopPrice)}</td><td>{money(o.averageFillPrice)}</td><td>{money(o.takeProfit)}</td><td>{money(o.stopLoss)}</td><td><span className={`order-status ${o.status.toLowerCase()}`}>{o.status}</span></td><td>{o.groupName ?? "—"}</td><td>{time(o.timestamp)}</td><td>{time(o.closedAt)}</td><td>{o.duration ?? "—"}</td><td>{(!readOnly || (o.provider === "schwab" && isEquity(o.assetType) && o.schwab?.cancelable)) && ["Working", "Pending"].includes(o.status) && <button onClick={() => onCancel(o.id)}>Cancel</button>}</td></tr>)}</tbody></table> : <Empty label="There is no trading data here yet" />;
   const pnl = positionPnlTotal;
   const combinedPositions = [...positions.map((position) => ({ ...position, provider: "tradestation" as const, accountId: account?.displayId })), ...schwabPositions.map((position) => ({ ...position, provider: "schwab" as const, accountId: schwabAccount?.displayId }))];
   const tsToday = balances[0]?.todaysProfitLoss;
@@ -6358,7 +6136,7 @@ function BottomPanel({ workspace, updateWorkspace, maximized, onMaximizedChange,
     {workspace.bottomPanelOpen && workspace.bottomBrokerPanel !== "combined" && <><div className="account-summary"><select value={activeAccount?.id ?? ""} onChange={(event) => updateWorkspace(schwabPanel ? { selectedSchwabAccountId: event.target.value } : { selectedAccountId: event.target.value })}>{(schwabPanel ? schwabAccounts : accounts).map((item) => <option key={item.id} value={item.id}>{item.displayId} {item.currency}</option>)}</select><dl><div><dt>Net worth</dt><dd>{money(balance?.equity)}</dd></div><div><dt>Today’s profit</dt><dd>{money(schwabPanel ? pnl(schwabPositions, "currentDayPnl") : balance?.todaysProfitLoss)}</dd></div><div><dt>Unrealized P&amp;L</dt><dd>{money(balance?.unrealizedProfitLoss ?? pnl(activePositions, "unrealizedPnl"))}</dd></div></dl></div>
     <nav className="bottom-tabs">{tabs.map(([tab, label]) => <button key={tab} className={workspace.bottomTab === tab ? "active" : ""} onClick={() => updateWorkspace({ bottomTab: tab })}>{label}</button>)}<button className="export-button" title="Export active tab to CSV" onClick={exportRows}><Download size={16} /></button></nav>
     <div className="table-wrap">{activeError && <div className="panel-error">{activeError}</div>}
-      {workspace.bottomTab === "positions" && (activePositions.length ? <table><thead><tr><th>Symbol</th><th>Asset</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Stop loss</th><th>Take profit</th><th>Last price</th><th>Bid price</th><th>Ask price</th><th>Unrealized P&amp;L</th><th>Today P&amp;L</th><th>P&amp;L quantity</th><th>P&amp;L percent</th><th /></tr></thead><tbody>{activePositions.map((p) => { const closing = closingPositionIds.has(p.id); const roll = !schwabPanel ? positionRollStatuses[p.symbol.trim().toUpperCase()] : undefined; return <tr key={p.id}><td><span className="position-symbol"><strong>{p.assetType?.includes("OPTION") ? `${p.underlying} ${p.expirationDate?.slice(5)} ${money(p.strikePrice)} ${p.putCall?.slice(0, 1)}` : p.symbol}</strong>{roll && <small className={`contract-roll-badge ${roll.phase}`}>{roll.phase === "roll-due" ? "ROLL DUE" : `${roll.sessionsUntilRoll}D`}</small>}</span></td><td>{p.assetType ?? (schwabPanel ? "Security" : "Future")}</td><td className={p.side === "Long" ? "buy-text" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{money(p.averagePrice)}</td><td>—</td><td>—</td><td>{money(p.last)}</td><td>{money(p.bid)}</td><td>{money(p.ask)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(p.unrealizedPnl)}</td><td className={(p.currentDayPnl ?? 0) >= 0 ? "positive" : "negative"}>{money(p.currentDayPnl)}</td><td>{money(p.unrealizedPnlQuantity)}</td><td>{p.unrealizedPnlPercent == null ? "—" : `${p.unrealizedPnlPercent.toFixed(2)}%`}</td><td>{!schwabPanel && <button className="close-position-button" disabled={closing} onClick={() => onClosePosition(p)}><X size={12} />{closing ? "Closing…" : "Close Position"}</button>}</td></tr>; })}</tbody></table> : <Empty label="There are no open positions in this account" />)}
+      {workspace.bottomTab === "positions" && (activePositions.length ? <table><thead><tr><th>Symbol</th><th>Asset</th><th>Side</th><th>Quantity</th><th>Avg price</th><th>Stop loss</th><th>Take profit</th><th>Last price</th><th>Bid price</th><th>Ask price</th><th>Unrealized P&amp;L</th><th>Today P&amp;L</th><th>P&amp;L quantity</th><th>P&amp;L percent</th><th /></tr></thead><tbody>{activePositions.map((p) => { const closing = closingPositionIds.has(p.id); const roll = !schwabPanel ? positionRollStatuses[p.symbol.trim().toUpperCase()] : undefined; return <tr key={p.id}><td><span className="position-symbol"><strong>{p.assetType?.includes("OPTION") ? `${p.underlying} ${p.expirationDate?.slice(5)} ${money(p.strikePrice)} ${p.putCall?.slice(0, 1)}` : p.symbol}</strong>{roll && <small className={`contract-roll-badge ${roll.phase}`}>{roll.phase === "roll-due" ? "ROLL DUE" : `${roll.sessionsUntilRoll}D`}</small>}</span></td><td>{p.assetType ?? (schwabPanel ? "Security" : "Future")}</td><td className={p.side === "Long" ? "buy-text" : "negative"}>{p.side}</td><td>{p.quantity}</td><td>{money(p.averagePrice)}</td><td>—</td><td>—</td><td>{money(p.last)}</td><td>{money(p.bid)}</td><td>{money(p.ask)}</td><td className={p.unrealizedPnl >= 0 ? "positive" : "negative"}>{money(p.unrealizedPnl)}</td><td className={(p.currentDayPnl ?? 0) >= 0 ? "positive" : "negative"}>{money(p.currentDayPnl)}</td><td>{money(p.unrealizedPnlQuantity)}</td><td>{p.unrealizedPnlPercent == null ? "—" : `${p.unrealizedPnlPercent.toFixed(2)}%`}</td><td>{(!schwabPanel || isEquity(p.assetType)) && <button className="close-position-button" disabled={closing} onClick={() => onClosePosition(p)}><X size={12} />{closing ? "Closing…" : "Close Position"}</button>}</td></tr>; })}</tbody></table> : <Empty label="There are no open positions in this account" />)}
       {workspace.bottomTab === "orders" && <><div className="table-filters">{["All", "Working", "Inactive", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={orderFilter === filter ? "active" : ""} onClick={() => setOrderFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleOrders} readOnly={schwabPanel} /></>}
       {workspace.bottomTab === "history" && <><div className="history-controls"><label>From <input type="date" value={since} max={until} onChange={(e) => setSince(e.target.value)} /></label><label>To <input type="date" value={until} min={since} onChange={(e) => setUntil(e.target.value)} /></label>{["All", "Filled", "Cancelled", "Rejected"].map((filter) => <button key={filter} className={historyFilter === filter ? "active" : ""} onClick={() => setHistoryFilter(filter)}>{filter}</button>)}</div><OrderTable rows={visibleHistory} readOnly={schwabPanel} />{activeHistory.nextToken && <button className="load-more" disabled={historyLoading} onClick={() => loadHistory(true)}>{historyLoading ? "Loading…" : "Load more"}</button>}</>}
       {workspace.bottomTab === "summary" && <div className="balance-sections"><BalanceSection title="Real-time" balance={balance} money={money} /><BalanceSection title="Beginning of day" balance={bod} money={money} /></div>}

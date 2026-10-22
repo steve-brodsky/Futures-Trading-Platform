@@ -58,16 +58,187 @@ struct UserPreference {
 
 #[derive(Clone)]
 pub struct Schwab {
+    #[cfg(test)]
+    trading_base: Option<String>,
     http: reqwest::Client,
     access_token: Arc<RwLock<Option<AccessToken>>>,
     refresh_lock: Arc<Mutex<()>>,
     audit: Option<AuditService>,
     account_numbers: Arc<RwLock<HashMap<String, String>>>,
+    open_order_cache: Arc<Mutex<HashMap<String, (std::time::Instant, Vec<OrderUpdate>)>>>,
 }
 
 impl Schwab {
+    fn trading_base(&self) -> &str {
+        #[cfg(test)]
+        if let Some(base) = &self.trading_base {
+            return base;
+        }
+        TRADER_URL
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_client(base: String) -> Self {
+        let mut client = Self::new().unwrap();
+        client.trading_base = Some(base);
+        *client.access_token.write().await = Some(AccessToken {
+            value: "fixture-token".into(),
+            expires_at: Utc::now().timestamp_millis() + 3_600_000,
+        });
+        client
+    }
+    /// Trading writes are never retried after transport/server failures. A definitive
+    /// 401 is the only safe authentication retry; all uncertain writes reconcile.
+    pub(crate) async fn trading_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        payload: Option<&Value>,
+    ) -> Result<(Value, Option<String>), AppError> {
+        let mut token = self.access_token(false).await?;
+        for attempt in 0..2 {
+            let mut request = self
+                .http
+                .request(method.clone(), format!("{}{path}", self.trading_base()))
+                .bearer_auth(&token)
+                .header("Accept", "application/json");
+            if let Some(payload) = payload {
+                request = request.json(payload);
+            }
+            let span = self.audit.as_ref().map(|audit| {
+                audit.begin_api(
+                    "schwab",
+                    "equity-trading",
+                    method.as_str(),
+                    &format!("{TRADER_URL}/[redacted]"),
+                    None,
+                    None,
+                )
+            });
+            let response = request.send().await.map_err(|_| {
+                AppError::AmbiguousBrokerOutcome(
+                    "Schwab request interrupted; reconcile before retrying".into(),
+                )
+            })?;
+            if response.status() == StatusCode::UNAUTHORIZED && attempt == 0 {
+                if let Some(span) = span {
+                    span.warning(Some(401), None, "Access token expired");
+                }
+                token = self.access_token(true).await?;
+                continue;
+            }
+            let status = response.status();
+            if status.is_success()
+                && method != reqwest::Method::GET
+                && !path.ends_with("/previewOrder")
+            {
+                self.open_order_cache.lock().await.clear();
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let body = response.text().await.map_err(|_| {
+                AppError::AmbiguousBrokerOutcome("Schwab response interrupted".into())
+            })?;
+            if !status.is_success() {
+                if let Some(span) = span {
+                    span.error(Some(status.as_u16()), "Schwab trading response redacted");
+                }
+                let value: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let message = value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Schwab rejected the request");
+                // Broker messages are shown to the user, never recorded with account payloads.
+                return Err(
+                    if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT {
+                        AppError::AmbiguousBrokerOutcome(format!(
+                            "Schwab response {status}; reconcile before retrying"
+                        ))
+                    } else {
+                        AppError::BrokerRejected(format!("{} ({status})", truncate(message)))
+                    },
+                );
+            }
+            if let Some(span) = span {
+                span.success(
+                    Some(status.as_u16()),
+                    Some(serde_json::json!({"redacted":true})),
+                );
+            }
+            return Ok((
+                if body.trim().is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_str(&body).map_err(|_| {
+                        AppError::AmbiguousBrokerOutcome("Invalid Schwab trading response".into())
+                    })?
+                },
+                location,
+            ));
+        }
+        Err(AppError::AuthenticationRequired)
+    }
+
+    pub(crate) async fn equity_market_hours(&self) -> Result<Value, AppError> {
+        let date = Utc::now()
+            .with_timezone(&chrono_tz::America::New_York)
+            .date_naive();
+        self.get_json(&format!("{MARKET_URL}/markets/equity?date={date}"))
+            .await
+    }
+
+    pub(crate) async fn equity_order(&self, account: &str, id: &str) -> Result<Value, AppError> {
+        if !id.chars().all(|c| c.is_ascii_digit()) || id.is_empty() {
+            return Err(AppError::Validation(
+                "Invalid Schwab broker order ID".into(),
+            ));
+        }
+        self.trading_request(
+            reqwest::Method::GET,
+            &format!("/accounts/{account}/orders/{id}"),
+            None,
+        )
+        .await
+        .map(|(value, _)| value)
+    }
+
+    pub(crate) async fn open_equity_orders(
+        &self,
+        account: &str,
+    ) -> Result<Vec<OrderUpdate>, AppError> {
+        // API order queries allow at most a year. Split windows to avoid the 3,000
+        // result cap; include GTC orders entered before today's session.
+        let mut cache = self.open_order_cache.lock().await;
+        if let Some((time, rows)) = cache.get(account) {
+            if time.elapsed().as_secs() < 60 {
+                return Ok(rows.clone());
+            }
+        }
+        let now = Utc::now();
+        let mut rows = Vec::new();
+        for day in (0..360).step_by(30) {
+            let from = (now - chrono::Duration::days(day + 30)).to_rfc3339();
+            let to = (now - chrono::Duration::days(day)).to_rfc3339();
+            let page = self.orders(account, &from, &to).await?;
+            rows.extend(
+                page.orders
+                    .into_iter()
+                    .filter(|o| matches!(o.status.as_str(), "Working" | "Pending")),
+            );
+        }
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        rows.dedup_by(|a, b| a.id == b.id);
+        cache.insert(account.into(), (std::time::Instant::now(), rows.clone()));
+        Ok(rows)
+    }
+
     pub fn new() -> Result<Self, AppError> {
         Ok(Self {
+            #[cfg(test)]
+            trading_base: None,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .user_agent("Northstar-Trader/0.1")
@@ -76,6 +247,7 @@ impl Schwab {
             refresh_lock: Arc::new(Mutex::new(())),
             audit: None,
             account_numbers: Arc::new(RwLock::new(HashMap::new())),
+            open_order_cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -216,6 +388,7 @@ impl Schwab {
     }
 
     async fn get_json(&self, url: &str) -> Result<Value, AppError> {
+        let request_url = if url.starts_with(TRADER_URL) { url.replacen(TRADER_URL, self.trading_base(), 1) } else { url.to_owned() };
         let mut token = self.access_token(false).await?;
         let correlation_id = uuid::Uuid::new_v4().to_string();
         let trader_request = url.starts_with(TRADER_URL);
@@ -241,7 +414,7 @@ impl Schwab {
             });
             let response = match self
                 .http
-                .get(url)
+                .get(&request_url)
                 .bearer_auth(&token)
                 .header("Accept", "application/json")
                 .send()
@@ -859,13 +1032,13 @@ pub fn streamed_quote_from_value(value: &Value) -> Option<Quote> {
             change / close * 100.0
         }
     });
-    let timestamp_ms = integer_field(value, 34).unwrap_or_else(|| Utc::now().timestamp_millis());
+    let timestamp_ms = integer_field(value, 34).unwrap_or(0);
     Some(Quote {
         provider: MarketDataProvider::Schwab,
         symbol,
         last,
-        bid: numeric_field(value, 1).unwrap_or(last),
-        ask: numeric_field(value, 2).unwrap_or(last),
+        bid: numeric_field(value, 1).unwrap_or(0.0),
+        ask: numeric_field(value, 2).unwrap_or(0.0),
         change,
         change_pct,
         delayed: value
@@ -1165,10 +1338,22 @@ fn flatten_order(
     inherited_group: Option<&str>,
     target: &mut Vec<OrderUpdate>,
 ) {
+    flatten_order_tree(value, account_id, inherited_group, None, None, None, target);
+}
+
+pub(crate) fn equity_order_rows(value: &Value, account: &str) -> Vec<OrderUpdate> {
+    let mut rows = Vec::new(); flatten_order(value, account, None, &mut rows); rows
+}
+
+fn flatten_order_tree(value: &Value, account_id: &str, inherited_group: Option<&str>, root: Option<&str>, parent: Option<&str>, oco: Option<&str>, target: &mut Vec<OrderUpdate>) {
     let broker_id = scalar_string(value.get("orderId"));
+    let root_id = root.unwrap_or(&broker_id);
     let strategy = text(value, "orderStrategyType");
+    let oco_id = if strategy == "OCO" && !broker_id.is_empty() { Some(broker_id.as_str()) } else { oco };
     let group = if strategy.is_empty() {
         inherited_group.unwrap_or_default().to_string()
+    } else if strategy == "SINGLE" && oco_id.is_some() {
+        "OCO".into()
     } else {
         strategy
     };
@@ -1214,6 +1399,12 @@ fn flatten_order(
         });
         let parsed_option = parse_option_symbol(&symbol);
         target.push(OrderUpdate {
+            schwab: Some(crate::models::SchwabOrderDetails {
+                root_order_id: root_id.into(), parent_order_id: parent.map(str::to_owned), oco_order_id: oco_id.map(str::to_owned),
+                instruction: instruction.clone(), contingent: matches!(raw_status.as_str(), "AWAITING_PARENT_ORDER" | "AWAITING_CONDITION" | "PENDING_ACTIVATION"),
+                cancelable: value.get("cancelable").and_then(Value::as_bool).unwrap_or(false),
+                editable: value.get("editable").and_then(Value::as_bool).unwrap_or(false),
+            }),
             provider: MarketDataProvider::Schwab,
             id: format!("schwab:{account_id}:{broker_id}:{unique_leg}"),
             symbol,
@@ -1250,7 +1441,7 @@ fn flatten_order(
             },
             open_or_close: if instruction.ends_with("_TO_OPEN") {
                 Some("Open".into())
-            } else if instruction.ends_with("_TO_CLOSE") {
+            } else if instruction.ends_with("_TO_CLOSE") || instruction == "BUY_TO_COVER" || (oco_id.is_some() && instruction == "SELL") {
                 Some("Close".into())
             } else {
                 None
@@ -1283,7 +1474,7 @@ fn flatten_order(
         .into_iter()
         .flatten()
     {
-        flatten_order(child, account_id, Some(&group), target);
+        flatten_order_tree(child, account_id, Some(&group), Some(root_id), if broker_id.is_empty() { parent } else { Some(&broker_id) }, oco_id, target);
     }
 }
 
@@ -1347,14 +1538,13 @@ fn quote_from_value(symbol: &str, value: &Value) -> Option<Quote> {
     let close = number_named(quote, "closePrice").unwrap_or(last);
     let change = number_named(quote, "netChange").unwrap_or(last - close);
     let timestamp_ms = integer_named(quote, "quoteTime")
-        .or_else(|| integer_named(quote, "tradeTime"))
-        .unwrap_or_else(|| Utc::now().timestamp_millis());
+        .unwrap_or(0);
     Some(Quote {
         provider: MarketDataProvider::Schwab,
         symbol: symbol.to_uppercase(),
         last,
-        bid: number_named(quote, "bidPrice").unwrap_or(last),
-        ask: number_named(quote, "askPrice").unwrap_or(last),
+        bid: number_named(quote, "bidPrice").unwrap_or(0.0),
+        ask: number_named(quote, "askPrice").unwrap_or(0.0),
         change,
         change_pct: number_named(quote, "netPercentChange").unwrap_or_else(|| {
             if close == 0.0 {
@@ -1363,7 +1553,7 @@ fn quote_from_value(symbol: &str, value: &Value) -> Option<Quote> {
                 change / close * 100.0
             }
         }),
-        delayed: value.get("realtime").and_then(Value::as_bool) == Some(false),
+        delayed: value.get("realtime").and_then(Value::as_bool) != Some(true),
         halted: quote
             .get("securityStatus")
             .and_then(Value::as_str)

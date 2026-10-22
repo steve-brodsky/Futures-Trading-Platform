@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalRiskBaseline, JournalScope, JournalScreenshotImage, JournalScreenshotSaveResult, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, TruthSocialPost, WorkspaceState } from "../types";
+import type { SchwabEquityOrderDraft, SchwabEquityState, Account, AccountBalance, AuditFilters, AuditHealth, AuditPage, Bar, BarStreamConsumer, BrokerMutationIntent, BrokerMutationResult, CloudPreferenceProfile, HistoricalOrderPage, JournalAuthStatus, JournalDaySummary, JournalMonthSummary, JournalRiskBaseline, JournalScope, JournalScreenshotImage, JournalScreenshotSaveResult, JournalStatsRange, JournalSyncStatus, JournalTrade, KillSwitchResult, MarketDataProvider, OptionChainSnapshot, OptionExpiration, OrderDraft, OrderPreview, OrderUpdate, Position, PreferenceSyncResult, Quote, RiskPolicy, RiskPolicyStatus, SchwabAccountSnapshot, SymbolMeta, Timeframe, TradingEnvironment, TradingTodaySnapshot, TruthSocialPost, WorkspaceState } from "../types";
 import { demoAuditExport, demoAuditPage, instrumentDemoApi } from "./audit";
 import { cloudPreferenceProfile } from "./cloudPreferences";
 import { daySummary, demoJournalTrades, journalStatsRange, monthSummary } from "./journal";
@@ -15,6 +15,8 @@ const nativeAuditExcluded = new Set([
   "get_audit_events", "get_audit_health", "export_audit_events", "record_client_audit",
   "get_schwab_accounts", "get_schwab_account_snapshot", "get_schwab_orders",
   "fetch_truth_social_posts",
+  "get_schwab_equity_state", "preview_schwab_equity_order", "place_schwab_equity_order",
+  "replace_schwab_equity_order", "cancel_schwab_equity_order", "close_schwab_equity_position", "reconcile_schwab_equity_mutation",
 ]);
 const nativeRecordCommands = new Set([
   "save_credentials", "save_schwab_credentials", "set_environment", "save_workspace",
@@ -186,6 +188,33 @@ const rawApi = {
   },
   async historicalOrders(accountId: string, since: string, nextToken?: string): Promise<HistoricalOrderPage> {
     return isTauri ? native("get_historical_orders", { accountId, since, nextToken }) : { orders: demoOrders.filter((order) => order.status !== "Working") };
+  },
+  async schwabEquityState(accountId: string): Promise<SchwabEquityState> {
+    if (isTauri) return native("get_schwab_equity_state", { accountId });
+    return { sessionOpen: true, sessionMessage: "Browser demo ? production trading disabled", positions: demoSchwabPositions, orders: demoSchwabOrders, riskBaselines: [{ tradeId: "demo-schwab-equity", symbol: "AAPL", direction: "Long", originalStop: 216, deployedRisk: 60, riskProvenance: "exact" }], issues: [], warnings: [], mutations: [] };
+  },
+  async previewSchwabEquityOrder(order: SchwabEquityOrderDraft): Promise<OrderPreview> {
+    if (isTauri) return native("preview_schwab_equity_order", { order });
+    return { valid: true, summary: `SCHWAB LIVE ? ${order.direction} ${order.quantity} ${order.symbol}`, errors: [] };
+  },
+  async placeSchwabEquityOrder(order: SchwabEquityOrderDraft, clientMutationId: string): Promise<BrokerMutationResult> {
+    if (isTauri) return native("place_schwab_equity_order", { order, clientMutationId });
+    throw new Error("Schwab trading is disabled in browser demo mode.");
+  },
+  async replaceSchwabEquityOrder(accountId: string, orderId: string, symbol: string, newPrice: number, clientMutationId = crypto.randomUUID()): Promise<BrokerMutationResult> {
+    if (isTauri) return native("replace_schwab_equity_order", { accountId, orderId, symbol, newPrice, clientMutationId });
+    throw new Error("Schwab trading is disabled in browser demo mode.");
+  },
+  async cancelSchwabEquityOrder(accountId: string, orderId: string, symbol: string, clientMutationId = crypto.randomUUID()): Promise<BrokerMutationResult> {
+    if (isTauri) return native("cancel_schwab_equity_order", { accountId, orderId, symbol, clientMutationId });
+    throw new Error("Schwab trading is disabled in browser demo mode.");
+  },
+  async closeSchwabEquityPosition(accountId: string, positionId: string, symbol: string, clientMutationId = crypto.randomUUID()): Promise<BrokerMutationResult> {
+    if (isTauri) return native("close_schwab_equity_position", { accountId, positionId, symbol, clientMutationId });
+    throw new Error("Schwab trading is disabled in browser demo mode.");
+  },
+  async reconcileSchwabEquityMutation(accountId: string, mutationId: string, brokerOrderId: string): Promise<void> {
+    if (isTauri) await native("reconcile_schwab_equity_mutation", { accountId, mutationId, brokerOrderId });
   },
   async confirmOrder(order: OrderDraft): Promise<OrderPreview> {
     if (isTauri) return native("confirm_order", { order });

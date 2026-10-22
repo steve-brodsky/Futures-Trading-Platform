@@ -86,6 +86,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
       },
       order_entry: {
         orderTicket: { ...workspace.settings.orderTicket },
+        equityOrderTicket: workspace.settings.equityOrderTicket ? { ...workspace.settings.equityOrderTicket } : undefined,
         trailStop: { ...workspace.settings.trailStop },
         contractRollAlerts: { ...workspace.settings.contractRollAlerts },
         entryRules: workspace.entryRules,
@@ -206,6 +207,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
         },
       },
       orderTicket: { ...current.settings.orderTicket, ...object(orderEntry?.orderTicket) },
+      equityOrderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "risk", riskSizingPolicy: "strict", timeInForce: "GTC", ...current.settings.equityOrderTicket, ...object(orderEntry?.equityOrderTicket) },
       trailStop: { ...current.settings.trailStop, ...object(orderEntry?.trailStop) },
       contractRollAlerts: normalizeContractRollAlertSettings(orderEntry?.contractRollAlerts ?? current.settings.contractRollAlerts),
       truthSocialAlerts: {

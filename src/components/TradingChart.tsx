@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useId, useImperativeHandle, useMemo, useRef, use
 import { Bell, BellOff, ChevronsRight, Lock, LockOpen, MoveVertical, Trash2, Volume2, X } from "lucide-react";
 import {
   AreaSeries, CandlestickSeries, ColorType, createChart, createSeriesMarkers, CrosshairMode, HistogramSeries, LineSeries, LineStyle,
-  type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type Logical, type LogicalRange, type SeriesMarker, type Time,
+  type AutoscaleInfo, type IChartApi, type IPriceLine, type ISeriesApi, type ISeriesMarkersPluginApi, type Logical, type LogicalRange, type SeriesMarker, type Time,
 } from "lightweight-charts";
 import type { AlertDurationSeconds, AlertSound, Bar, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, EconomicEvent, GexExpirationDisplay, GexView, IndicatorConfig, JournalRiskBaseline, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, PriceOverlayIndicatorConfig, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
@@ -230,6 +230,10 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const candleCountdownTone = (kind === "candles" || isSynthetic) && liveBar ? liveBar.close >= liveBar.open ? "up" : "down" : kind;
   const syntheticLive = Boolean(syntheticLatest && "provisional" in syntheticLatest && syntheticLatest.provisional);
   const tradeLines = [...buildTradeLines(tradeSymbol, positions, orders), ...buildProjectedTradeLines(orderProjection)];
+  const equityTradePricesRef = useRef<number[]>([]);
+  equityTradePricesRef.current = provider === "schwab"
+    ? tradeLines.filter((line) => !line.position?.putCall).map((line) => line.price).filter((price) => Number.isFinite(price) && price > 0)
+    : [];
   const displayPrices = new Map(tradeLines.map((line) => [line.id,
     draggingOrder && draggingOrder.id === line.order?.id ? draggingOrder.price
       : draggingProjection && draggingProjection.lineId === line.id ? draggingProjection.price
@@ -750,6 +754,15 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     if (!price) return;
 
     const lines = [...buildTradeLines(tradeSymbol, positions, orders), ...buildProjectedTradeLines(orderProjection)];
+    if (provider === "schwab") price.applyOptions({ autoscaleInfoProvider: (base: () => AutoscaleInfo | null) => {
+      const info = base();
+      const prices = equityTradePricesRef.current;
+      if (!info?.priceRange || !prices.length) return info;
+      return { ...info, priceRange: {
+        minValue: Math.min(info.priceRange.minValue, ...prices),
+        maxValue: Math.max(info.priceRange.maxValue, ...prices),
+      } };
+    } });
     const nextIds = new Set(lines.map((line) => line.id));
     tradeLineRefs.current.forEach((line, id) => {
       if (nextIds.has(id)) return;
@@ -757,7 +770,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       tradeLineRefs.current.delete(id);
     });
     lines.forEach((line) => {
-      const projected = line.kind === "projected-take-profit" || line.kind === "projected-stop-loss";
+      const projected = line.kind.startsWith("projected-");
       const orderDrag = draggingOrderRef.current;
       const projectionDrag = draggingProjectionRef.current;
       const displayPrice = orderDrag && orderDrag.id === line.order?.id ? orderDrag.price
@@ -770,7 +783,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     });
     keepPositionPriceLinesOnTop(price, tradeLineRefs.current);
     requestAnimationFrame(() => syncTradeLabelsRef.current());
-  }, [orders, positions, tradeSymbol, orderProjection?.takeProfit, orderProjection?.stopLoss, chartGeneration]);
+  }, [orders, positions, tradeSymbol, orderProjection?.entryPrice, orderProjection?.takeProfit, orderProjection?.stopLoss, chartGeneration]);
 
   useEffect(() => {
     if (!draggingOrder?.id && !draggingProjection?.lineId) return;

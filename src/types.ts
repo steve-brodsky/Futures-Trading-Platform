@@ -217,6 +217,7 @@ export interface Position {
 }
 
 export interface OrderUpdate {
+  schwab?: SchwabOrderDetails;
   provider?: MarketDataProvider;
   id: string;
   symbol: string;
@@ -298,6 +299,41 @@ export interface OrderDraft {
   stopLoss?: number;
   /** Required for a risk-increasing order in a rolled U.S. equity-index contract. */
   rolloverAcknowledged?: boolean;
+}
+
+export interface SchwabEquityOrderDraft {
+  accountId: string;
+  symbol: string;
+  direction: "Long" | "Short";
+  sizingMode: "risk" | "shares";
+  riskBudget?: number;
+  quantity: number;
+  referenceEntry: number;
+  stopLoss: number;
+  takeProfit: number;
+  rMultiple?: number;
+  exitDuration: "DAY" | "GTC";
+}
+
+export interface SchwabOrderDetails {
+  rootOrderId: string;
+  parentOrderId?: string;
+  ocoOrderId?: string;
+  instruction: string;
+  contingent: boolean;
+  cancelable: boolean;
+  editable: boolean;
+}
+
+export interface SchwabEquityState {
+  positions: Position[];
+  orders: OrderUpdate[];
+  sessionOpen: boolean;
+  sessionMessage: string;
+  riskBaselines: JournalRiskBaseline[];
+  issues: string[];
+  warnings: string[];
+  mutations: BrokerMutationIntent[];
 }
 
 export interface OrderPreview {
@@ -418,6 +454,7 @@ export interface BrokerMutationResult {
 export type MutationState = "requested" | "submitting" | "accepted" | "rejected" | "unknown" | "reconciling" | "reconciled" | "reconciliation_failed";
 
 export interface BrokerMutationIntent {
+  provider?: MarketDataProvider;
   id: string;
   environment: TradingEnvironment;
   accountId: string;
@@ -699,6 +736,7 @@ export interface WorkspaceSettings {
   schwabWickFilter: SchwabWickFilterSettings;
   chartEconomicEvents: ChartEconomicEventSettings;
   orderTicket: OrderTicketSettings;
+  equityOrderTicket?: OrderTicketSettings;
   trailStop: TrailStopSettings;
   contractRollAlerts: ContractRollAlertSettings;
   truthSocialAlerts: TruthSocialAlertSettings;

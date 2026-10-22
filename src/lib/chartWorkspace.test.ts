@@ -25,6 +25,18 @@ const fallback: WorkspaceState = {
 };
 
 describe("chart workspace", () => {
+  it("restores and stabilizes equity preferences independently of futures sizing", () => {
+    const saved = { ...fallback, settings: { ...fallback.settings, equityOrderTicket: {
+      swingStopPivotBars: 3 as const, swingStopOffsetTicks: 2, sizingMode: "risk" as const,
+      riskSizingPolicy: "strict" as const, timeInForce: "DAY" as const, riskAmount: 125,
+    } } };
+    const restored = normalizeChartWorkspace(saved, fallback);
+    expect(restored.settings.equityOrderTicket).toEqual(saved.settings.equityOrderTicket);
+    expect(restored.settings.orderTicket).toEqual(fallback.settings.orderTicket);
+    const changed = { ...restored, settings: { ...restored.settings, equityOrderTicket: { ...restored.settings.equityOrderTicket!, riskAmount: 200 } } };
+    expect(stabilizeChartWorkspace(restored, changed).settings.equityOrderTicket?.riskAmount).toBe(200);
+    expect(normalizeChartWorkspace(fallback, fallback).settings.equityOrderTicket).toMatchObject({ sizingMode: "risk", riskSizingPolicy: "strict", timeInForce: "GTC" });
+  });
   it("restores wick settings from persistence and retains changes across window broadcasts", () => {
     const legacy = { ...fallback, settings: { ...fallback.settings, schwabWickFilter: undefined } };
     expect(normalizeChartWorkspace(legacy, fallback).settings.schwabWickFilter).toEqual(DEFAULT_SCHWAB_WICK_FILTER);

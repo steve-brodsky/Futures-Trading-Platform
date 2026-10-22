@@ -5,12 +5,15 @@ mod safety;
 mod schwab;
 mod schwab_oauth;
 mod schwab_streamer;
+mod schwab_trading;
 mod storage;
 mod tradestation;
 mod trading_today;
 mod truth_social;
 
-use chrono::{DateTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Utc};
+#[cfg(test)]
+use chrono::{TimeZone, Timelike};
 use futures_util::{SinkExt, StreamExt};
 use models::*;
 use schwab::Schwab;
@@ -76,6 +79,7 @@ pub struct NativeState {
     schwab_streamer: SchwabStreamer,
     db_path: PathBuf,
     safety: Arc<safety::SafetyService>,
+    schwab_trading_lifecycle: tokio::sync::RwLock<()>,
     bar_streams: Arc<tokio::sync::Mutex<BarStreamRegistry>>,
     quote_streams: tokio::sync::Mutex<HashMap<String, QuoteStreamRegistration>>,
     quote_provider_tasks:
@@ -209,10 +213,11 @@ async fn save_schwab_credentials(
     client_secret: String,
     state: State<'_, NativeState>,
 ) -> Result<(), AppError> {
+    let _session = state.schwab_trading_lifecycle.write().await;
     let changed = storage::save_schwab_client(&client_id, &client_secret)?;
     if changed {
         state.schwab.clear_access_token().await;
-        state.schwab_streamer.stop().await;
+        shutdown_provider_services(&state, MarketDataProvider::Schwab).await;
     }
     let mut record = audit::AuditRecord::completed(
         "record",
@@ -254,14 +259,13 @@ async fn begin_schwab_login(
 
 #[tauri::command]
 async fn logout_schwab(state: State<'_, NativeState>) -> Result<(), AppError> {
-    let (_transition, _) = state.safety.lifecycle.begin_transition().await;
-    shutdown_native_services(&state).await;
+    let _session = state.schwab_trading_lifecycle.write().await;
+    shutdown_provider_services(&state, MarketDataProvider::Schwab).await;
     state.schwab.clear_access_token().await;
-    let result = storage::clear_schwab_refresh_token();
-    state.safety.lifecycle.finish_transition();
-    result?;
+    storage::clear_schwab_refresh_token()?;
     Ok(())
 }
+
 
 #[tauri::command(rename_all = "camelCase")]
 async fn save_credentials(
@@ -345,7 +349,7 @@ async fn begin_login(app: tauri::AppHandle, state: State<'_, NativeState>) -> Re
 #[tauri::command]
 async fn logout(state: State<'_, NativeState>) -> Result<(), AppError> {
     let (_transition, _) = state.safety.lifecycle.begin_transition().await;
-    shutdown_native_services(&state).await;
+    shutdown_provider_services(&state, MarketDataProvider::Tradestation).await;
     state.api.clear_token().await;
     let result = storage::delete_secret("refresh_token");
     state.safety.lifecycle.finish_transition();
@@ -374,7 +378,7 @@ async fn set_environment(
         return Ok(());
     }
     let generation = state.safety.lifecycle.begin_locked_transition();
-    shutdown_native_services(&state).await;
+    shutdown_provider_services(&state, MarketDataProvider::Tradestation).await;
     let environment_key = environment.key().to_string();
     state.api.set_environment(environment).await;
     state.safety.lifecycle.finish_transition();
@@ -400,70 +404,79 @@ async fn set_environment(
     Ok(())
 }
 
-async fn shutdown_native_services(state: &NativeState) {
+// Provider transitions retain the other broker's subscriptions and orders.
+async fn shutdown_provider_services(state: &NativeState, provider: MarketDataProvider) {
     let mut handles = Vec::new();
     {
         let mut registry = state.bar_streams.lock().await;
-        for (_, stream) in registry.streams.drain() {
-            stream.task.abort();
-            handles.push(stream.task);
+        let remove = registry
+            .streams
+            .iter()
+            .filter(|(_, stream)| stream.provider == provider)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in &remove {
+            if let Some(stream) = registry.streams.remove(key) {
+                stream.task.abort();
+                handles.push(stream.task);
+            }
         }
-        registry.subscription_keys.clear();
-        registry.subscription_generations.clear();
+        let subscriptions = registry
+            .subscription_keys
+            .iter()
+            .filter(|(_, key)| remove.contains(key))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in subscriptions {
+            registry.subscription_keys.remove(&id);
+            registry.subscription_generations.remove(&id);
+        }
     }
-    {
-        let mut streams = state.quote_streams.lock().await;
-        streams.clear();
+    state
+        .quote_streams
+        .lock()
+        .await
+        .retain(|_, stream| stream.provider != provider);
+    if let Some(task) = state.quote_provider_tasks.lock().await.remove(&provider) {
+        task.abort();
+        handles.push(task);
     }
-    {
-        let mut streams = state.quote_provider_tasks.lock().await;
-        for (_, task) in streams.drain() {
+    if provider == MarketDataProvider::Tradestation {
+        for task in state.brokerage_streams.lock().await.drain(..) {
             task.abort();
             handles.push(task);
         }
-    }
-    {
-        let mut streams = state.option_streams.lock().await;
-        for (_, registration) in streams.drain() {
+        state.api.clear_brokerage_cache().await;
+    } else {
+        if let Some(task) = state.schwab_brokerage_stream.lock().await.take() {
+            task.abort();
+            handles.push(task);
+        }
+        for (_, registration) in state.option_streams.lock().await.drain() {
             registration.task.abort();
             handles.push(registration.task);
         }
+        state.schwab_streamer.stop().await;
+        state
+            .schwab_streamer
+            .set_quote_symbols(std::iter::empty())
+            .await;
+        state
+            .schwab_streamer
+            .set_option_symbols(std::iter::empty())
+            .await;
+        state
+            .schwab_streamer
+            .set_chart_symbols(std::iter::empty())
+            .await;
     }
-    {
-        let mut streams = state.brokerage_streams.lock().await;
-        for task in streams.drain(..) {
-            task.abort();
-            handles.push(task);
-        }
-    }
-    if let Some(task) = state.schwab_brokerage_stream.lock().await.take() {
-        task.abort();
-        handles.push(task);
-    }
-    if let Some(task) = state.preference_realtime.lock().await.take() {
-        task.abort();
-        handles.push(task);
-    }
-    state.schwab_streamer.stop().await;
-    state
-        .schwab_streamer
-        .set_quote_symbols(std::iter::empty())
-        .await;
-    state
-        .schwab_streamer
-        .set_option_symbols(std::iter::empty())
-        .await;
-    state
-        .schwab_streamer
-        .set_chart_symbols(std::iter::empty())
-        .await;
-    state.api.clear_brokerage_cache().await;
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         futures_util::future::join_all(handles),
     )
     .await;
 }
+
 
 #[tauri::command]
 async fn get_accounts(state: State<'_, NativeState>) -> Result<Vec<Account>, AppError> {
@@ -1345,6 +1358,7 @@ async fn stop_brokerage_stream(state: State<'_, NativeState>) -> Result<(), AppE
     Ok(())
 }
 
+#[cfg(test)]
 fn schwab_order_range_at(now: DateTime<Utc>) -> (String, String) {
     let local = now.with_timezone(&chrono_tz::America::New_York);
     let mut session_date = local.date_naive();
@@ -1361,9 +1375,6 @@ fn schwab_order_range_at(now: DateTime<Utc>) -> (String, String) {
     )
 }
 
-fn schwab_current_order_range() -> (String, String) {
-    schwab_order_range_at(Utc::now())
-}
 
 fn capture_schwab_journal_orders(
     app: &tauri::AppHandle,
@@ -1390,8 +1401,7 @@ async fn emit_schwab_brokerage_snapshot(
     environment_generation: u64,
 ) -> Result<(), AppError> {
     let snapshot = api.account_snapshot(account_id).await?;
-    let (from, to) = schwab_current_order_range();
-    let orders = api.orders(account_id, &from, &to).await?.orders;
+    let orders = schwab_trading::broker_orders(api, db_path, account_id).await?;
     capture_schwab_journal_orders(app, db_path, &orders, "broker-stream")?;
     let _ = app.emit("schwab-account-snapshot", snapshot.clone());
     let _ = app.emit(
@@ -2022,6 +2032,7 @@ async fn place_order(
     let created = safety::create_intent(
         &state.db_path,
         safety::NewMutationIntent {
+            provider: crate::models::MarketDataProvider::Tradestation,
             id: mutation_id.clone(),
             environment: environment.clone(),
             account_id: order.account_id.clone(),
@@ -2180,6 +2191,7 @@ async fn replace_order(
     match safety::create_intent(
         &state.db_path,
         safety::NewMutationIntent {
+            provider: crate::models::MarketDataProvider::Tradestation,
             id: mutation_id.clone(),
             environment: environment.clone(),
             account_id: account_id.clone(),
@@ -2295,6 +2307,7 @@ async fn close_position(
     match safety::create_intent(
         &state.db_path,
         safety::NewMutationIntent {
+            provider: crate::models::MarketDataProvider::Tradestation,
             id: mutation_id.clone(),
             environment: environment.clone(),
             account_id: account_id.clone(),
@@ -2473,6 +2486,7 @@ async fn cancel_order(
     match safety::create_intent(
         &state.db_path,
         safety::NewMutationIntent {
+            provider: crate::models::MarketDataProvider::Tradestation,
             id: mutation_id.clone(),
             environment: environment.clone(),
             account_id: account_id.clone(),
@@ -2972,6 +2986,7 @@ async fn reconcile_intent(
 ) -> Result<safety::MutationIntent, AppError> {
     let intent = safety::load_intent(db_path, mutation_id)?
         .ok_or_else(|| AppError::Validation("Mutation intent was not found".into()))?;
+    if intent.provider == MarketDataProvider::Schwab { return Err(AppError::Validation("Use Schwab recovery for this mutation".into())); }
     if matches!(
         intent.state,
         safety::MutationState::Accepted | safety::MutationState::Reconciled
@@ -3283,7 +3298,7 @@ async fn reconcile_unresolved(api: TradeStation, db_path: PathBuf) {
     };
     let environment = api.environment().await;
     for intent in intents {
-        if intent.environment != environment {
+        if intent.provider == MarketDataProvider::Schwab || intent.environment != environment {
             continue;
         }
         if let Err(error) = reconcile_intent(&api, &db_path, &intent.id, None).await {
@@ -3406,6 +3421,7 @@ async fn kill_switch(
         let created = safety::create_intent_with_recent_confirmed_guard(
             &state.db_path,
             safety::NewMutationIntent {
+                provider: crate::models::MarketDataProvider::Tradestation,
                 id: mutation_id.clone(),
                 environment: environment.clone(),
                 account_id: account_id.clone(),
@@ -3497,6 +3513,7 @@ async fn kill_switch(
         let created = safety::create_intent_with_recent_confirmed_guard(
             &state.db_path,
             safety::NewMutationIntent {
+                provider: crate::models::MarketDataProvider::Tradestation,
                 id: mutation_id.clone(),
                 environment: environment.clone(),
                 account_id: account_id.clone(),
@@ -5057,12 +5074,9 @@ async fn run_schwab_bar_stream(
     environment: TradingEnvironment,
     symbol: String,
     timeframe: String,
-    lifecycle: Arc<safety::ServiceLifecycle>,
-    environment_generation: u64,
+    _lifecycle: Arc<safety::ServiceLifecycle>,
+    _environment_generation: u64,
 ) {
-    if !lifecycle.accepts(environment_generation) {
-        return;
-    }
     let (current_state, current_message) = streamer.connection_state().await;
     let initial_state = if current_state == "disconnected" {
         "connecting"
@@ -5126,9 +5140,6 @@ async fn run_schwab_bar_stream(
     let mut live_minutes = BTreeMap::new();
     let mut last_equity_tick = None;
     loop {
-        if !lifecycle.accepts(environment_generation) {
-            return;
-        }
         tokio::select! {
             result = &mut bootstrap, if bootstrap_pending => {
                 bootstrap_pending = false;
@@ -5404,7 +5415,7 @@ async fn run_schwab_quote_stream(
     subscriptions: Vec<(String, BTreeSet<String>)>,
     environment: TradingEnvironment,
     symbols: Vec<String>,
-    lifecycle: Arc<safety::ServiceLifecycle>,
+    _lifecycle: Arc<safety::ServiceLifecycle>,
     environment_generation: u64,
 ) {
     let desired = symbols
@@ -5413,9 +5424,6 @@ async fn run_schwab_quote_stream(
         .collect::<std::collections::HashSet<_>>();
     if let Ok(quotes) = api.quotes(&symbols).await {
         for quote in quotes {
-            if !lifecycle.accepts(environment_generation) {
-                return;
-            }
             for subscription_id in quote_consumers(&subscriptions, &quote.symbol) {
                 let _ = app.emit(
                     "quote-update",
@@ -5451,9 +5459,6 @@ async fn run_schwab_quote_stream(
         );
     }
     loop {
-        if !lifecycle.accepts(environment_generation) {
-            return;
-        }
         match receiver.recv().await {
             Ok(SchwabStreamEvent::State { state, message }) => {
                 for (subscription_id, _) in &subscriptions {
@@ -5498,7 +5503,7 @@ async fn run_schwab_option_stream(
     subscription_id: String,
     symbol: String,
     desired: BTreeSet<String>,
-    lifecycle: Arc<safety::ServiceLifecycle>,
+    _lifecycle: Arc<safety::ServiceLifecycle>,
     environment_generation: u64,
 ) {
     let mut receiver = streamer.subscribe();
@@ -5518,9 +5523,6 @@ async fn run_schwab_option_stream(
         },
     );
     loop {
-        if !lifecycle.accepts(environment_generation) {
-            return;
-        }
         match receiver.recv().await {
             Ok(SchwabStreamEvent::State { state, message }) => {
                 let _ = app.emit(
@@ -6041,6 +6043,7 @@ pub fn run() {
             let db_path = app_dir.join("northstar.sqlite3");
             journal::init(&db_path)?;
             safety::init(&db_path)?;
+            schwab_trading::init(&db_path)?;
             if let Err(error) = audit::init(&db_path) {
                 tracing::error!(%error, "Could not initialize the audit log");
             }
@@ -6052,6 +6055,7 @@ pub fn run() {
             let startup_api = api.clone();
             let startup_db = db_path.clone();
             app.manage(NativeState {
+                schwab_trading_lifecycle: tokio::sync::RwLock::new(()),
                 audit,
                 api,
                 schwab,
@@ -6075,6 +6079,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            schwab_trading::reconcile_schwab_equity_mutation,
+            schwab_trading::get_schwab_equity_state,
+            schwab_trading::preview_schwab_equity_order,
+            schwab_trading::place_schwab_equity_order,
+            schwab_trading::replace_schwab_equity_order,
+            schwab_trading::cancel_schwab_equity_order,
+            schwab_trading::close_schwab_equity_position,
             auth_status,
             schwab_auth_status,
             save_credentials,
@@ -6496,6 +6507,7 @@ mod stream_tests {
             safety::create_intent(
                 &path,
                 safety::NewMutationIntent {
+                    provider: crate::models::MarketDataProvider::Tradestation,
                     id: "restart-1".into(),
                     environment: TradingEnvironment::Sim,
                     account_id: "SIM-1".into(),
@@ -6531,6 +6543,7 @@ mod stream_tests {
         .unwrap();
         let intent = safety::load_intent(&path, "restart-1").unwrap().unwrap();
         let broker_order = OrderUpdate {
+            schwab: None,
             provider: MarketDataProvider::Tradestation,
             id: "91234".into(),
             symbol: "MESZ26".into(),
@@ -6580,6 +6593,7 @@ mod stream_tests {
     #[test]
     fn ambiguous_reconciliation_candidates_require_manual_review() {
         let intent = safety::MutationIntent {
+            provider: MarketDataProvider::Tradestation,
             id: "m1".into(),
             environment: TradingEnvironment::Sim,
             account_id: "SIM-1".into(),
@@ -6607,6 +6621,7 @@ mod stream_tests {
             updated_at: Utc::now().to_rfc3339(),
         };
         let order = |id: &str| OrderUpdate {
+            schwab: None,
             provider: MarketDataProvider::Tradestation,
             id: id.into(),
             symbol: "MESZ26".into(),

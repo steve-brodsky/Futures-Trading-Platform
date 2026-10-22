@@ -4476,6 +4476,7 @@ mod tests {
     }
     fn order(id: &str, side: &str, open_close: &str, qty: f64, price: f64) -> OrderUpdate {
         OrderUpdate {
+            schwab: None,
             provider: MarketDataProvider::Tradestation,
             id: id.into(),
             symbol: "MESU26".into(),
@@ -4525,6 +4526,7 @@ mod tests {
         let put_call = if &suffix[6..7] == "C" { "CALL" } else { "PUT" };
         let strike = suffix[7..].parse::<u64>().unwrap() as f64 / 1000.0;
         OrderUpdate {
+            schwab: None,
             provider: MarketDataProvider::Schwab,
             id: format!("schwab:S1:{parent}:{leg}"),
             symbol: symbol.into(),

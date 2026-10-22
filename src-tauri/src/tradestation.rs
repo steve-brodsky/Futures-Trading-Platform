@@ -1452,6 +1452,7 @@ impl TradeStation {
             ));
         }
         Ok(OrderUpdate {
+            schwab: None,
             provider: MarketDataProvider::Tradestation,
             id,
             symbol: draft.symbol.clone(),
@@ -2049,6 +2050,7 @@ pub(crate) fn order_from_value(item: &Value) -> OrderUpdate {
         })
         .collect();
     OrderUpdate {
+        schwab: None,
         provider: MarketDataProvider::Tradestation,
         id: string(item, "OrderID"),
         symbol: string(leg, "Symbol"),
@@ -2946,6 +2948,7 @@ mod tests {
 
     fn sample_order(id: &str) -> OrderUpdate {
         OrderUpdate {
+            schwab: None,
             provider: MarketDataProvider::Tradestation,
             id: id.into(),
             symbol: "MESU26".into(),

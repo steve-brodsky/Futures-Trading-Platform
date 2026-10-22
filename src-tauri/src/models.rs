@@ -204,7 +204,37 @@ pub struct OrderPreview {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SchwabEquityOrderDraft {
+    pub account_id: String,
+    pub symbol: String,
+    pub direction: String,
+    pub sizing_mode: String,
+    pub risk_budget: Option<f64>,
+    pub quantity: u32,
+    pub reference_entry: f64,
+    pub stop_loss: f64,
+    pub take_profit: f64,
+    pub r_multiple: Option<f64>,
+    pub exit_duration: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchwabOrderDetails {
+    pub root_order_id: String,
+    pub parent_order_id: Option<String>,
+    pub oco_order_id: Option<String>,
+    pub instruction: String,
+    pub contingent: bool,
+    pub cancelable: bool,
+    pub editable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OrderUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schwab: Option<SchwabOrderDetails>,
     #[serde(default)]
     pub provider: MarketDataProvider,
     pub id: String,

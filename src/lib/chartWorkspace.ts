@@ -1,3 +1,4 @@
+import { normalizeEquityTicketSettings } from "./equityTrading";
 import type { ChartLayout, ChartSplitRatios, ChartTabState, ChartWindowState, Drawing, EntryRuleNode, WorkspaceState } from "../types";
 import { normalizeEntryRules } from "./entryRules";
 import { normalizeEntryRuleAlerts, sameEntryRuleAlerts } from "./entryRuleAlerts";
@@ -427,6 +428,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
       chartSessions: normalizeChartSessionSettings(savedChartSessions, fallback.settings.chartSessions),
       schwabWickFilter: normalizeSchwabWickFilter(value.settings?.schwabWickFilter, fallback.settings.schwabWickFilter),
       chartEconomicEvents: normalizeChartEconomicEventSettings(savedChartEconomicEvents, fallback.settings.chartEconomicEvents),
+      equityOrderTicket: normalizeEquityTicketSettings(value.settings?.equityOrderTicket ?? fallback.settings.equityOrderTicket),
       orderTicket: {
         swingStopPivotBars: savedOrderTicket?.swingStopPivotBars === 2 || savedOrderTicket?.swingStopPivotBars === 3
           ? savedOrderTicket.swingStopPivotBars
@@ -604,6 +606,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && current.settings.orderTicket.sizingMode === incoming.settings.orderTicket.sizingMode
     && current.settings.orderTicket.riskSizingPolicy === incoming.settings.orderTicket.riskSizingPolicy
     && current.settings.orderTicket.riskAmount === incoming.settings.orderTicket.riskAmount
+    && current.settings.orderTicket.timeInForce === incoming.settings.orderTicket.timeInForce
+    && JSON.stringify(current.settings.equityOrderTicket) === JSON.stringify(incoming.settings.equityOrderTicket)
     && current.settings.trailStop.timeframe === incoming.settings.trailStop.timeframe
     && current.settings.trailStop.pivotBars === incoming.settings.trailStop.pivotBars
     && current.settings.trailStop.offsetTicks === incoming.settings.trailStop.offsetTicks

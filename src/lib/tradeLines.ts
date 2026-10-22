@@ -1,13 +1,18 @@
-import type { ChartLabelSettings, JournalRiskBaseline, OrderDraft, OrderUpdate, Position } from "../types";
+import type { ChartLabelSettings, JournalRiskBaseline, MarketDataProvider, OrderDraft, OrderUpdate, Position } from "../types";
 import { calculateTakeProfitAtR, roundToTick } from "./indicators";
 import { positionMatchesSchwabChart } from "./schwabBrokerage";
 
-export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "projected-take-profit" | "projected-stop-loss" | "order";
+export type TradeLineKind = "position" | "take-profit" | "stop-loss" | "projected-entry" | "projected-take-profit" | "projected-stop-loss" | "order";
 export const orderRMultiples = [1, 1.5, 2] as const;
 export type OrderRMultiple = typeof orderRMultiples[number];
 export type ProjectedExitField = "takeProfit" | "stopLoss";
 
+export function orderProjectionScope(provider: MarketDataProvider, accountId: string | undefined, symbol: string): string {
+  return JSON.stringify([provider, accountId ?? null, symbol.trim().toUpperCase()]);
+}
+
 export interface OrderProjection {
+  entryPrice?: number;
   takeProfit?: number;
   stopLoss?: number;
   side?: "Buy" | "Sell";
@@ -132,14 +137,15 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
       quantity: Math.abs(position.quantity),
       draggable: false,
       position,
-      actionable: position.provider !== "schwab",
+      actionable: position.provider !== "schwab" || ["EQUITY", "ETF"].includes(position.assetType?.toUpperCase() ?? ""),
       suppressMetrics: Boolean(position.putCall),
       label: position.putCall
         ? `SCHWAB ${position.side.toUpperCase()} ${Math.abs(position.quantity)} · ${position.expirationDate?.slice(5).replace("-", "/")} ${position.strikePrice}${position.putCall[0]} · ${position.unrealizedPnl >= 0 ? "+" : "-"}$${Math.abs(position.unrealizedPnl).toFixed(2)}`
         : position.provider === "schwab" ? `SCHWAB ${position.side.toUpperCase()} ${Math.abs(position.quantity)}` : undefined,
     }));
   const orderLines = orders.flatMap((order): TradeLineModel[] => {
-    if (order.symbol !== tradeSymbol || order.status !== "Working") return [];
+    if (order.symbol !== tradeSymbol || !["Working", "Pending"].includes(order.status)) return [];
+    if (order.provider === "schwab" && !["EQUITY", "ETF"].includes(order.assetType?.toUpperCase() ?? "")) return [];
     const price = order.price ?? order.stopPrice;
     if (price == null || price <= 0) return [];
     const protective = isBracketExit(order) || isPositionExit(order, positions);
@@ -155,7 +161,8 @@ export function buildTradeLines(tradeSymbol: string | undefined, positions: Posi
       color: kind === "take-profit" ? "#16c79a" : kind === "stop-loss" ? "#ef466f" : "#f0b84b",
       side: order.side,
       quantity: order.remainingQuantity ?? order.quantity,
-      draggable: kind === "take-profit" || kind === "stop-loss",
+      draggable: (kind === "take-profit" || kind === "stop-loss") && (!order.schwab || (order.schwab.editable && !order.schwab.contingent)),
+      label: order.schwab?.contingent ? `CONTINGENT ${kind === "take-profit" ? "TP" : kind === "stop-loss" ? "SL" : "ORDER"} ${order.quantity}` : undefined,
       order,
     }];
   });
@@ -169,6 +176,9 @@ export function buildProjectedTradeLines(projection?: OrderProjection): TradeLin
   const quantity = projection.quantity != null && Number.isFinite(projection.quantity) && projection.quantity >= 0
     ? Math.abs(projection.quantity)
     : 1;
+  if (projection.entryPrice != null && Number.isFinite(projection.entryPrice) && projection.entryPrice > 0) {
+    lines.push({ id: "projection:entry", kind: "projected-entry", price: projection.entryPrice, color: "#f0b84b", side, quantity, draggable: false, label: `PROJECTED ${side === "Buy" ? "LONG" : "SHORT"} ${quantity}` });
+  }
   if (projection.takeProfit != null && Number.isFinite(projection.takeProfit) && projection.takeProfit > 0) {
     lines.push({ id: "projection:take-profit", kind: "projected-take-profit", price: projection.takeProfit, color: "#16c79a", side, quantity, draggable: true });
   }

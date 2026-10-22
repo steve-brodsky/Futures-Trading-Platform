@@ -77,6 +77,8 @@ impl MutationState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MutationIntent {
+    #[serde(default)]
+    pub provider: crate::models::MarketDataProvider,
     pub id: String,
     pub environment: TradingEnvironment,
     pub account_id: String,
@@ -106,6 +108,7 @@ pub struct MutationIntent {
 
 #[derive(Debug, Clone)]
 pub struct NewMutationIntent {
+    pub provider: crate::models::MarketDataProvider,
     pub id: String,
     pub environment: TradingEnvironment,
     pub account_id: String,
@@ -404,6 +407,18 @@ impl SafetyService {
         lock.lock_owned().await
     }
 
+    pub async fn provider_account_lock(
+        &self,
+        provider: &str,
+        account_id: &str,
+    ) -> OwnedMutexGuard<()> {
+        self.account_lock(
+            &TradingEnvironment::Live,
+            &format!("{provider}\0{account_id}"),
+        )
+        .await
+    }
+
     pub async fn enqueue_reconciliation(&self, mutation_id: &str) {
         self.pending_reconciliation
             .lock()
@@ -471,6 +486,13 @@ pub fn init(path: &Path) -> Result<(), AppError> {
             PRIMARY KEY(environment,account_id)
         );",
     )?;
+    let has_provider = db.prepare("PRAGMA table_info(broker_mutations)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?.iter().any(|name| name == "provider");
+    if !has_provider {
+        db.execute("ALTER TABLE broker_mutations ADD COLUMN provider TEXT NOT NULL DEFAULT 'tradestation'", [])?;
+    }
+    db.execute_batch("CREATE INDEX IF NOT EXISTS broker_mutations_provider ON broker_mutations(provider,environment,account_id,state);")?;
     Ok(())
 }
 
@@ -488,9 +510,13 @@ pub fn create_intent_with_recent_confirmed_guard(
             "A stable client mutation ID is required".into(),
         ));
     }
+    let provider_key = match input.provider { crate::models::MarketDataProvider::Schwab => "schwab", _ => "tradestation" };
     let mut db = Connection::open(path)?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(existing) = load_intent_from(&tx, &input.id)? {
+        if existing.provider != input.provider || existing.account_id != input.account_id || existing.environment != input.environment || existing.kind != input.kind {
+            return Err(AppError::Validation("Mutation ID belongs to a different broker, account, or action".into()));
+        }
         tx.commit()?;
         return Ok(CreateIntent::Existing(existing));
     }
@@ -501,13 +527,13 @@ pub fn create_intent_with_recent_confirmed_guard(
         .join(",");
     let sql = format!(
         "SELECT id FROM broker_mutations
-         WHERE environment=?1 AND account_id=?2 AND equivalence_key=?3
+         WHERE environment=?1 AND account_id=?2 AND equivalence_key=?3 AND provider=?4
            AND state IN ({placeholders})
          ORDER BY created_at DESC LIMIT 1"
     );
     let environment_key = input.environment.key();
     let mut values: Vec<&dyn rusqlite::ToSql> =
-        vec![&environment_key, &input.account_id, &input.equivalence_key];
+        vec![&environment_key, &input.account_id, &input.equivalence_key, &provider_key];
     values.extend(
         ACTIVE_STATES
             .iter()
@@ -528,13 +554,14 @@ pub fn create_intent_with_recent_confirmed_guard(
             .query_row(
                 "SELECT id FROM broker_mutations
                  WHERE environment=?1 AND account_id=?2 AND equivalence_key=?3
-                   AND state IN ('accepted','reconciled') AND updated_at>=?4
+                   AND state IN ('accepted','reconciled') AND updated_at>=?4 AND provider=?5
                  ORDER BY updated_at DESC LIMIT 1",
                 params![
                     environment_key,
                     input.account_id,
                     input.equivalence_key,
-                    cutoff
+                    cutoff,
+                    provider_key
                 ],
                 |row| row.get::<_, String>(0),
             )
@@ -549,9 +576,9 @@ pub fn create_intent_with_recent_confirmed_guard(
     let now = Utc::now().to_rfc3339();
     tx.execute(
         "INSERT INTO broker_mutations(
-          id,environment,account_id,kind,equivalence_key,symbol,action,quantity,order_type,
+          provider,id,environment,account_id,kind,equivalence_key,symbol,action,quantity,order_type,
           limit_price,stop_price,take_profit,stop_loss,target_id,state,request_json,created_at,updated_at
-        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'requested',?15,?16,?16)",
+        ) VALUES(?17,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'requested',?15,?16,?16)",
         params![
             input.id,
             input.environment.key(),
@@ -568,7 +595,8 @@ pub fn create_intent_with_recent_confirmed_guard(
             input.stop_loss,
             input.target_id,
             serde_json::to_string(&input.request)?,
-            now
+            now,
+            provider_key
         ],
     )?;
     load_intent_from(&tx, &input.id)?
@@ -622,7 +650,7 @@ fn load_intent_from(db: &Connection, id: &str) -> Result<Option<MutationIntent>,
         "SELECT id,environment,account_id,kind,equivalence_key,symbol,action,quantity,
          order_type,limit_price,stop_price,take_profit,stop_loss,target_id,broker_id,state,
          local_persistence,reconciliation_status,manual_review_required,warning,error,
-         request_json,broker_object_json,created_at,updated_at
+         request_json,broker_object_json,created_at,updated_at,provider
          FROM broker_mutations WHERE id=?1",
         params![id],
         intent_from_row,
@@ -636,6 +664,7 @@ fn intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MutationIntent> 
     let request_json: String = row.get(21)?;
     let broker_json: Option<String> = row.get(22)?;
     Ok(MutationIntent {
+        provider: if row.get::<_, String>(25)? == "schwab" { crate::models::MarketDataProvider::Schwab } else { crate::models::MarketDataProvider::Tradestation },
         id: row.get(0)?,
         environment: if environment == "live" {
             TradingEnvironment::Live
@@ -698,6 +727,21 @@ pub fn unresolved_intents(path: &Path) -> Result<Vec<MutationIntent>, AppError> 
         .collect()
 }
 
+pub fn list_provider_intents(
+    path: &Path,
+    provider: &str,
+    account_id: &str,
+) -> Result<Vec<MutationIntent>, AppError> {
+    let db = Connection::open(path)?;
+    let ids = db.prepare("SELECT id FROM broker_mutations WHERE provider=?1 AND account_id=?2 ORDER BY created_at DESC LIMIT 250")?
+        .query_map(params![provider, account_id], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+    ids.into_iter()
+        .map(|id| {
+            load_intent_from(&db, &id)?.ok_or_else(|| AppError::Api("Mutation disappeared".into()))
+        })
+        .collect()
+}
+
 pub fn list_intents(
     path: &Path,
     environment: &TradingEnvironment,
@@ -706,7 +750,7 @@ pub fn list_intents(
     let db = Connection::open(path)?;
     let ids = db
         .prepare(
-            "SELECT id FROM broker_mutations WHERE environment=?1 AND account_id=?2
+            "SELECT id FROM broker_mutations WHERE provider='tradestation' AND environment=?1 AND account_id=?2
              ORDER BY created_at DESC LIMIT 250",
         )?
         .query_map(params![environment.key(), account_id], |row| {
@@ -1282,6 +1326,7 @@ mod tests {
     fn durable_intent_blocks_duplicate_active_mutations_across_restart() {
         let path = temp_db("duplicate");
         let input = NewMutationIntent {
+            provider: crate::models::MarketDataProvider::Tradestation,
             id: "client-1".into(),
             environment: TradingEnvironment::Sim,
             account_id: "SIM-1".into(),
@@ -1326,9 +1371,35 @@ mod tests {
     }
 
     #[test]
+    fn mutation_migration_and_duplicate_guards_are_provider_scoped() {
+        let path = temp_db("providers");
+        let input = NewMutationIntent {
+            provider: crate::models::MarketDataProvider::Tradestation,
+            id: "original".into(), environment: TradingEnvironment::Live, account_id: "same-account".into(),
+            kind: "place_order".into(), equivalence_key: "same-key".into(), symbol: Some("SPY".into()), action: "Buy".into(),
+            quantity: Some(1.0), order_type: Some("Market".into()), limit_price: None, stop_price: None,
+            take_profit: None, stop_loss: None, target_id: None, request: serde_json::json!({}),
+        };
+        create_intent(&path,input.clone()).unwrap();
+        // Reconstruct the legacy ledger shape, then run the actual migration.
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("DROP INDEX broker_mutations_provider; ALTER TABLE broker_mutations DROP COLUMN provider;").unwrap();
+        drop(db);init(&path).unwrap();init(&path).unwrap();
+        assert_eq!(load_intent(&path,"original").unwrap().unwrap().provider,crate::models::MarketDataProvider::Tradestation);
+        let mut schwab=input.clone();schwab.provider=crate::models::MarketDataProvider::Schwab;schwab.id="schwab".into();
+        assert!(matches!(create_intent(&path,schwab.clone()).unwrap(),CreateIntent::Created));
+        schwab.id="retry".into();assert!(matches!(create_intent(&path,schwab.clone()).unwrap(),CreateIntent::EquivalentBlocked(_)));
+        schwab.id="original".into();assert!(create_intent(&path,schwab).is_err());
+        assert_eq!(list_intents(&path,&TradingEnvironment::Live,"same-account").unwrap().len(),1);
+        assert_eq!(list_provider_intents(&path,"schwab","same-account").unwrap().len(),1);
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn recent_confirmed_kill_switch_flatten_blocks_a_stale_snapshot_repeat() {
         let path = temp_db("kill-repeat");
         let first = NewMutationIntent {
+            provider: crate::models::MarketDataProvider::Tradestation,
             id: "flatten-1".into(),
             environment: TradingEnvironment::Sim,
             account_id: "SIM-1".into(),
@@ -1378,6 +1449,7 @@ mod tests {
     fn confirmed_broker_object_survives_a_later_local_warning() {
         let path = temp_db("confirmed");
         let input = NewMutationIntent {
+            provider: crate::models::MarketDataProvider::Tradestation,
             id: "client-1".into(),
             environment: TradingEnvironment::Sim,
             account_id: "SIM-1".into(),
@@ -1423,6 +1495,7 @@ mod tests {
             create_intent(
                 &path,
                 NewMutationIntent {
+                    provider: crate::models::MarketDataProvider::Tradestation,
                     id: id.clone(),
                     environment: TradingEnvironment::Sim,
                     account_id: "SIM-1".into(),

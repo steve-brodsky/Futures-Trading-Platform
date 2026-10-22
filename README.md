@@ -1,9 +1,9 @@
 # Northstar Trader
 
-Northstar Trader is a private, multi-provider desktop trading workspace. TradeStation supplies futures market data and order execution; Schwab supplies read-only equity, ETF, index, option, account, position, and order data. A React frontend talks to an embedded Rust/Tauri backend that owns OAuth, broker networking, streaming, validation, local persistence, and optional Supabase synchronization.
+Northstar Trader is a private, multi-provider desktop trading workspace. TradeStation supplies futures market data and order execution; Schwab supplies equity/ETF trading plus equity, ETF, index, option, account, position, and order data. A React frontend talks to an embedded Rust/Tauri backend that owns OAuth, broker networking, streaming, validation, local persistence, and optional Supabase synchronization.
 
 > [!CAUTION]
-> This project can submit real orders when it is connected to TradeStation LIVE. It is early-stage, private software—not financial advice or a finished commercial trading system. Develop and validate against SIM before using LIVE.
+> This project can submit real orders when it is connected to TradeStation LIVE or Schwab. Schwab equity orders always use production accounts, independently of the TradeStation SIM/LIVE switch. It is early-stage, private software—not financial advice or a finished commercial trading system. Develop and validate against SIM before using LIVE.
 
 ## Provider boundaries
 
@@ -67,9 +67,14 @@ TradeStation and Schwab authenticate, stream, and reconnect independently. Switc
 - Closing a position cancels working close-side orders, confirms they are inactive, refreshes the live quantity, and then sends the flattening market order. Working orders can also be cancelled directly.
 - Live positions/orders use streams with snapshot polling and reconnect fallbacks. Balances, beginning-of-day balances, and paginated history remain available in the provider-specific brokerage views; unresolved durable mutation outcomes are handled by the reconciliation UI in Settings.
 
-### Schwab monitoring and Options workspace
+### Schwab equity trading and Options workspace
 
-- Read-only Schwab accounts, balances, positions, today/open P&L, and recursively flattened order history. Account-activity events trigger refreshes, with polling and reconnect fallbacks.
+- Schwab accounts, balances, positions, today/open P&L, and recursively flattened order history. Account-activity events trigger refreshes, with polling and reconnect fallbacks.
+- An independent **SCHWAB LIVE** equity ticket reuses futures controls: Long/Short, dollar risk or whole shares, manual/Swing stops, and 1R/1.5R/2R targets. Long sizing uses ask; short sizing uses bid. Equity risk sizing always rounds down and blocks a budget smaller than one share's risk.
+- Regular-hours DAY market entries trigger broker-held OCO LIMIT/STOP exits. Exit duration defaults to GTC. Quotes, session calendars (including holidays/early closes), holdings, and frozen reviewed risk are revalidated natively; recognized broker preview is required even when the confirmation dialog is disabled.
+- Projected entry/stop/target lines update with quotes and ticket edits. Stop dragging resizes shares and preserves a selected R; target dragging selects a manual target. Actual position/exit lines support closing and linked protective replacement, with existing option overlays preserved.
+- One equity position/pending order per symbol/account. Original risk and bracket IDs persist locally; older GTC orders refresh across restarts. Provider-scoped mutation records block uncertain retries and offer broker-order matching. Partial fills, missing protection, and external quantity changes raise persistent alerts. Automatic break-even/trailing stops and equity journal reporting are outside this release.
+- Production release still requires connected Schwab preview/bracket contract verification. Automated validation uses fixtures and loopback HTTP mocks and never places production trades.
 - Equity entry-price and held-option strike lines on underlying charts, including option expiration/side/quantity labels and live unrealized P&L.
 - A dedicated Options workspace for Schwab equity, ETF, and index underlyings with standard expiration selection, adjustable strike depth, underlying quote, call/put bid-ask sizes, volume, open interest, delta, gamma, theta, and vega.
 - REST snapshots refresh every five minutes and are upgraded by live option updates when stream capacity is available; the UI distinguishes live, delayed, stale, and REST-only states.
