@@ -646,6 +646,11 @@ export interface ChartSessionSettings {
   londonColor: string;
 }
 
+export interface SchwabWickFilterSettings {
+  enabled: boolean;
+  maxWickPercent: number;
+}
+
 export type EconomicEventImpact = "high" | "medium" | "low" | "unrated";
 
 export interface ChartEconomicEventSettings {
@@ -691,6 +696,7 @@ export interface WorkspaceSettings {
   crosshairSyncEnabled: boolean;
   chartLabels: ChartLabelSettings;
   chartSessions: ChartSessionSettings;
+  schwabWickFilter: SchwabWickFilterSettings;
   chartEconomicEvents: ChartEconomicEventSettings;
   orderTicket: OrderTicketSettings;
   trailStop: TrailStopSettings;

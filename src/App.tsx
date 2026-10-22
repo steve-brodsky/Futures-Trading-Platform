@@ -11,6 +11,7 @@ import {
   ExternalLink, Table2, Wifi, X, Zap,
 } from "lucide-react";
 import { TradingChart, type TradingChartCapture, type TradingChartHandle } from "./components/TradingChart";
+import { SchwabWickFilterControls } from "./components/SchwabWickFilterControls";
 import { ChartPaneGrid } from "./components/ChartPaneGrid";
 import { ChartPaneErrorBoundary } from "./components/ChartPaneErrorBoundary";
 import { EntryRulesBuilder } from "./components/EntryRulesBuilder";
@@ -52,6 +53,7 @@ import { activeDrawingAlerts, applyDrawingPatch, trackDrawingAlertTransitions, t
 import { chartLayoutCapacity, chartPaneMountPlan, claimDetachedWindowCreation, clampWindowGeometry, cloneChartTab, closeDetachedWindow, defaultChartSplitRatios, detachedSourceWindowToClose, focusChartTab, MAIN_WINDOW_ID, MAX_CHART_TABS, moveTab, normalizedChartLayout, normalizeChartSplitRatio, normalizeChartWorkspace, reconcileChartWindow, rememberWindowGeometry, savedPhysicalWindowGeometry, setChartWindowLayout, setChartWindowSplitRatio, stabilizeChartWorkspace, staleDetachedWindowIds, tabInsertionIndex } from "./lib/chartWorkspace";
 import { chunkVwapRange, expandedVwapRange, isIntradayTimeframe, mergeEpochRanges, mergeVwapBars, missingEpochRanges, nySessionVwapSymbols, type EpochRange } from "./lib/vwapData";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./lib/chartSessions";
+import { DEFAULT_SCHWAB_WICK_FILTER } from "./lib/schwabWickFilter";
 import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./lib/economicEvents";
 import { crosshairEventsForTarget, type ChartCrosshairUpdate, type CrosshairSyncEvent } from "./lib/crosshair";
 import {
@@ -114,7 +116,7 @@ const defaultWorkspace: WorkspaceState = {
   drawings: {}, gexSelections: {},
   activeWorkspace: "charts", optionChain: { symbol: "SPY", strikeCount: 20 },
   watchlist: futures.filter((item) => ["MESU26", "MNQU26", "MCLU26", "MGCQ26", "MYMU26"].includes(item.symbol)), recentSymbols: [futures[0]], rightPanelOpen: false, rightPanelMode: "order-entry", autoBreakEvenRules: {}, autoTrailStopRules: {}, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, bottomPanelHeight: 360, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, trailStop: { timeframe: "1m", pivotBars: 2, offsetTicks: 1 }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, schwabWickFilter: DEFAULT_SCHWAB_WICK_FILTER, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, trailStop: { timeframe: "1m", pivotBars: 2, offsetTicks: 1 }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 const currentWindowId = api.isNative ? getCurrentWindow().label : MAIN_WINDOW_ID;
@@ -4920,6 +4922,8 @@ function TradingApp() {
       projectedEntryPrice={focused && activeOrderProjection ? projectedEntryPrice(activeOrderProjection) : undefined}
       chartLabelSettings={workspace.settings.chartLabels}
       chartSessionSettings={workspace.settings.chartSessions}
+      schwabWickFilter={workspace.settings.schwabWickFilter}
+      assetType={tab.symbol.assetType}
       economicEvents={tradingTodaySnapshot?.date === tradingTodayPresentation.economicDate ? tradingTodaySnapshot.events : []}
       economicEventSettings={workspace.settings.chartEconomicEvents}
       timeframe={tab.timeframe}
@@ -5247,6 +5251,9 @@ function TradingApp() {
     {auditLogOpen && <AuditLogModal onHealthChange={(next) => { auditHealthRef.current = next; setAuditHealth(next); }} onClose={() => { setAuditLogOpen(false); setSettingsOpen(true); }} />}
 
     {chartSettingsOpen && <Modal title="Chart settings" onClose={() => setChartSettingsOpen(false)} width={500}>
+      <SchwabWickFilterControls settings={workspace.settings.schwabWickFilter} onChange={(schwabWickFilter) => commitWorkspace((current) => ({
+        ...current, settings: { ...current.settings, schwabWickFilter },
+      }))} />
       <div className="chart-economic-event-settings">
         <header>
           <span>Timeline</span>

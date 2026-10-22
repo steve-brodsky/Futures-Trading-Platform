@@ -78,6 +78,7 @@ export function cloudPreferenceProfile(workspace: WorkspaceState): CloudPreferen
         crosshairSyncEnabled: workspace.settings.crosshairSyncEnabled,
         ...workspace.settings.chartLabels,
         sessionShading: { ...workspace.settings.chartSessions },
+        schwabWickFilter: { ...workspace.settings.schwabWickFilter },
         economicEvents: {
           ...workspace.settings.chartEconomicEvents,
           impactVisibility: { ...workspace.settings.chartEconomicEvents.impactVisibility },
@@ -195,6 +196,7 @@ export function applyCloudPreferenceProfile(current: WorkspaceState, profile: Cl
         : current.settings.crosshairSyncEnabled,
       chartLabels: { ...current.settings.chartLabels, ...chartDisplay },
       chartSessions: { ...current.settings.chartSessions, ...sessionShading },
+      schwabWickFilter: { ...current.settings.schwabWickFilter, ...object(chartDisplay?.schwabWickFilter) },
       chartEconomicEvents: {
         ...current.settings.chartEconomicEvents,
         ...economicEvents,

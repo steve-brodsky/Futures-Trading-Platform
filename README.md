@@ -27,6 +27,7 @@ TradeStation and Schwab authenticate, stream, and reconnect independently. Switc
 - Provider-aware symbol search with recent-symbol history. Futures route to TradeStation; equities, ETFs, and indexes route to Schwab.
 - Shared bar streams for matching charts and background consumers, plus provider-deduplicated quote streams for charts, trade contracts, positions, options, and the watchlist.
 - A single shared Schwab Streamer connection for equity, ETF, index, and option updates. Schwab history includes extended hours, and `1h`/`4h` bars are aggregated locally on New York calendar boundaries.
+- An optional extended-hours wick filter in Chart settings for all Schwab equity/ETF intraday charts. It caps highs/lows beyond each candle body at an adjustable percentage (default 0.10%, disabled initially), applies to chart studies, and preserves raw history, broker quotes, volume, and candles overlapping regular hours. This price-based filter cannot identify individual late trades.
 - SQLite-backed candle caches, immediate cached startup data, current history refresh, viewport-driven VWAP range loading, and lazy older-bar backfill.
 - A quota-aware TradeStation scheduler with response-header reconciliation, historical-credit pacing, trading reserves, rate-limit state, and reset-aware reconnects.
 - Exchange/local/UTC and named-market timezone choices, a current-price marker, candle countdown, scroll-to-latest control, and configurable overnight shading with uniform or separate Asia/London colors.

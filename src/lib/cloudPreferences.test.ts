@@ -6,6 +6,7 @@ import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
 import { applyCloudPreferenceProfile, cloudPreferenceProfile, preferencePollInterval, preferenceRetryDelay } from "./cloudPreferences";
 import { defaultIndicators } from "./workspace";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./chartSessions";
+import { DEFAULT_SCHWAB_WICK_FILTER } from "./schwabWickFilter";
 import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./economicEvents";
 import { DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS } from "./contractRoll";
 
@@ -51,7 +52,7 @@ function workspace(): WorkspaceState {
     settings: {
       crosshairSyncEnabled: false,
       chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 12 },
-      chartSessions: DEFAULT_CHART_SESSION_SETTINGS,
+      chartSessions: DEFAULT_CHART_SESSION_SETTINGS, schwabWickFilter: DEFAULT_SCHWAB_WICK_FILTER,
       chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS,
       orderTicket: { swingStopPivotBars: 3, swingStopOffsetTicks: 2, sizingMode: "risk", riskSizingPolicy: "strict", timeInForce: "GTC", riskAmount: 150 },
       trailStop: { timeframe: "5m", pivotBars: 4, offsetTicks: 2 },
@@ -63,6 +64,19 @@ function workspace(): WorkspaceState {
 }
 
 describe("cloud preferences", () => {
+  it("synchronizes wick settings and preserves local values when an older profile omits them", () => {
+    const local = workspace();
+    const remote = workspace();
+    remote.settings.schwabWickFilter = { enabled: true, maxWickPercent: 0.25 };
+    const profile = cloudPreferenceProfile(remote);
+    expect(profile.categories.chart_display.schwabWickFilter).toEqual(remote.settings.schwabWickFilter);
+    const merged = applyCloudPreferenceProfile(local, profile);
+    expect(merged.settings.schwabWickFilter).toEqual(remote.settings.schwabWickFilter);
+    delete profile.categories.chart_display.schwabWickFilter;
+    expect(applyCloudPreferenceProfile(merged, profile).settings.schwabWickFilter).toEqual(remote.settings.schwabWickFilter);
+    profile.categories.chart_display.schwabWickFilter = { enabled: "yes", maxWickPercent: 10 };
+    expect(applyCloudPreferenceProfile(merged, profile).settings.schwabWickFilter).toEqual({ enabled: true, maxWickPercent: 5 });
+  });
   it("serializes only explicitly synchronized fields", () => {
     const original = workspace();
     original.customMinuteTimeframes = [7, 45];

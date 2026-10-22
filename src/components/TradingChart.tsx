@@ -6,6 +6,9 @@ import {
 } from "lightweight-charts";
 import type { AlertDurationSeconds, AlertSound, Bar, ChartEconomicEventSettings, ChartKind, ChartLabelSettings, ChartSessionSettings, ChartTimezone, ChartTool, Drawing, DrawingAlertConfig, DrawingAlertDirection, DrawingAlertFrequency, DrawingPatch, EconomicEvent, GexExpirationDisplay, GexView, IndicatorConfig, JournalRiskBaseline, LineDrawing, MarketDataProvider, OrderUpdate, PointAndFigureSettings, Position, PositionDrawing, PriceOverlayIndicatorConfig, RenkoSettings, Timeframe } from "../types";
 import { ema, roundToTick, sma } from "../lib/indicators";
+import type { SchwabWickFilterSettings } from "../types";
+import { filterSchwabWicks } from "../lib/schwabWickFilter";
+import { canUpdateLastBar } from "../lib/barData";
 import { formatCandleCountdown, formatSchwabDailyCountdown } from "../lib/candleCountdown";
 import { nearestCandleExtreme, syncedCrosshairPlotTime, type ChartCrosshairUpdate } from "../lib/crosshair";
 import { formatChartTime, resolveTimezone, timezoneLabel, timezoneOptions } from "../lib/timezone";
@@ -47,6 +50,8 @@ interface Props {
   projectedEntryPrice?: number;
   chartLabelSettings: ChartLabelSettings;
   chartSessionSettings: ChartSessionSettings;
+  schwabWickFilter: SchwabWickFilterSettings;
+  assetType: string;
   economicEvents: EconomicEvent[];
   economicEventSettings: ChartEconomicEventSettings;
   timeframe: Timeframe;
@@ -131,7 +136,11 @@ function keepPositionPriceLinesOnTop(price: ISeriesApi<any>, lines: Map<string, 
   });
 }
 
-export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars, vwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, riskBaselines, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, crosshairSyncEnabled, onCrosshairSyncChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+export const TradingChart = forwardRef<TradingChartHandle, Props>(function TradingChart({ bars: rawBars, vwapBars: rawVwapBars, kind, renkoSettings, pointAndFigureSettings, magnetEnabled, symbol, provider, tradeSymbol, description, exchange, minMove, pointValue, currentPrice, projectedEntryPrice, chartLabelSettings, chartSessionSettings, schwabWickFilter, assetType, economicEvents, economicEventSettings, timeframe, timezone, indicators, gexLevels, gexView, gexExpirationDisplay, gexExpirationDates, gexStatus, gexExpirationCount, orders, positions, riskBaselines, orderProjection, onOrderProjectionChange, onOrderProjectionRestore, closingPositionIds, replacingOrderIds, onClosePosition, onReplaceOrder, loadingOlder, activeTool, drawings, onToolComplete, onCreateDrawing, onUpdateDrawing, onDeleteDrawing, initialVisibleRange, onVisibleRangeChange, crosshairSyncEnabled, onCrosshairSyncChange, onTimezoneChange, onLoadOlder }: Props, ref) {
+  const bars = useMemo(() => filterSchwabWicks(rawBars, { provider, assetType }, timeframe, schwabWickFilter),
+    [rawBars, provider, assetType, timeframe, schwabWickFilter.enabled, schwabWickFilter.maxWickPercent]);
+  const vwapBars = useMemo(() => filterSchwabWicks(rawVwapBars, { provider, assetType }, "1m", schwabWickFilter),
+    [rawVwapBars, provider, assetType, schwabWickFilter.enabled, schwabWickFilter.maxWickPercent]);
   const economicEventTooltipId = useId();
   const drawingPriceErrorId = useId();
   const host = useRef<HTMLDivElement>(null);
@@ -214,7 +223,8 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
   const plotPoints = useMemo(() => displayItems.map((item) => ({ plotTime: "plotTime" in item ? item.plotTime : item.time, sourceTime: "sourceTime" in item ? item.sourceTime : item.time })), [displayItems]);
   const liveBar = bars.at(-1);
   const syntheticLatest = kind === "renko" ? renkoBricks.at(-1) : kind === "point-and-figure" ? pointAndFigureColumns.at(-1) : undefined;
-  const latest = hovered ?? syntheticLatest ?? liveBar ?? null;
+  const hoveredTime = hovered ? "plotTime" in hovered ? hovered.plotTime : hovered.time : undefined;
+  const latest = (hoveredTime != null ? displayMap.get(hoveredTime) : undefined) ?? syntheticLatest ?? liveBar ?? null;
   const latestOpen = latest && "open" in latest ? latest.open : latest?.low ?? 0;
   const change = latest ? latest.close - latestOpen : 0;
   const candleCountdownTone = (kind === "candles" || isSynthetic) && liveBar ? liveBar.close >= liveBar.open ? "up" : "down" : kind;
@@ -824,7 +834,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
     const latestBar = bars[bars.length - 1];
     sessionShadingRef.current?.setTimes(bars.map((bar) => bar.time));
     rayPrimitiveRef.current?.setTimePoints(plotPoints);
-    const realtimeOnly = !isSynthetic && prior.length > 0 && bars[0].time === prior[0].time && bars.length >= prior.length && bars.length <= prior.length + 1;
+    const realtimeOnly = !isSynthetic && canUpdateLastBar(prior, bars);
     if (realtimeOnly) {
       if (kind === "candles") price.update({ time: asTime(latestBar.time), open: latestBar.open, high: latestBar.high, low: latestBar.low, close: latestBar.close });
       else price.update({ time: asTime(latestBar.time), value: latestBar.close });
@@ -850,7 +860,7 @@ export const TradingChart = forwardRef<TradingChartHandle, Props>(function Tradi
       if (range && priorAnchor != null && plotPoints.length) {
         const nextAnchorIndex = plotPoints.reduce((best, item, index) => Math.abs(item.sourceTime - priorAnchor) < Math.abs(plotPoints[best].sourceTime - priorAnchor) ? index : best, 0);
         const shift = nextAnchorIndex - priorAnchorIndex;
-        if (shift) chart.timeScale().setVisibleLogicalRange({ from: range.from + shift, to: range.to + shift });
+        chart.timeScale().setVisibleLogicalRange({ from: range.from + shift, to: range.to + shift });
       }
     }
 

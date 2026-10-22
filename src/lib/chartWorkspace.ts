@@ -11,6 +11,7 @@ import { normalizePointAndFigureSettings, normalizeRenkoSettings } from "./price
 import { isValidPositionDrawing } from "./positionDrawing";
 import { normalizeDrawingAlert, sameDrawingAlert } from "./drawingAlerts";
 import { normalizeChartSessionSettings } from "./chartSessions";
+import { normalizeSchwabWickFilter } from "./schwabWickFilter";
 import { normalizeChartEconomicEventSettings } from "./economicEvents";
 import { normalizeContractRollAlertSettings } from "./contractRoll";
 import { normalizeCustomMinuteTimeframes, normalizeTimeframe } from "./timeframes";
@@ -424,6 +425,7 @@ export function normalizeChartWorkspace(saved: unknown, fallback: WorkspaceState
           : fallback.settings.chartLabels.fontSize,
       },
       chartSessions: normalizeChartSessionSettings(savedChartSessions, fallback.settings.chartSessions),
+      schwabWickFilter: normalizeSchwabWickFilter(value.settings?.schwabWickFilter, fallback.settings.schwabWickFilter),
       chartEconomicEvents: normalizeChartEconomicEventSettings(savedChartEconomicEvents, fallback.settings.chartEconomicEvents),
       orderTicket: {
         swingStopPivotBars: savedOrderTicket?.swingStopPivotBars === 2 || savedOrderTicket?.swingStopPivotBars === 3
@@ -590,6 +592,8 @@ export function stabilizeChartWorkspace(current: WorkspaceState, incoming: Works
     && current.settings.chartSessions.overnightColor === incoming.settings.chartSessions.overnightColor
     && current.settings.chartSessions.asiaColor === incoming.settings.chartSessions.asiaColor
     && current.settings.chartSessions.londonColor === incoming.settings.chartSessions.londonColor
+    && current.settings.schwabWickFilter.enabled === incoming.settings.schwabWickFilter.enabled
+    && current.settings.schwabWickFilter.maxWickPercent === incoming.settings.schwabWickFilter.maxWickPercent
     && current.settings.chartEconomicEvents.enabled === incoming.settings.chartEconomicEvents.enabled
     && current.settings.chartEconomicEvents.impactVisibility.high === incoming.settings.chartEconomicEvents.impactVisibility.high
     && current.settings.chartEconomicEvents.impactVisibility.medium === incoming.settings.chartEconomicEvents.impactVisibility.medium

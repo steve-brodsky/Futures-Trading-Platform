@@ -3,6 +3,7 @@ import type { FailedBreakoutIndicatorConfig, PriceOverlayIndicatorConfig, Worksp
 import { defaultEntryRules } from "./entryRules";
 import { defaultEntryRuleAlerts } from "./entryRuleAlerts";
 import { DEFAULT_CHART_SESSION_SETTINGS } from "./chartSessions";
+import { DEFAULT_SCHWAB_WICK_FILTER } from "./schwabWickFilter";
 import { DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS } from "./economicEvents";
 import { defaultEma200Alert } from "./emaAlerts";
 import { defaultPointAndFigureSettings, defaultRenkoSettings } from "./priceBasedCharts";
@@ -20,10 +21,22 @@ const fallback: WorkspaceState = {
   activeWorkspace: "charts",
   optionChain: { symbol: "SPY", strikeCount: 20 },
   watchlist: [], recentSymbols: [], rightPanelOpen: false, rightPanelMode: "order-entry", autoBreakEvenRules: {}, autoTrailStopRules: {}, bottomTab: "positions", bottomBrokerPanel: "combined", bottomPanelOpen: false, confirmOrders: true, entryRules: defaultEntryRules(), entryRuleAlerts: defaultEntryRuleAlerts(), entryRuleLock: { enabled: false },
-  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, trailStop: { timeframe: "1m", pivotBars: 2, offsetTicks: 1 }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
+  settings: { crosshairSyncEnabled: false, chartLabels: { showEma200TabDots: true, showDollarAmount: true, showRMultiple: true, fontSize: 11 }, chartSessions: DEFAULT_CHART_SESSION_SETTINGS, schwabWickFilter: DEFAULT_SCHWAB_WICK_FILTER, chartEconomicEvents: DEFAULT_CHART_ECONOMIC_EVENT_SETTINGS, orderTicket: { swingStopPivotBars: 2, swingStopOffsetTicks: 1, sizingMode: "contracts", riskSizingPolicy: "strict", timeInForce: "GTC" }, trailStop: { timeframe: "1m", pivotBars: 2, offsetTicks: 1 }, contractRollAlerts: DEFAULT_CONTRACT_ROLL_ALERT_SETTINGS, truthSocialAlerts: { enabled: false }, journal: { commissionPerContractSide: 0.4, schwabOptionFeePerContractSide: 0.65 } },
 };
 
 describe("chart workspace", () => {
+  it("restores wick settings from persistence and retains changes across window broadcasts", () => {
+    const legacy = { ...fallback, settings: { ...fallback.settings, schwabWickFilter: undefined } };
+    expect(normalizeChartWorkspace(legacy, fallback).settings.schwabWickFilter).toEqual(DEFAULT_SCHWAB_WICK_FILTER);
+    const current = normalizeChartWorkspace(fallback, fallback);
+    const enabled = { ...current, settings: { ...current.settings, schwabWickFilter: { enabled: true, maxWickPercent: 0.25 } } };
+    const restored = normalizeChartWorkspace(JSON.parse(JSON.stringify(enabled)), fallback);
+    expect(stabilizeChartWorkspace(current, restored).settings.schwabWickFilter).toEqual({ enabled: true, maxWickPercent: 0.25 });
+    const revised = { ...enabled, settings: { ...enabled.settings, schwabWickFilter: { enabled: true, maxWickPercent: 0.5 } } };
+    expect(stabilizeChartWorkspace(enabled, revised).settings.schwabWickFilter.maxWickPercent).toBe(0.5);
+    const disabled = { ...revised, settings: { ...revised.settings, schwabWickFilter: { enabled: false, maxWickPercent: 0.5 } } };
+    expect(stabilizeChartWorkspace(revised, disabled).settings.schwabWickFilter.enabled).toBe(false);
+  });
   it("normalizes saved custom minute timeframes and restores only listed custom tab values", () => {
     const saved = normalizeChartWorkspace({
       ...fallback,
